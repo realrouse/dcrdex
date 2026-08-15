@@ -136,6 +136,8 @@ func (rig *testRig) mineAlpha() error {
 	switch rig.symbol {
 	case "zec", "firo", "doge":
 		tmuxWindow = rig.symbol + "-harness:4"
+	case "lbc":
+		tmuxWindow = rig.symbol + "-harness:6"
 	default:
 		tmuxWindow = rig.symbol + "-harness:2"
 	}
@@ -166,6 +168,9 @@ type Config struct {
 	SPV          bool
 	FirstWallet  *WalletName
 	SecondWallet *WalletName
+	// MineAfterSend mines a block after Send and before Withdraw. Needed when
+	// the external wallet still lists mempool-spent outputs as unspent.
+	MineAfterSend bool
 }
 
 func Run(t *testing.T, cfg *Config) {
@@ -570,6 +575,10 @@ func Run(t *testing.T, cfg *Config) {
 		t.Fatalf("Expected %d got %d", cfg.LotSize, coin.Value())
 	}
 	tLogger.Infof("Sent with %s", coin.String())
+
+	if cfg.MineAfterSend {
+		mine()
+	}
 
 	// Test Withdraw.
 	withdrawer, _ := rig.secondWallet.Wallet.(asset.Withdrawer)
