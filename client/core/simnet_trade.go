@@ -45,6 +45,7 @@ import (
 	"decred.org/dcrdex/client/asset/doge"
 	"decred.org/dcrdex/client/asset/eth"
 	"decred.org/dcrdex/client/asset/firo"
+	"decred.org/dcrdex/client/asset/lbc"
 	"decred.org/dcrdex/client/asset/ltc"
 	"decred.org/dcrdex/client/asset/polygon"
 	"decred.org/dcrdex/client/asset/zcl"
@@ -58,6 +59,7 @@ import (
 	dexdgb "decred.org/dcrdex/dex/networks/dgb"
 	dexdoge "decred.org/dcrdex/dex/networks/doge"
 	dexeth "decred.org/dcrdex/dex/networks/eth"
+	dexlbc "decred.org/dcrdex/dex/networks/lbc"
 	"decred.org/dcrdex/dex/order"
 	"github.com/btcsuite/btcd/chaincfg/chainhash"
 	"github.com/btcsuite/btcd/wire"
@@ -2107,7 +2109,7 @@ func newHarnessCtrl(assetID uint32) *harnessCtrl {
 		baseChainSymbol = symbolParts[1]
 	}
 	switch assetID {
-	case dcr.BipID, btc.BipID, ltc.BipID, bch.BipID, doge.BipID, firo.BipID, zec.BipID, zcl.BipID, dgb.BipID, dash.BipID:
+	case dcr.BipID, btc.BipID, ltc.BipID, bch.BipID, doge.BipID, firo.BipID, zec.BipID, zcl.BipID, dgb.BipID, dash.BipID, lbc.BipID:
 		return &harnessCtrl{
 			dir:     filepath.Join(dextestDir, baseChainSymbol, "harness-ctl"),
 			fundCmd: "./alpha",
@@ -2158,6 +2160,7 @@ var cloneTypes = map[uint32]string{
 	133: "zcashdRPC",
 	147: "zclassicdRPC",
 	5:   "dashdRPC",
+	140: "lbcwalletRPC", // LBRY Credits
 }
 
 // accountBIPs is a map of account based assets. Used in fee estimation.
@@ -2318,9 +2321,9 @@ func btcCloneWallet(assetID uint32, node string, wt SimWalletType) (*tWallet, er
 	}
 
 	switch assetID {
-	case doge.BipID, zec.BipID, zcl.BipID, firo.BipID:
-	// dogecoind, zcashd and firod don't support > 1 wallet, so gamma and delta
-	// have their own nodes.
+	case doge.BipID, zec.BipID, zcl.BipID, firo.BipID, lbc.BipID:
+	// dogecoind, zcashd, firod and lbcwallet don't support > 1 wallet, so gamma
+	// and delta have their own nodes.
 	default:
 		switch node {
 		case "gamma":
@@ -2348,6 +2351,9 @@ func btcCloneWallet(assetID uint32, node string, wt SimWalletType) (*tWallet, er
 	case dgb.BipID:
 		cfg["fallbackfee"] = fmt.Sprintf("%f", dexdgb.DefaultFee*1000/1e8)
 		cfg["feeratelimit"] = fmt.Sprintf("%f", dexdgb.DefaultFeeRateLimit*1000/1e8)
+	case lbc.BipID:
+		cfg["fallbackfee"] = fmt.Sprintf("%f", dexlbc.DefaultFee*1000/1e8)
+		cfg["feeratelimit"] = fmt.Sprintf("%f", dexlbc.DefaultFeeRateLimit*1000/1e8)
 	}
 
 	return &tWallet{
@@ -2359,6 +2365,21 @@ func btcCloneWallet(assetID uint32, node string, wt SimWalletType) (*tWallet, er
 
 func dogeWallet(node string) (*tWallet, error) {
 	return btcCloneWallet(doge.BipID, node, WTCoreClone)
+}
+
+func lbcWallet(node string) (*tWallet, error) {
+	tw, err := btcCloneWallet(lbc.BipID, node, WTCoreClone)
+	if err != nil {
+		return nil, err
+	}
+	// lbcwallet is always passphrase-protected (harness sets "abc"), including
+	// gamma/delta which btcCloneWallet would otherwise leave with a nil pass.
+	// Also force fund=true: each node has its own chain view, and gamma often
+	// misses harness pre-funding if peers are slow to sync. Re-funding the
+	// client's deposit address after connect is reliable.
+	tw.pass = []byte("abc")
+	tw.fund = true
+	return tw, nil
 }
 
 func dashWallet(node string) (*tWallet, error) {
@@ -2419,6 +2440,8 @@ func (s *simulationTest) newClient(name string, cl *SimClient) (*simulationClien
 			tw, err = dogeWallet(node)
 		case dgb.BipID:
 			tw, err = dgbWallet(node)
+		case lbc.BipID:
+			tw, err = lbcWallet(node)
 		case dash.BipID:
 			tw, err = dashWallet(node)
 		case firo.BipID:
