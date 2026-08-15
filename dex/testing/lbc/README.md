@@ -51,11 +51,11 @@ go test -v -count=1 -tags=harness -run TestWallet
 
 ## Simnet trade test
 
-With the DCR harness, this LBC harness, and dcrdex (`dcr_lbc`) running:
+With the DCR harness, this LBC harness, and dcrdex (`lbc_dcr`) running:
 
 ```bash
 cd client/cmd/simnet-trade-tests
-./run dcrlbc -t success -runonce
+./run lbcdcr -t success -runonce
 ```
 
 ## Extra scripts

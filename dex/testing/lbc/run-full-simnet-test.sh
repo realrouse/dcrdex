@@ -3,7 +3,7 @@
 # Full local simnet test for LBC on DCRDEX (Ubuntu/Debian-friendly)
 #
 # Installs prerequisites (optional), builds tools, starts DCR + LBC harnesses,
-# starts the dcrdex server with a DCR/LBC market, runs:
+# starts the dcrdex server with an LBC/DCR market, runs:
 #   - unit tests
 #   - client LBC wallet livetest (fund / swap / redeem / refund / send / withdraw)
 #   - simnet-trade-tests "success" (deposits via harness funding, bonds, full swap)
@@ -275,10 +275,10 @@ start_lbc_harness() {
 }
 
 # ---------------------------------------------------------------------------
-# 4. Start dcrdex server with DCR/LBC market
+# 4. Start dcrdex server with LBC/DCR market
 # ---------------------------------------------------------------------------
 start_dcrdex() {
-  log "Building and starting dcrdex server (simnet DCR/LBC)..."
+  log "Building and starting dcrdex server (simnet LBC/DCR)..."
   local app="${HOME}/dextest/dcrdex"
   mkdir -p "${app}"
   sudo -u postgres psql -c "DROP DATABASE IF EXISTS dcrdex_simnet_test;" \
@@ -320,8 +320,8 @@ EOF
 {
   "markets": [
     {
-      "base": "DCR_simnet",
-      "quote": "LBC_simnet",
+      "base": "LBC_simnet",
+      "quote": "DCR_simnet",
       "lotSize": 100000000,
       "rateStep": 1000000,
       "epochDuration": 15000,
@@ -372,8 +372,8 @@ EOF
 
   # wait for market
   for i in $(seq 1 60); do
-    if grep -q 'Market dcr_lbc now accepting orders' "${app}/dcrdex-stdout.log" 2>/dev/null; then
-      log "dcrdex: market dcr_lbc accepting orders"
+    if grep -q 'Market lbc_dcr now accepting orders' "${app}/dcrdex-stdout.log" 2>/dev/null; then
+      log "dcrdex: market lbc_dcr accepting orders"
       return 0
     fi
     if ! kill -0 "$(cat "${app}/dcrdex.pid")" 2>/dev/null; then
@@ -383,7 +383,7 @@ EOF
     sleep 1
   done
   tail -50 "${app}/dcrdex-stdout.log" || true
-  die "timeout waiting for dcr_lbc market"
+  die "timeout waiting for lbc_dcr market"
 }
 
 # ---------------------------------------------------------------------------
@@ -412,7 +412,7 @@ run_level2() {
 }
 
 run_level3_trade() {
-  log "LEVEL 3: simnet-trade-tests (deposits/bonds/swap) — dcrlbc success"
+  log "LEVEL 3: simnet-trade-tests (deposits/bonds/swap) — lbcdcr success"
   cd "${REPO_DIR}/client/cmd/simnet-trade-tests"
   # ensure wallets unlocked (lbcwallet locks after timeout)
   for w in alpha beta gamma; do
@@ -422,7 +422,7 @@ run_level3_trade() {
   ensure_lbc_funded beta 15
   ensure_lbc_funded gamma 15
   log "Pre-trade LBC balances: alpha=$(lbc_wallet_balance alpha) beta=$(lbc_wallet_balance beta) gamma=$(lbc_wallet_balance gamma)"
-  ./run dcrlbc -t success -runonce -debug
+  ./run lbcdcr -t success -runonce -debug
   log "LEVEL 3 PASS (success trade)"
 }
 
@@ -435,7 +435,7 @@ import sys,json
 c=json.load(sys.stdin)
 syms={a['symbol'] for a in c['assets']}
 assert 'dcr' in syms and 'lbc' in syms, syms
-assert any(m['name']=='dcr_lbc' for m in c['markets']), c['markets']
+assert any(m['name']=='lbc_dcr' for m in c['markets']), c['markets']
 print('admin config OK: assets', sorted(syms), 'markets', [m['name'] for m in c['markets']])
 "
 }

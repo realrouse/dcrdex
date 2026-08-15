@@ -138,7 +138,7 @@ PG_PASS=dexpass ./harness.sh
 
 `genmarkets.sh` auto-includes **LBC** when `~/dextest/lbc/harness-ctl/alpha-node getblockchaininfo` succeeds:
 
-- Market: **DCR_simnet / LBC_simnet**
+- Market: **LBC_simnet / DCR_simnet** (`lbc_dcr` — buy/sell LBC)
 - Asset config: `~/dextest/lbc/alpha/alpha-node.conf`
 
 ### 3e. Verify server sees both assets
@@ -161,7 +161,7 @@ go build -o bisonw .
 # Point LBC external wallet at ~/dextest/lbc/alpha/alpha.conf
 # Point DCR wallet at dcr harness trading wallets
 # Register on simnet DEX 127.0.0.1:17273 with ~/dextest/dcrdex/rpc.cert
-# Place a small DCR/LBC order if market is live
+# Place a small LBC/DCR order if market is live
 ```
 
 ### 3g. Shutdown
@@ -200,6 +200,6 @@ go build -o bisonw .
 - [ ] Level 1 unit/build
 - [ ] Level 2 harness + `TestWallet` (swap/redeem/refund)
 - [ ] Level 3 dcrdex starts with DCR + LBC markets, no backend panics
-- [ ] (Optional) Manual order on simnet DCR/LBC
+- [ ] (Optional) Manual order on simnet LBC/DCR
 
 Questions about LBC chain params / wallet RPCs: ask Ben / LBRY foundation.

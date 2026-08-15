@@ -493,8 +493,8 @@ if [ $LBC_ON -eq 0 ]; then
     cat << EOF >> "${FILEPATH}"
         },
         {
-            "base": "DCR_simnet",
-            "quote": "LBC_simnet",
+            "base": "LBC_simnet",
+            "quote": "DCR_simnet",
             "lotSize": 100000000,
             "rateStep": 1000000,
             "epochDuration": ${EPOCH_DURATION},

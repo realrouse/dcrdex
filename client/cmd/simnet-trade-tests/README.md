@@ -62,7 +62,7 @@ Run `./run help` to see all pre-configured pairs and available flags.
 | `ltcelectrumeth`   | LTC-ETH         | LTC Electrum, ETH native      |
 | `dcrdash`          | DCR-DASH        | RPC wallets                   |
 | `dcrdoge`          | DCR-DOGE        | RPC wallets                   |
-| `dcrlbc`           | DCR-LBC         | LBC beta/gamma wallets        |
+| `lbcdcr` / `dcrlbc` | LBC-DCR        | LBC base; beta/gamma wallets  |
 | `dcrdgb`           | DCR-DGB         | RPC wallets                   |
 | `dcreth`           | DCR-ETH         | DCR RPC, ETH native           |
 | `dcrfiro`          | DCR-FIRO        | RPC wallets                   |
