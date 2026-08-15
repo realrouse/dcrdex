@@ -326,8 +326,12 @@ type TxInSigner func(tx *wire.MsgTx, idx int, subScript []byte, hashType txscrip
 
 // BTCCloneCFG holds clone specific parameters.
 type BTCCloneCFG struct {
-	WalletCFG          *asset.WalletConfig
-	MinNetworkVersion  uint64
+	WalletCFG         *asset.WalletConfig
+	MinNetworkVersion uint64
+	// MinProtocolVersion, if non-zero, overrides the default Bitcoin peer
+	// protocol version check (70015). Some clones (e.g. LBC/lbcd) report a
+	// lower protocolversion while still supporting required RPCs.
+	MinProtocolVersion uint64
 	MinElectrumVersion dex.Semver
 	WalletInfo         *asset.WalletInfo
 	Symbol             string
@@ -405,6 +409,9 @@ type BTCCloneCFG struct {
 	// SingularWallet signals that the node software supports only one wallet,
 	// so the RPC endpoint does not have a /wallet/{walletname} path.
 	SingularWallet bool
+	// OptionalWalletInfo allows Connect to succeed if getwalletinfo is
+	// unimplemented (e.g. lbcwallet). Descriptors are assumed false.
+	OptionalWalletInfo bool
 	// UnlockSpends manually unlocks outputs as they are spent. Most assets will
 	// unlock wallet outputs automatically as they are spent.
 	UnlockSpends bool
@@ -1224,7 +1231,9 @@ func newRPCWallet(requester RawRequester, cfg *BTCCloneCFG, parsedCfg *RPCWallet
 		deserializeBlock:     blockDeserializer,
 		legacyRawSends:       cfg.LegacyRawFeeLimit,
 		minNetworkVersion:    cfg.MinNetworkVersion,
+		minProtocolVersion:   cfg.MinProtocolVersion,
 		minDescriptorVersion: descriptorVersion,
+		optionalWalletInfo:   cfg.OptionalWalletInfo,
 
 		log:             cfg.Logger.SubLogger("RPC"),
 		chainParams:     cfg.ChainParams,
