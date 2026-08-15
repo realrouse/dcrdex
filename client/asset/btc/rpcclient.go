@@ -108,7 +108,9 @@ type rpcCore struct {
 	stringAddr           dexbtc.AddressStringer
 	legacyRawSends       bool
 	minNetworkVersion    uint64
+	minProtocolVersion   uint64
 	minDescriptorVersion uint64
+	optionalWalletInfo   bool
 
 	log             dex.Logger
 	chainParams     *chaincfg.Params
@@ -175,8 +177,12 @@ func (wc *rpcClient) Connect(ctx context.Context, _ *sync.WaitGroup) error {
 	}
 	// TODO: codeVer is actually asset-dependent. Zcash, for example, is at
 	// 170100. So we're just lucking out here, really.
-	if codeVer < minProtocolVersion {
-		return fmt.Errorf("node software out of date. version %d is less than minimum %d", codeVer, minProtocolVersion)
+	minProto := wc.minProtocolVersion
+	if minProto == 0 {
+		minProto = minProtocolVersion
+	}
+	if codeVer < minProto {
+		return fmt.Errorf("node software out of date. version %d is less than minimum %d", codeVer, minProto)
 	}
 	chainInfo, err := wc.getBlockchainInfo()
 	if err != nil {
@@ -187,7 +193,12 @@ func (wc *rpcClient) Connect(ctx context.Context, _ *sync.WaitGroup) error {
 	}
 	wiRes, err := wc.GetWalletInfo()
 	if err != nil {
-		return fmt.Errorf("getwalletinfo failure: %w", err)
+		if !wc.optionalWalletInfo {
+			return fmt.Errorf("getwalletinfo failure: %w", err)
+		}
+		wc.log.Warnf("getwalletinfo unavailable (%v); assuming non-descriptor wallet", err)
+		wc.descriptors = false
+		return nil
 	}
 	wc.descriptors = wiRes.Descriptors
 	if wc.descriptors {
