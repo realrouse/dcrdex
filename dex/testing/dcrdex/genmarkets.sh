@@ -53,6 +53,9 @@ ZCL_ON=$?
 ~/dextest/dgb/harness-ctl/alpha getblockchaininfo &> /dev/null
 DGB_ON=$?
 
+~/dextest/lbc/harness-ctl/alpha-node getblockchaininfo &> /dev/null
+LBC_ON=$?
+
 ~/dextest/dash/harness-ctl/alpha getblockchaininfo &> /dev/null
 DASH_ON=$?
 
@@ -486,6 +489,21 @@ EOF
 else echo "Digibyte is not running. Configuring dcrdex markets without DGB."
 fi
 
+if [ $LBC_ON -eq 0 ]; then
+    cat << EOF >> "${FILEPATH}"
+        },
+        {
+            "base": "DCR_simnet",
+            "quote": "LBC_simnet",
+            "lotSize": 100000000,
+            "rateStep": 1000000,
+            "epochDuration": ${EPOCH_DURATION},
+            "marketBuyBuffer": 1.2,
+            "parcelSize": 4
+EOF
+else echo "LBC is not running. Configuring dcrdex markets without LBC."
+fi
+
 if [ $DASH_ON -eq 0 ]; then
     cat << EOF >> "${FILEPATH}"
         },
@@ -738,6 +756,20 @@ if [ $DGB_ON -eq 0 ]; then
             "swapConf": 1,
             "configPath": "${TEST_ROOT}/dgb/alpha/alpha.conf",
             "bondAmt": 20000000000,
+            "bondConfs": 1
+EOF
+fi
+
+if [ $LBC_ON -eq 0 ]; then
+    cat << EOF >> "${FILEPATH}"
+         },
+        "LBC_simnet": {
+            "bip44symbol": "lbc",
+            "network": "simnet",
+            "maxFeeRate": 100,
+            "swapConf": 1,
+            "configPath": "${TEST_ROOT}/lbc/alpha/alpha-node.conf",
+            "bondAmt": 1000000000,
             "bondConfs": 1
 EOF
 fi
