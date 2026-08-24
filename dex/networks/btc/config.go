@@ -55,6 +55,12 @@ func AliasRPCPassword(settings map[string]string) {
 			settings["rpcpassword"] = p
 		}
 	}
+	// lbcwallet uses rpclisten; bisonw/bitcoind use rpcbind.
+	if settings["rpcbind"] == "" {
+		if l := settings["rpclisten"]; l != "" {
+			settings["rpcbind"] = l
+		}
+	}
 }
 
 func CheckRPCConfig(cfg *RPCConfig, name string, network dex.Network, ports NetPorts) error {
