@@ -2661,7 +2661,10 @@ func (btc *baseWallet) fundMultiSplitTx(
 
 	if maxLock > 0 {
 		totalSize := inputsSize + splitTxSizeWithoutInputs
-		if totalOutputRequired+(totalSize*splitTxFeeRate) > maxLock {
+		need := totalOutputRequired + totalSize*splitTxFeeRate
+		if need > maxLock {
+			btc.log.Warnf("multi-split maxLock %d < need %d (required=%d fee=%d)",
+				maxLock, need, totalOutputRequired, totalSize*splitTxFeeRate)
 			return false, nil, nil
 		}
 	}
@@ -2762,6 +2765,13 @@ func (btc *baseWallet) fundMultiWithSplit(keep, maxLock uint64, values []*asset.
 		return nil, nil, 0, fmt.Errorf("error getting spendable utxos: %w", err)
 	}
 
+	if splitTxFeeRate == 0 {
+		splitTxFeeRate = btc.targetFeeRateWithFallback(1, 0)
+		if splitTxFeeRate == 0 {
+			splitTxFeeRate = 1
+		}
+	}
+
 	canFund, splitCoins, splitSpents := btc.fundMultiSplitTx(values, utxos, splitTxFeeRate, maxFeeRate, splitBuffer, keep, maxLock)
 	if !canFund {
 		var avail uint64
@@ -2769,6 +2779,13 @@ func (btc *baseWallet) fundMultiWithSplit(keep, maxLock uint64, values []*asset.
 			avail += u.Amount
 		}
 		return nil, nil, 0, fmt.Errorf("cannot fund all with split: %d available in %d utxos (locked coins from cancelled orders may still be locked in the wallet)", avail, len(utxos))
+	}
+
+	var swapInputSize uint64
+	if btc.segwit {
+		swapInputSize = dexbtc.RedeemP2WPKHInputTotalSize
+	} else {
+		swapInputSize = dexbtc.RedeemP2PKHInputSize
 	}
 
 	remainingUTXOs := utxos
@@ -2784,9 +2801,24 @@ func (btc *baseWallet) fundMultiWithSplit(keep, maxLock uint64, values []*asset.
 
 	var totalFunded uint64
 
+	// Don't consume a fat UTXO as a single-order funder (e.g. 400k LBC for
+	// one 1000 LBC lot). Split it into lot-sized outputs instead.
+	skipNibble := false
+	if _, fat := btc.cm.OrderWithLeastOverFund(maxLock, maxFeeRate, values[:1], utxos); len(fat) > 0 {
+		oneReq, _ := btc.fundsRequiredForMultiOrders(values[:1], maxFeeRate, splitBuffer, swapInputSize)
+		if SumUTXOs(fat) > oneReq[0]*3 {
+			skipNibble = true
+			btc.log.Infof("Splitting %d %s orders from fat UTXO(s) worth %s rather than overlocking",
+				len(values), btc.symbol, amount(SumUTXOs(fat)))
+		}
+	}
+
 	// Find each of the orders that can be funded without being included
 	// in the split transaction.
 	for range values {
+		if skipNibble {
+			break
+		}
 		// First find the order the can be funded with the least overlock.
 		// If there is no order that can be funded without going over the
 		// maxLock limit, or not leaving enough for bond reserves, then all
@@ -2834,6 +2866,8 @@ func (btc *baseWallet) fundMultiWithSplit(keep, maxLock uint64, values []*asset.
 	// This should always be true, otherwise this function would not have been
 	// called.
 	if len(remainingOrders) > 0 {
+		btc.log.Infof("Broadcasting multi-split for %d %s orders (%d input coins)",
+			len(remainingOrders), btc.symbol, len(splitCoins))
 		splitOutputCoins, splitFees, err = btc.submitMultiSplitTx(splitCoins,
 			splitSpents, remainingOrders, maxFeeRate, splitTxFeeRate, splitBuffer)
 		if err != nil {
