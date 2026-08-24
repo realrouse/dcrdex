@@ -239,7 +239,7 @@ func (wc *rpcClient) Reconfigure(cfg *asset.WalletConfig, currentAddress string)
 	// If the RPC configuration has changed, try to update the client.
 	oldCfg := wc.rpcConfig
 	if *newCfg != *oldCfg {
-		cl, err := newRPCConnection(parsedCfg, wc.cloneParams.SingularWallet)
+		cl, err := newRPCConnection(parsedCfg, wc.cloneParams.SingularWallet, wc.cloneParams.RPCUseTLS, wc.cloneParams.RPCTLSCert)
 		if err != nil {
 			return false, fmt.Errorf("error creating RPC client with new credentials: %v", err)
 		}

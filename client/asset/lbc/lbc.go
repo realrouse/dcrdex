@@ -8,6 +8,8 @@ import (
 	"fmt"
 	"math"
 	"net"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -63,6 +65,17 @@ var (
 			Description:   "lbcwallet RPC port (9244), not lbcd 9245",
 			DefaultValue:  "9244",
 			ShowByDefault: true,
+		},
+		{
+			Key:         "nontls",
+			DisplayName: "Disable TLS",
+			Description: "Only if lbcwallet.conf has noservertls=1. Leave off for stock lbcwallet (HTTPS).",
+			IsBoolean:   true,
+		},
+		{
+			Key:         "rpccert",
+			DisplayName: "TLS certificate",
+			Description: "Path to lbcwallet rpc.cert (default ~/.lbcwallet/rpc.cert)",
 		},
 	}, []*asset.ConfigOption{
 		{
@@ -153,6 +166,10 @@ func NewWallet(cfg *asset.WalletConfig, logger dex.Logger, network dex.Network) 
 	if err := pingLBCWalletRPC(cfg.Settings); err != nil {
 		return nil, err
 	}
+	useTLS, tlsCert, err := lbcRPCUseTLS(cfg.Settings)
+	if err != nil {
+		return nil, err
+	}
 
 	var params *chaincfg.Params
 	switch network {
@@ -185,6 +202,8 @@ func NewWallet(cfg *asset.WalletConfig, logger dex.Logger, network dex.Network) 
 		Network:             network,
 		ChainParams:         params,
 		Ports:               ports,
+		RPCUseTLS:           useTLS,
+		RPCTLSCert:          tlsCert,
 		DefaultFallbackFee:  dexlbc.DefaultFee,
 		DefaultFeeRateLimit: dexlbc.DefaultFeeRateLimit,
 		// lbcwallet has no getwalletinfo / getbalances; use getbalance.
@@ -225,7 +244,6 @@ func NewWallet(cfg *asset.WalletConfig, logger dex.Logger, network dex.Network) 
 		},
 	}
 
-	var err error
 	w, err = btc.BTCCloneWallet(cloneCFG)
 	return w, err
 }
@@ -250,4 +268,20 @@ func pingLBCWalletRPC(settings map[string]string) error {
 	}
 	_ = c.Close()
 	return nil
+}
+
+func lbcRPCUseTLS(settings map[string]string) (bool, []byte, error) {
+	switch strings.ToLower(strings.TrimSpace(settings["nontls"])) {
+	case "1", "true", "yes":
+		return false, nil, nil
+	}
+	certPath := settings["rpccert"]
+	if certPath == "" {
+		certPath = filepath.Join(filepath.Dir(dexbtc.SystemConfigPath("lbcwallet")), "rpc.cert")
+	}
+	pem, err := os.ReadFile(certPath)
+	if err != nil {
+		return false, nil, fmt.Errorf("lbcwallet RPC uses TLS by default; cannot read %s: %w. Start lbcwallet so it writes rpc.cert, or add noservertls=1 to lbcwallet.conf and enable Disable TLS here", certPath, err)
+	}
+	return true, pem, nil
 }
