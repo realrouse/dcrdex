@@ -1816,6 +1816,49 @@ func testFundMultiOrder(t *testing.T, segwit bool, walletType string) {
 				nil,
 			},
 		},
+		{ // one fat UTXO must still split when bond reserves would overlock it
+			name: "fat utxo split despite bond reserves",
+			multiOrder: &asset.MultiOrder{
+				Values: []*asset.MultiOrderValue{
+					{Value: 1e6, MaxSwapCount: 1},
+					{Value: 1e6, MaxSwapCount: 1},
+				},
+				MaxFeeRate:    maxFeeRate,
+				FeeSuggestion: feeSuggestion,
+				Options: map[string]string{
+					multiSplitKey: "true",
+				},
+			},
+			utxos: []*ListUnspentResult{
+				{
+					Confirmations: 1,
+					Spendable:     true,
+					TxID:          txIDs[0],
+					RedeemScript:  nil,
+					ScriptPubKey:  scriptPubKeys(0),
+					Address:       addresses(0),
+					Amount:        50e6 / 1e8,
+					Vout:          0,
+				},
+			},
+			bondReserves:    1e6,
+			balance:         50e6,
+			expectSendRawTx: true,
+			expectedInputs: []*wire.TxIn{
+				{
+					PreviousOutPoint: wire.OutPoint{
+						Hash:  *txHashes[0],
+						Index: 0,
+					},
+				},
+			},
+			expectedOutputs: []*wire.TxOut{
+				wire.NewTxOut(requiredForOrder(1e6, 1), []byte{}),
+				wire.NewTxOut(requiredForOrder(1e6, 1), []byte{}),
+			},
+			expectedSplitFee: expectedSplitFee(1, 3),
+			expectedChange:   50e6 - uint64(requiredForOrder(1e6, 1))*2 - expectedSplitFee(1, 3),
+		},
 	}
 
 	for _, test := range tests {

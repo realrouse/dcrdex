@@ -608,7 +608,8 @@ func (wc *rpcClient) ChangeAddress(ctx context.Context) (btcutil.Address, error)
 	var err error
 	switch {
 	case wc.omitAddressType:
-		err = Call(ctx, wc.requester(), methodChangeAddress, nil, &addrStr)
+		// lbcwallet getrawchangeaddress requires an account name.
+		err = Call(ctx, wc.requester(), methodChangeAddress, anylist{"default"}, &addrStr)
 	case wc.segwit:
 		err = Call(ctx, wc.requester(), methodChangeAddress, anylist{"bech32"}, &addrStr)
 	default:

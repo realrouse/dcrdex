@@ -2837,6 +2837,7 @@ func (btc *baseWallet) fundMultiWithSplit(keep, maxLock uint64, values []*asset.
 		splitOutputCoins, splitFees, err = btc.submitMultiSplitTx(splitCoins,
 			splitSpents, remainingOrders, maxFeeRate, splitTxFeeRate, splitBuffer)
 		if err != nil {
+			btc.log.Warnf("multi-split send failed: %v", err)
 			return nil, nil, 0, fmt.Errorf("error creating split transaction: %w", err)
 		}
 	}
