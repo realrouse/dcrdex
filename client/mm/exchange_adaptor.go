@@ -2785,6 +2785,7 @@ func (u *unifiedExchangeAdaptor) tryCancelOrders(ctx context.Context, epoch *uin
 	}
 
 	// Cancel DEX orders first.
+	var delayed int
 	for _, pendingOrder := range u.pendingDEXOrders {
 		o := pendingOrder.currentState().order
 
@@ -2803,7 +2804,12 @@ func (u *unifiedExchangeAdaptor) tryCancelOrders(ctx context.Context, epoch *uin
 			if err != nil {
 				u.log.Errorf("Error canceling order %s: %v", o.ID, err)
 			}
+		} else {
+			delayed++
 		}
+	}
+	if delayed > 0 {
+		u.log.Infof("Waiting 2 epochs before canceling %d order(s) (free-cancel rule)", delayed)
 	}
 
 	if !cancelCEXOrders {
@@ -2839,10 +2845,20 @@ func (u *unifiedExchangeAdaptor) tryCancelOrders(ctx context.Context, epoch *uin
 }
 
 func (u *unifiedExchangeAdaptor) cancelAllOrders(ctx context.Context) {
+	// The bot run context is already canceled when we get here. A detached
+	// context is required so SyncBook and epoch waits still work, and so we
+	// keep draining when the server only accepts a few cancels per epoch.
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 15*time.Minute)
+	defer cancel()
+
+	forceCancel := func() {
+		u.tryCancelOrders(context.Background(), nil, true)
+	}
+
 	book, bookFeed, err := u.clientCore.SyncBook(u.host, u.dexBaseID, u.dexQuoteID)
 	if err != nil {
 		u.log.Errorf("Error syncing book for cancellations: %v", err)
-		u.tryCancelOrders(ctx, nil, true)
+		forceCancel()
 		return
 	}
 	defer bookFeed.Close()
@@ -2850,8 +2866,13 @@ func (u *unifiedExchangeAdaptor) cancelAllOrders(ctx context.Context) {
 	mktCfg, err := u.clientCore.ExchangeMarket(u.host, u.dexBaseID, u.dexQuoteID)
 	if err != nil {
 		u.log.Errorf("Error getting market configuration: %v", err)
-		u.tryCancelOrders(ctx, nil, true)
+		forceCancel()
 		return
+	}
+
+	epochLen := time.Millisecond * time.Duration(mktCfg.EpochLen)
+	if epochLen <= 0 {
+		epochLen = 20 * time.Second
 	}
 
 	currentEpoch := book.CurrentEpoch()
@@ -2859,17 +2880,28 @@ func (u *unifiedExchangeAdaptor) cancelAllOrders(ctx context.Context) {
 		return
 	}
 
-	timeout := time.Millisecond * time.Duration(3*mktCfg.EpochLen)
-	timer := time.NewTimer(timeout)
+	timer := time.NewTimer(2 * epochLen)
 	defer timer.Stop()
+	resetTimer := func(d time.Duration) {
+		if !timer.Stop() {
+			select {
+			case <-timer.C:
+			default:
+			}
+		}
+		timer.Reset(d)
+	}
 
-	i := 0
 	for {
 		select {
+		case <-ctx.Done():
+			u.log.Warnf("Giving up waiting to cancel remaining orders: %v", ctx.Err())
+			forceCancel()
+			return
 		case ni, ok := <-bookFeed.Next():
 			if !ok {
-				u.log.Error("Stopping bot due to nil book feed.")
-				u.kill()
+				u.log.Error("Book feed closed while canceling orders")
+				forceCancel()
 				return
 			}
 			switch epoch := ni.Payload.(type) {
@@ -2877,16 +2909,14 @@ func (u *unifiedExchangeAdaptor) cancelAllOrders(ctx context.Context) {
 				if u.tryCancelOrders(ctx, &epoch.Current, true) {
 					return
 				}
-				timer.Reset(timeout)
-				i++
+				resetTimer(2 * epochLen)
 			}
 		case <-timer.C:
-			u.tryCancelOrders(ctx, nil, true)
-			return
-		}
-
-		if i >= 3 {
-			return
+			// Force remaining cancels even if they count against cancel rate.
+			if u.tryCancelOrders(ctx, nil, true) {
+				return
+			}
+			resetTimer(epochLen)
 		}
 	}
 }
