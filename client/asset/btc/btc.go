@@ -2773,6 +2773,18 @@ func (btc *baseWallet) fundMultiWithSplit(keep, maxLock uint64, values []*asset.
 	}
 
 	canFund, splitCoins, splitSpents := btc.fundMultiSplitTx(values, utxos, splitTxFeeRate, maxFeeRate, splitBuffer, keep, maxLock)
+	// The split buffer (default 5%) is meant for quote-asset re-use when the
+	// rate moves. MM MaxLock is the bot's unbuffered inventory, so a 5%
+	// pad on 30 lots of 1000 can need 31500 while MaxLock is only 31000.
+	// Drop the buffer rather than refusing a split that fits without it.
+	if !canFund && splitBuffer > 0 {
+		btc.log.Infof("multi-split with %.4g%% buffer cannot fund under maxLock=%d; retrying without buffer",
+			splitBuffer, maxLock)
+		canFund, splitCoins, splitSpents = btc.fundMultiSplitTx(values, utxos, splitTxFeeRate, maxFeeRate, 0, keep, maxLock)
+		if canFund {
+			splitBuffer = 0
+		}
+	}
 	if !canFund {
 		var avail uint64
 		for _, u := range utxos {

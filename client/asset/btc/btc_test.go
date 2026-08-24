@@ -1615,7 +1615,7 @@ func testFundMultiOrder(t *testing.T, segwit bool, walletType string) {
 				{nil},
 			},
 		},
-		{ // "split, maxLock too low to fund buffer"
+		{ // "split, maxLock too low to fund buffer" — still split, just without the pad
 			name: "split, maxLock too low to fund buffer",
 			multiOrder: &asset.MultiOrder{
 				Values: []*asset.MultiOrderValue{
@@ -1647,9 +1647,28 @@ func testFundMultiOrder(t *testing.T, segwit bool, walletType string) {
 					Vout:          0,
 				},
 			},
-			balance:   2*uint64(requiredForOrder(15e5, 2)*110/100) + expectedSplitFee(1, 2),
-			maxLock:   2*uint64(requiredForOrder(15e5, 2)*110/100) + expectedSplitFee(1, 2) - 1,
-			expectErr: true,
+			balance:         2*uint64(requiredForOrder(15e5, 2)*110/100) + expectedSplitFee(1, 2),
+			maxLock:         2*uint64(requiredForOrder(15e5, 2)*110/100) + expectedSplitFee(1, 2) - 1,
+			expectSendRawTx: true,
+			expectedInputs: []*wire.TxIn{
+				{
+					PreviousOutPoint: wire.OutPoint{
+						Hash:  *txHashes[0],
+						Index: 0,
+					},
+				},
+			},
+			expectedOutputs: []*wire.TxOut{
+				wire.NewTxOut(requiredForOrder(15e5, 2), []byte{}),
+				wire.NewTxOut(requiredForOrder(15e5, 2), []byte{}),
+			},
+			expectedChange: 2*uint64(requiredForOrder(15e5, 2)*110/100) + expectedSplitFee(1, 2) -
+				2*uint64(requiredForOrder(15e5, 2)) - expectedSplitFee(1, 3),
+			expectedSplitFee: expectedSplitFee(1, 3),
+			expectedRedeemScripts: [][]dex.Bytes{
+				{nil},
+				{nil},
+			},
 		},
 		{ // "only one order needs a split, rest can be funded without"
 			name: "only one order needs a split, rest can be funded without",
