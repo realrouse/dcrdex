@@ -16,6 +16,11 @@ if ! command -v node >/dev/null; then
   echo "Node.js 18+ is required to build the web UI" >&2
   exit 1
 fi
+node_major="$(node -p 'process.versions.node.split(".")[0]')"
+if (( node_major < 18 )); then
+  echo "Node.js 18+ is required (found $(node -v)). nvm users: nvm use 18" >&2
+  exit 1
+fi
 
 if [[ ! -f "$SITE/dist/entry.js" ]]; then
   echo "building web UI..."
