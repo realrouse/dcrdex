@@ -664,7 +664,10 @@ export default class MarketsPage extends BasePage {
       setPriceAndChange(s.tmpl, xc, mkt)
     }
 
-    this.page.obPrice.textContent = Doc.formatFourSigFigs(mkt.spot.rate / this.market.rateConversionFactor)
+    const convSpot = mkt.spot.rate / this.market.rateConversionFactor
+    const convBook = this.midGapConventional() || 0
+    const convPrice = convSpot > 0 ? convSpot : convBook
+    this.page.obPrice.textContent = convPrice > 0 ? Doc.formatFourSigFigs(convPrice) : '-'
     this.page.obPrice.classList.remove('sellcolor', 'buycolor')
     this.page.obPrice.classList.add(mkt.spot.change24 >= 0 ? 'buycolor' : 'sellcolor')
     Doc.setVis(mkt.spot.change24 >= 0, this.page.obUp)
@@ -1592,6 +1595,7 @@ export default class MarketsPage extends BasePage {
     this.depthChart.set(this.book, cfg.lotsize, cfg.ratestep, baseUnitInfo, quoteUnitInfo)
     this.recentMatches = data.book.recentMatches ?? []
     this.refreshRecentMatchesTable()
+    this.setCurrMarketPrice()
   }
 
   /*
@@ -3583,6 +3587,7 @@ class OrderTableRowManager {
     } else {
       const cssClass = this.isSell() ? 'sellcolor' : 'buycolor'
       page.rate.innerText = rateText
+      page.rate.title = rateText
       page.rate.classList.add(cssClass)
     }
     this.updateQtyNumOrdersEl()
@@ -3595,7 +3600,7 @@ class OrderTableRowManager {
     const { page, orderBin } = this
     const qty = orderBin.reduce((total, curr) => total + curr.qtyAtomic, 0)
     const numOrders = orderBin.length
-    page.qty.innerText = Doc.formatFullPrecision(qty, this.baseUnitInfo)
+    page.qty.innerText = Doc.formatCoinValue(qty, this.baseUnitInfo)
     if (numOrders > 1) {
       page.numOrders.removeAttribute('hidden')
       page.numOrders.innerText = String(numOrders)

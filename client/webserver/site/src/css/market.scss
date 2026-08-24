@@ -20,6 +20,15 @@ div[data-handler=markets] {
   .orderbook {
     min-width: 225px;
 
+    table {
+      width: 100%;
+    }
+
+    td.book-rate {
+      min-width: 8.5em;
+      font-variant-numeric: tabular-nums;
+    }
+
     & > div:first-child { // buy orders
       order: 3;
     }
