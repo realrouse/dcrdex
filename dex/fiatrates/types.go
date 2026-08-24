@@ -25,7 +25,7 @@ func (cfg Config) AllFiatSourceDisabled() bool {
 	disabledSources := strings.ToLower(cfg.DisabledFiatSources)
 	return strings.Contains(disabledSources, strings.ToLower(cryptoCompare)) && strings.Contains(disabledSources, strings.ToLower(binance)) &&
 		strings.Contains(disabledSources, strings.ToLower(coinpaprika)) && strings.Contains(disabledSources, strings.ToLower(messari)) &&
-		strings.Contains(disabledSources, strings.ToLower(kuCoin))
+		strings.Contains(disabledSources, strings.ToLower(kuCoin)) && strings.Contains(disabledSources, strings.ToLower(mexc))
 }
 
 type source struct {

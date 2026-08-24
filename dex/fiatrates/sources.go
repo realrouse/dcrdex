@@ -69,6 +69,9 @@ const (
 	// 1712 calls left unused.
 	kuCoin              = "KuCoin"
 	kuCoinPriceEndpoint = "https://api.kucoin.com/api/v1/prices?currencies=%s"
+
+	mexc              = "MEXC"
+	mexcPriceEndpoint = "https://api.mexc.com/api/v3/ticker/price"
 )
 
 var (
@@ -170,6 +173,39 @@ func fiatSources(cfg Config) []*source {
 					fiatRates[ticker] = rate
 				}
 
+				return fiatRates, nil
+			},
+		},
+		{
+			name:            mexc,
+			requestInterval: defaultRefreshInterval,
+			disabled:        strings.Contains(disabledSources, strings.ToLower(mexc)),
+			getRates: func(ctx context.Context, tickers []string, log dex.Logger) (map[string]float64, error) {
+				var response []*struct {
+					Symbol string `json:"symbol"`
+					Price  string `json:"price"`
+				}
+				if err := getRates(ctx, mexcPriceEndpoint, &response); err != nil {
+					return nil, fmt.Errorf("unable to fetch fiat rates: %w", err)
+				}
+				usdt := make(map[string]float64, len(response))
+				for _, asset := range response {
+					if !strings.HasSuffix(asset.Symbol, "USDT") {
+						continue
+					}
+					rate, err := strconv.ParseFloat(asset.Price, 64)
+					if err != nil || rate <= 0 {
+						continue
+					}
+					usdt[parseTicker(strings.TrimSuffix(asset.Symbol, "USDT"))] = rate
+				}
+				fiatRates := make(map[string]float64)
+				for _, ticker := range tickers {
+					t := parseTicker(ticker)
+					if rate, ok := usdt[t]; ok {
+						fiatRates[t] = rate
+					}
+				}
 				return fiatRates, nil
 			},
 		},
