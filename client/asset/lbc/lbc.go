@@ -115,6 +115,7 @@ var (
 			Description:       "Connect to your lbcwallet (port 9244). The DEX server cannot supply this password.",
 			DefaultConfigPath: dexbtc.SystemConfigPath("lbcwallet"),
 			ConfigOpts:        configOpts,
+			MultiFundingOpts:  btc.MultiFundingOpts,
 			GuideLink:         "https://dex.revivel.app/",
 		}},
 		BlockchainClass: asset.BlockchainClassUTXO,

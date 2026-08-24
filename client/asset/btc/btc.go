@@ -745,7 +745,15 @@ type fundMultiOptions struct {
 
 func decodeFundMultiOptions(options map[string]string) (*fundMultiOptions, error) {
 	opts := new(fundMultiOptions)
-	return opts, config.Unmapify(options, opts)
+	if err := config.Unmapify(options, opts); err != nil {
+		return nil, err
+	}
+	// WalletDefinition default is true. An empty options map (typical MM bot)
+	// must not disable splits — that overlocks one fat UTXO per order.
+	if _, set := options[multiSplitKey]; !set {
+		opts.Split = true
+	}
+	return opts, nil
 }
 
 // redeemOptions are order options that apply to redemptions.
