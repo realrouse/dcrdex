@@ -7,7 +7,10 @@ import (
 	"context"
 	"fmt"
 	"math"
+	"net"
 	"strconv"
+	"strings"
+	"time"
 
 	"decred.org/dcrdex/client/asset"
 	"decred.org/dcrdex/client/asset/btc"
@@ -147,6 +150,9 @@ func NewWallet(cfg *asset.WalletConfig, logger dex.Logger, network dex.Network) 
 	if cfg.Settings["rpcuser"] == "" || cfg.Settings["rpcpassword"] == "" {
 		return nil, fmt.Errorf("lbcwallet RPC user/password are required. Copy rpcuser and rpcpass from lbcwallet.conf on the machine running lbcwallet. The DEX server does not have your wallet password")
 	}
+	if err := pingLBCWalletRPC(cfg.Settings); err != nil {
+		return nil, err
+	}
 
 	var params *chaincfg.Params
 	switch network {
@@ -222,4 +228,26 @@ func NewWallet(cfg *asset.WalletConfig, logger dex.Logger, network dex.Network) 
 	var err error
 	w, err = btc.BTCCloneWallet(cloneCFG)
 	return w, err
+}
+
+func pingLBCWalletRPC(settings map[string]string) error {
+	host := strings.TrimSpace(settings["rpcbind"])
+	if host == "" {
+		host = "127.0.0.1"
+	}
+	port := strings.TrimSpace(settings["rpcport"])
+	if port == "" {
+		port = "9244"
+	}
+	addr := host
+	if _, _, err := net.SplitHostPort(host); err != nil {
+		addr = net.JoinHostPort(host, port)
+	}
+	d := net.Dialer{Timeout: 3 * time.Second}
+	c, err := d.Dial("tcp", addr)
+	if err != nil {
+		return fmt.Errorf("lbcwallet is not accepting RPC at %s (%v). A conf file is not enough — start the lbcwallet process. Use port 9244 (wallet), not 9245 (lbcd). If the wallet is on another PC, set JSON-RPC Address to that host (e.g. 10.8.0.2). Add noservertls=1 to lbcwallet.conf because bisonw uses HTTP", addr, err)
+	}
+	_ = c.Close()
+	return nil
 }
