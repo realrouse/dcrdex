@@ -884,6 +884,9 @@ func (wc *rpcClient) WalletLock() error {
 func (wc *rpcClient) Locked() bool {
 	walletInfo, err := wc.GetWalletInfo()
 	if err != nil {
+		if wc.cloneParams != nil && wc.cloneParams.OptionalWalletInfo {
+			return false
+		}
 		wc.log.Errorf("GetWalletInfo error: %v", err)
 		return false
 	}

@@ -902,7 +902,7 @@ func testFundMultiOrder(t *testing.T, segwit bool, walletType string) {
 				MaxFeeRate:    maxFeeRate,
 				FeeSuggestion: feeSuggestion,
 				Options: map[string]string{
-					"swapsplit": "false",
+					multiSplitKey: "false",
 				},
 			},
 			utxos: []*ListUnspentResult{
@@ -953,7 +953,7 @@ func testFundMultiOrder(t *testing.T, segwit bool, walletType string) {
 				MaxFeeRate:    maxFeeRate,
 				FeeSuggestion: feeSuggestion,
 				Options: map[string]string{
-					"swapsplit": "false",
+					multiSplitKey: "false",
 				},
 			},
 			allOrNothing: true,
@@ -1020,7 +1020,7 @@ func testFundMultiOrder(t *testing.T, segwit bool, walletType string) {
 				MaxFeeRate:    maxFeeRate,
 				FeeSuggestion: feeSuggestion,
 				Options: map[string]string{
-					"swapsplit": "false",
+					multiSplitKey: "false",
 				},
 			},
 			maxLock: 32e5,
