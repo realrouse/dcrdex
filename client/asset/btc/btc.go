@@ -2654,6 +2654,8 @@ func (btc *baseWallet) fundMultiSplitTx(
 
 	fundSplitCoins, _, spents, _, inputsSize, _, err := btc.cm.FundWithUTXOs(utxos, keep, false, enough)
 	if err != nil {
+		btc.log.Warnf("multi-split funding failed: %v (utxos=%d required=%d keep=%d maxLock=%d)",
+			err, len(utxos), totalOutputRequired, keep, maxLock)
 		return false, nil, nil
 	}
 
@@ -2762,7 +2764,11 @@ func (btc *baseWallet) fundMultiWithSplit(keep, maxLock uint64, values []*asset.
 
 	canFund, splitCoins, splitSpents := btc.fundMultiSplitTx(values, utxos, splitTxFeeRate, maxFeeRate, splitBuffer, keep, maxLock)
 	if !canFund {
-		return nil, nil, 0, fmt.Errorf("cannot fund all with split")
+		var avail uint64
+		for _, u := range utxos {
+			avail += u.Amount
+		}
+		return nil, nil, 0, fmt.Errorf("cannot fund all with split: %d available in %d utxos (locked coins from cancelled orders may still be locked in the wallet)", avail, len(utxos))
 	}
 
 	remainingUTXOs := utxos

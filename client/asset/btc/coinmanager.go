@@ -337,6 +337,7 @@ func (c *CoinManager) SpendableUTXOs(confs uint32) ([]*CompositeUTXO, map[OutPoi
 }
 
 func (c *CoinManager) spendableUTXOs(confs uint32) ([]*CompositeUTXO, map[OutPoint]*CompositeUTXO, uint64, error) {
+	c.unlockOrphanedWalletLocks()
 	unspents, err := c.listUnspent()
 	if err != nil {
 		return nil, nil, 0, err
@@ -370,6 +371,35 @@ func (c *CoinManager) spendableUTXOs(confs uint32) ([]*CompositeUTXO, map[OutPoi
 	}
 	utxos = utxos[:i]
 	return utxos, utxoMap, sum, nil
+}
+
+// unlockOrphanedWalletLocks releases wallet lockunspent entries that bisonw
+// is not using. After a client restart, lbcwallet still holds locks from
+// previous orders, listunspent hides those coins, and getbalance still counts
+// them as available — FundMultiOrder then fails with "cannot fund all with split".
+func (c *CoinManager) unlockOrphanedWalletLocks() {
+	locked, err := c.listLocked()
+	if err != nil || len(locked) == 0 {
+		return
+	}
+	var orphans []*Output
+	for _, op := range locked {
+		txHash, err := chainhash.NewHashFromStr(op.TxID)
+		if err != nil {
+			continue
+		}
+		pt := NewOutPoint(txHash, op.Vout)
+		if c.lockedOutputs[pt] == nil {
+			orphans = append(orphans, NewOutput(txHash, op.Vout, 0))
+		}
+	}
+	if len(orphans) == 0 {
+		return
+	}
+	c.log.Infof("Unlocking %d wallet UTXO(s) not funding an active order", len(orphans))
+	if err := c.lockUnspent(true, orphans); err != nil {
+		c.log.Errorf("Failed to unlock orphaned wallet locks: %v", err)
+	}
 }
 
 // ReturnCoins makes the locked utxos available for use again.

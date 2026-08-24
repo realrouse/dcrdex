@@ -26,6 +26,22 @@ func (c *countingRequester) RawRequest(_ context.Context, _ string, _ []json.Raw
 	return json.RawMessage(`{}`), nil
 }
 
+func TestListUnspentSpendableOmitted(t *testing.T) {
+	var u ListUnspentResult
+	if err := json.Unmarshal([]byte(`{"txid":"aa","vout":0,"amount":1.5}`), &u); err != nil {
+		t.Fatal(err)
+	}
+	if !u.Spendable {
+		t.Fatal("omitted spendable should default to true")
+	}
+	if err := json.Unmarshal([]byte(`{"txid":"aa","vout":0,"amount":1.5,"spendable":false}`), &u); err != nil {
+		t.Fatal(err)
+	}
+	if u.Spendable {
+		t.Fatal("explicit spendable=false must stay false")
+	}
+}
+
 func TestIsMethodNotFoundErr(t *testing.T) {
 	unimplemented := &dcrjson.RPCError{Code: -1, Message: "Method unimplemented"}
 	wrapped := fmt.Errorf("rawrequest (getwalletinfo) error: %w", unimplemented)

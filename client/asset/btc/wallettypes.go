@@ -4,6 +4,8 @@
 package btc
 
 import (
+	"encoding/json"
+
 	"decred.org/dcrdex/dex"
 )
 
@@ -38,6 +40,27 @@ type ListUnspentResult struct {
 
 func (l *ListUnspentResult) Safe() bool {
 	return l.SafePtr == nil || *l.SafePtr
+}
+
+// UnmarshalJSON treats a missing "spendable" field as true. lbcwallet (and
+// other btcwallet clones) omit the field and still mean the output is
+// spendable; Go would otherwise zero it to false and ConvertUnspent would
+// drop every UTXO.
+func (l *ListUnspentResult) UnmarshalJSON(b []byte) error {
+	type alias ListUnspentResult
+	aux := &struct {
+		Spendable *bool `json:"spendable"`
+		*alias
+	}{alias: (*alias)(l)}
+	if err := json.Unmarshal(b, aux); err != nil {
+		return err
+	}
+	if aux.Spendable == nil {
+		l.Spendable = true
+	} else {
+		l.Spendable = *aux.Spendable
+	}
+	return nil
 }
 
 // ListTransactionsResult is similar to the btcjson.ListTransactionsResult, but

@@ -532,8 +532,10 @@ func (wc *rpcClient) Balances() (*GetBalancesResult, error) {
 // ListUnspent retrieves a list of the wallet's UTXOs.
 func (wc *rpcClient) ListUnspent() ([]*ListUnspentResult, error) {
 	unspents := make([]*ListUnspentResult, 0)
-	// TODO: listunspent 0 9999999 []string{}, include_unsafe=false
-	return unspents, wc.call(methodListUnspent, anylist{uint8(0)}, &unspents)
+	// Explicit maxconf so clones that do not apply jsonrpcdefault still
+	// return confirmed coins (lbcwallet panics or defaults MaxConf to 0
+	// if only minconf is sent).
+	return unspents, wc.call(methodListUnspent, anylist{uint32(0), uint32(9999999)}, &unspents)
 }
 
 // LockUnspent locks and unlocks outputs for spending. An output that is part of
