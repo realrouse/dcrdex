@@ -29,7 +29,39 @@ const (
 )
 
 var (
-	configOpts = append(btc.RPCConfigOpts("LBRY Credits", "9244"), []*asset.ConfigOption{
+	configOpts = append([]*asset.ConfigOption{
+		{
+			Key:         "rpcuser",
+			DisplayName: "JSON-RPC Username",
+			Description: "rpcuser from YOUR lbcwallet.conf (not the DEX server). " +
+				"lbcwallet must be running and unlocked.",
+			Required:      true,
+			ShowByDefault: true,
+		},
+		{
+			Key:         "rpcpassword",
+			DisplayName: "JSON-RPC Password",
+			Description: "rpcpass / rpcpassword from YOUR lbcwallet.conf. " +
+				"This is the wallet RPC password, not the DEX node's password.",
+			NoEcho:        true,
+			Required:      true,
+			ShowByDefault: true,
+		},
+		{
+			Key:           "rpcbind",
+			DisplayName:   "JSON-RPC Address",
+			Description:   "Host of lbcwallet (default 127.0.0.1). Use 10.8.0.2 if the wallet is on the WireGuard Windows PC.",
+			DefaultValue:  "127.0.0.1",
+			ShowByDefault: true,
+		},
+		{
+			Key:           "rpcport",
+			DisplayName:   "JSON-RPC Port",
+			Description:   "lbcwallet RPC port (9244), not lbcd 9245",
+			DefaultValue:  "9244",
+			ShowByDefault: true,
+		},
+	}, []*asset.ConfigOption{
 		{
 			Key:          "fallbackfee",
 			DisplayName:  "Fallback fee rate",
@@ -64,9 +96,10 @@ var (
 		AvailableWallets: []*asset.WalletDefinition{{
 			Type:              walletTypeRPC,
 			Tab:               "External",
-			Description:       "Connect to lbcwallet (which must be connected to lbcd)",
+			Description:       "Connect to your lbcwallet (port 9244). The DEX server cannot supply this password.",
 			DefaultConfigPath: dexbtc.SystemConfigPath("lbcwallet"),
 			ConfigOpts:        configOpts,
+			GuideLink:         "https://dex.revivel.app/",
 		}},
 		BlockchainClass: asset.BlockchainClassUTXO,
 	}
@@ -107,6 +140,14 @@ func toSatoshi(v float64) uint64 {
 // exchange wallet. Connect to lbcwallet's legacy JSON-RPC (default port 9244).
 // lbcwallet must be connected to an lbcd node for chain RPCs (passthrough).
 func NewWallet(cfg *asset.WalletConfig, logger dex.Logger, network dex.Network) (asset.Wallet, error) {
+	if cfg.Settings == nil {
+		cfg.Settings = make(map[string]string)
+	}
+	dexbtc.AliasRPCPassword(cfg.Settings)
+	if cfg.Settings["rpcuser"] == "" || cfg.Settings["rpcpassword"] == "" {
+		return nil, fmt.Errorf("lbcwallet RPC user/password are required. Copy rpcuser and rpcpass from lbcwallet.conf on the machine running lbcwallet. The DEX server does not have your wallet password")
+	}
+
 	var params *chaincfg.Params
 	switch network {
 	case dex.Mainnet:

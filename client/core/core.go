@@ -41,6 +41,7 @@ import (
 	"decred.org/dcrdex/dex/encode"
 	"decred.org/dcrdex/dex/encrypt"
 	"decred.org/dcrdex/dex/msgjson"
+	dexbtc "decred.org/dcrdex/dex/networks/btc"
 	"decred.org/dcrdex/dex/order"
 	"decred.org/dcrdex/dex/wait"
 	"decred.org/dcrdex/server/account"
@@ -2863,6 +2864,7 @@ func (c *Core) createDBWallet(crypter encrypt.Crypter, form *WalletForm, walletP
 	// config files usually define more key-values than we need.
 	// Expected keys should be lowercase because config.Parse returns lowercase
 	// keys.
+	dexbtc.AliasRPCPassword(form.Config)
 	expectedKeys := make(map[string]bool, len(walletDef.ConfigOpts))
 	for _, option := range walletDef.ConfigOpts {
 		expectedKeys[strings.ToLower(option.Key)] = true
@@ -4184,6 +4186,7 @@ func (c *Core) AutoWalletConfig(assetID uint32, walletType string) (map[string]s
 		c.log.Debugf("config.Parse could not load settings from default path: %v", err)
 		return make(map[string]string), nil
 	}
+	dexbtc.AliasRPCPassword(settings)
 	return settings, nil
 }
 

@@ -23,6 +23,7 @@ import (
 	"decred.org/dcrdex/dex"
 	"decred.org/dcrdex/dex/config"
 	"decred.org/dcrdex/dex/encode"
+	dexbtc "decred.org/dcrdex/dex/networks/btc"
 	"decred.org/dcrdex/dex/order"
 	pi "decred.org/dcrdex/dex/politeia"
 )
@@ -1159,6 +1160,7 @@ func (s *WebServer) apiParseConfig(w http.ResponseWriter, r *http.Request) {
 		s.writeAPIError(w, fmt.Errorf("parse error: %w", err))
 		return
 	}
+	dexbtc.AliasRPCPassword(configMap)
 	resp := &struct {
 		OK  bool              `json:"ok"`
 		Map map[string]string `json:"map"`

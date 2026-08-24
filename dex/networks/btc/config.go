@@ -44,6 +44,19 @@ type RPCConfig struct {
 	IsPublicProvider bool
 }
 
+// AliasRPCPassword copies lbcwallet/dcrd-style "rpcpass" onto Bitcoin-style
+// "rpcpassword" so a parsed lbcwallet.conf fills bisonw's password field.
+func AliasRPCPassword(settings map[string]string) {
+	if settings == nil {
+		return
+	}
+	if settings["rpcpassword"] == "" {
+		if p := settings["rpcpass"]; p != "" {
+			settings["rpcpassword"] = p
+		}
+	}
+}
+
 func CheckRPCConfig(cfg *RPCConfig, name string, network dex.Network, ports NetPorts) error {
 
 	var port string
