@@ -10220,6 +10220,13 @@ func TestParseCert(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CertStore cert error: %v", err)
 	}
+	revivelCert, err := parseCert("dex.revivel.app:7232", []byte(nil), dex.Mainnet)
+	if err != nil {
+		t.Fatalf("revivel CertStore cert error: %v", err)
+	}
+	if len(revivelCert) == 0 {
+		t.Fatal("missing dex.revivel.app CertStore pin")
+	}
 }
 
 func TestPreOrder(t *testing.T) {

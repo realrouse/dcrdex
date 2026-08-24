@@ -23,6 +23,28 @@ wtXxBmKZLaFsxKCm7w==
 -----END CERTIFICATE-----
 `)
 
+// dex.revivel.app TLS cert (dcrdex rpc.cert). Public pin only; never commit rpc.key.
+var dexRevivelCert = []byte(`-----BEGIN CERTIFICATE-----
+MIIDEzCCAnSgAwIBAgIRAJciP+UrshMjU8A7sP+7fNgwCgYIKoZIzj0EAwQwRDEi
+MCAGA1UEChMZZGNyZGV4IGF1dG9nZW5lcmF0ZWQgY2VydDEeMBwGA1UEAxMVNGds
+MS5sLnRpbWU0dnBzLmNsb3VkMB4XDTI2MDgyMzE3MjYzMVoXDTM2MDgyMTE3MjYz
+MVowRDEiMCAGA1UEChMZZGNyZGV4IGF1dG9nZW5lcmF0ZWQgY2VydDEeMBwGA1UE
+AxMVNGdsMS5sLnRpbWU0dnBzLmNsb3VkMIGbMBAGByqGSM49AgEGBSuBBAAjA4GG
+AAQAg65Nzqe3mfjt3r36SPmg0F40pMvPI01J1u/OZJFhJntAmgqN4bT82DGoZXez
+UWqP78J1CWiehuOdqVhdEurxGHEBHQOYfTFavRm1sR75IEgzrmFD8b54n/2eF8Tp
+JxAh3kcYkRICsp7jrpuVnDWUeou521QLJkbqEb8RtvL1zBOOL/KjggECMIH/MA4G
+A1UdDwEB/wQEAwICpDAPBgNVHRMBAf8EBTADAQH/MB0GA1UdDgQWBBR/0UfKsOkH
+ovMBf92iw0A5mTFSxTCBvAYDVR0RBIG0MIGxghU0Z2wxLmwudGltZTR2cHMuY2xv
+dWSCCWxvY2FsaG9zdIIPZGV4LnJldml2ZWwuYXBwhwR/AAABhxAAAAAAAAAAAAAA
+AAAAAAABhwRZKACThwQKKACThwSsEQABhwSsEgABhwQKCAABhxAqAntAWSgAkwAA
+AAAAAAABhxD+gAAAAAAAAAIAWf/+KACThxD+gAAAAAAAACQBLv/+K+LRhxD+gAAA
+AAAAAGQDFv/+MSfmMAoGCCqGSM49BAMEA4GMADCBiAJCAfXwOOhayBxYw1Ia4YKt
+vB6mVrI3StPcQ0s9OIWL2jK3nTrLzGQgBcH1N+Itcpw2DGW2AIUaa5z0kjgVRLqr
+hiRRAkIBpnSNvysXU5LkwSMB/aODtbkit8pnUkG4BrWGRslVxnMGyYuyxu2jzWwB
+ZDjG5XLjndXy93xm48IiOClxxmnNFmk=
+-----END CERTIFICATE-----
+`)
+
 var simnetHarnessCert = []byte(`-----BEGIN CERTIFICATE-----
 MIICpTCCAgagAwIBAgIQZMfxMkSi24xMr4CClCODrzAKBggqhkjOPQQDBDBJMSIw
 IAYDVQQKExlkY3JkZXggYXV0b2dlbmVyYXRlZCBjZXJ0MSMwIQYDVQQDExp1YnVu
@@ -44,7 +66,8 @@ vF8Ti1x2vTkD
 
 var CertStore = map[dex.Network]map[string][]byte{
 	dex.Mainnet: {
-		"dex.decred.org:7232": dexDotDecredCert,
+		"dex.decred.org:7232":   dexDotDecredCert,
+		"dex.revivel.app:7232": dexRevivelCert,
 	},
 	dex.Testnet: {
 		"bison.exchange:17232": nil, // Uses certificate authority
