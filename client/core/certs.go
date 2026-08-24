@@ -5,25 +5,9 @@ package core
 
 import "decred.org/dcrdex/dex"
 
-var dexDotDecredCert = []byte(`-----BEGIN CERTIFICATE-----
-MIICeTCCAdqgAwIBAgIQZbivJ9Wrxpx0HHRV9tGn+TAKBggqhkjOPQQDBDA9MSIw
-IAYDVQQKExlkY3JkZXggYXV0b2dlbmVyYXRlZCBjZXJ0MRcwFQYDVQQDEw5kZXgu
-ZGVjcmVkLm9yZzAeFw0yMDA5MjcxODQwMDZaFw0zMDA5MjYxODQwMDZaMD0xIjAg
-BgNVBAoTGWRjcmRleCBhdXRvZ2VuZXJhdGVkIGNlcnQxFzAVBgNVBAMTDmRleC5k
-ZWNyZWQub3JnMIGbMBAGByqGSM49AgEGBSuBBAAjA4GGAAQA3koCrZ4VR/Igiz6z
-kOFfhAtfWDWuIot6DIJBdEuXMiPnFZqr8mFAiLP3+ihQNFEc3As7imE4fY5C2KUa
-eMed+8IBqgVIlIq1SH99xhceua/UvzG1c+Av9Y2ZEwVgugYJu5d1mbBcomtHTp5n
-ctCOOIpQN2KDtUzQqAZQSIrnimzedA+jeTB3MA4GA1UdDwEB/wQEAwICpDAPBgNV
-HRMBAf8EBTADAQH/MFQGA1UdEQRNMEuCDmRleC5kZWNyZWQub3Jngglsb2NhbGhv
-c3SHBH8AAAGHEAAAAAAAAAAAAAAAAAAAAAGHEP6AAAAAAAAAAAAAAAAAAAGHBAoo
-HjIwCgYIKoZIzj0EAwQDgYwAMIGIAkIBlXoes55DGvoOlAVxUW5Ju28Y4ts/ag9k
-dDrsQSJuhzbhTcH0iTCq7Sg8bfGuAAP6U492kjqlZepBJUd4WCOyzg4CQgHDOOk5
-pO281U39e0XpvQNkT6oJibnCmPVLXuD567Ibt2MfgZet47zGMiOLbQJkv4E8lMv3
-wtXxBmKZLaFsxKCm7w==
------END CERTIFICATE-----
-`)
-
 // dex.revivel.app TLS cert (dcrdex rpc.cert). Public pin only; never commit rpc.key.
+// Official dex.decred.org is not pinned here: this client speaks PerMatchAddr
+// protocol and cannot trade on the older public DEX.
 var dexRevivelCert = []byte(`-----BEGIN CERTIFICATE-----
 MIIDEzCCAnSgAwIBAgIRAJciP+UrshMjU8A7sP+7fNgwCgYIKoZIzj0EAwQwRDEi
 MCAGA1UEChMZZGNyZGV4IGF1dG9nZW5lcmF0ZWQgY2VydDEeMBwGA1UEAxMVNGds
@@ -66,7 +50,6 @@ vF8Ti1x2vTkD
 
 var CertStore = map[dex.Network]map[string][]byte{
 	dex.Mainnet: {
-		"dex.decred.org:7232":   dexDotDecredCert,
 		"dex.revivel.app:7232": dexRevivelCert,
 	},
 	dex.Testnet: {

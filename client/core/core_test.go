@@ -10227,6 +10227,9 @@ func TestParseCert(t *testing.T) {
 	if len(revivelCert) == 0 {
 		t.Fatal("missing dex.revivel.app CertStore pin")
 	}
+	if _, ok := CertStore[dex.Mainnet]["dex.decred.org:7232"]; ok {
+		t.Fatal("dex.decred.org must not be pinned on this ReviveL client")
+	}
 }
 
 func TestPreOrder(t *testing.T) {
