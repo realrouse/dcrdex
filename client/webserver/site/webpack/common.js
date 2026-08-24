@@ -1,6 +1,5 @@
 const path = require('path')
 const MiniCssExtractPlugin = require('mini-css-extract-plugin')
-const StyleLintPlugin = require('stylelint-webpack-plugin')
 const ESLintPlugin = require('eslint-webpack-plugin')
 
 const child_process = require('child_process')
@@ -53,9 +52,8 @@ module.exports = {
     new MiniCssExtractPlugin({
       filename: '../dist/style.css'
     }),
-    new StyleLintPlugin({
-      threads: true,
-    }),
+    // stylelint 17 is ESM-only and crashes stylelint-webpack-plugin on
+    // Ubuntu 24.04's Node 18. Lint via `npm run lint` instead.
     new ESLintPlugin({
       configType: 'flat',
       extensions: ['ts', 'tsx'],
