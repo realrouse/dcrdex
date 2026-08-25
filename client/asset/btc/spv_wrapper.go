@@ -924,7 +924,9 @@ func (w *spvWallet) GetBlockHeader(blockHash *chainhash.Hash) (header *BlockHead
 	}
 
 	return &BlockHeader{
-		Hash:              hdr.BlockHash().String(),
+		// Use the looked-up hash. Clones such as LBC cannot recompute
+		// the real block hash from a Bitcoin-shaped header (ClaimTrie).
+		Hash:              blockHash.String(),
 		Confirmations:     confirmations,
 		Height:            int64(blockHeight),
 		Time:              hdr.Timestamp.Unix(),
