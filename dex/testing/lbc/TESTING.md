@@ -5,7 +5,7 @@ Checklist for verifying the LBC asset end-to-end on simnet.
 ## What this branch adds
 
 - LBRY Credits as BIP44 asset **140**
-- Client: external **lbcwallet** RPC (`client/asset/lbc`)
+- Client: **Native SPV** (default in Bison) plus external **lbcwallet** RPC (`client/asset/lbc`)
 - Server: **lbcd** backend (`server/asset/lbc`)
 - Network params + ClaimTrie block deserializer (`dex/networks/lbc`)
 - Regtest harness (`dex/testing/lbc`)
@@ -37,7 +37,7 @@ export PATH=~/bin:$PATH
 
 ```bash
 cd dcrdex   # this repo
-go test ./dex/networks/lbc/ -count=1
+go test ./dex/networks/lbc/ ./client/asset/lbc/ -count=1
 go build ./client/asset/lbc/
 go build ./server/asset/lbc/
 ```
@@ -78,6 +78,15 @@ cd ~/dextest/lbc/harness-ctl
 ./alpha getbalance
 ./beta getbalance
 ./mine-alpha 1
+
+### 2c. Native SPV livetest (no lbcwallet for the SPV side)
+
+Requires the harness `lbcd` nodes (P2P 39246) so compact filters are available.
+
+```bash
+cd client/asset/lbc
+go test -v -count=1 -tags=harness -run TestSPVWallet -timeout 180s
+```
 ```
 
 ### 2c. Client integration test
