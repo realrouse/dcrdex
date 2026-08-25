@@ -1438,6 +1438,8 @@ github.com/realrouse/lbcd-spv/neutrino v0.0.0-20260825210504-7ad54e5eb11b h1:rmv
 github.com/realrouse/lbcd-spv/neutrino v0.0.0-20260825210504-7ad54e5eb11b/go.mod h1:kKBSAfXb/qTPyGGr8ty3A2Hq9IZf8RNn3Wdkq7NYC4Y=
 github.com/realrouse/lbcd-spv/neutrino v0.0.0-20260825212410-44b2916c9b75 h1:a5gN5OC1wPmwKXa5tekupMUnBQVQZPTCb6rRO6GQrFk=
 github.com/realrouse/lbcd-spv/neutrino v0.0.0-20260825212410-44b2916c9b75/go.mod h1:kKBSAfXb/qTPyGGr8ty3A2Hq9IZf8RNn3Wdkq7NYC4Y=
+github.com/realrouse/lbcd-spv/neutrino v0.0.0-20260825212830-73add99c2701 h1:z0URGYn4DoNB9cJWW4pILv/TJ0/DJz0LSqixRGlrSMk=
+github.com/realrouse/lbcd-spv/neutrino v0.0.0-20260825212830-73add99c2701/go.mod h1:kKBSAfXb/qTPyGGr8ty3A2Hq9IZf8RNn3Wdkq7NYC4Y=
 github.com/rivo/uniseg v0.1.0/go.mod h1:J6wj4VEh+S6ZtnVlnTBMWIodfgj8LQOQFoIToxlJtxc=
 github.com/rivo/uniseg v0.2.0/go.mod h1:J6wj4VEh+S6ZtnVlnTBMWIodfgj8LQOQFoIToxlJtxc=
 github.com/rivo/uniseg v0.4.7 h1:WUdvkW8uEhrYfLC4ZzdpI2ztxP1I582+49Oc5Mq64VQ=
