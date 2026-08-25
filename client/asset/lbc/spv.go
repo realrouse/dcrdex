@@ -31,8 +31,8 @@ import (
 	_ "github.com/btcsuite/btcwallet/walletdb/bdb"
 	"github.com/btcsuite/btcwallet/wtxmgr"
 	"github.com/jrick/logrotate/rotator"
-	lbcchaincfg "github.com/lbryio/lbcd/chaincfg"
 	lbcbtcec "github.com/lbryio/lbcd/btcec"
+	lbcchaincfg "github.com/lbryio/lbcd/chaincfg"
 	lbcchainhash "github.com/lbryio/lbcd/chaincfg/chainhash"
 	lbcwire "github.com/lbryio/lbcd/wire"
 	lbcutil "github.com/lbryio/lbcutil"
@@ -50,14 +50,24 @@ import (
 
 const (
 	// DefaultM is lbcutil/gcs/builder.DefaultM, used when translating filters.
-	DefaultM              uint64 = 784931
-	logDirName                   = "logs"
-	neutrinoDBName               = "neutrino.db"
-	defaultAcctNum               = 0
-	dbTimeout                    = 20 * time.Second
-	p2pPort                      = "9246"
-	regtestP2P                   = "127.0.0.1:39246"
-	foundationFilterPeer         = "s1.lbry.network:9246"
+	DefaultM                uint64 = 784931
+	logDirName                     = "logs"
+	neutrinoDBName                 = "neutrino.db"
+	neutrinoChainFormatFile        = "neutrino.chainformat"
+	// neutrinoChainFormat is bumped when Native LBC compact-filter files
+	// from older experimental builds must not be reused. "2" is the
+	// in-memory retarget look-back fix (lbcd-spv 73add99).
+	neutrinoChainFormat = "2"
+	// neutrinoStuckHeaderCount is far below a healthy first 2000-header
+	// batch. Pre-fix clients disconnected at height 2 and never persisted
+	// that batch, so on-disk height stayed at genesis.
+	neutrinoStuckHeaderCount = 64
+	lbcBlockHeaderSize       = lbcwire.MaxBlockHeaderPayload
+	defaultAcctNum           = 0
+	dbTimeout                = 20 * time.Second
+	p2pPort                  = "9246"
+	regtestP2P               = "127.0.0.1:39246"
+	foundationFilterPeer     = "s1.lbry.network:9246"
 )
 
 var (
@@ -166,6 +176,10 @@ func (w *lbcSPVWallet) Start() (btc.SPVService, error) {
 	errCloser := dex.NewErrorCloser()
 	defer errCloser.Done(w.log)
 	errCloser.Add(w.loader.UnloadWallet)
+
+	if err := resetStaleNeutrinoChain(w.dir, w.log); err != nil {
+		return nil, fmt.Errorf("error preparing neutrino chain data: %w", err)
+	}
 
 	neutrinoDBPath := filepath.Join(w.dir, neutrinoDBName)
 	w.neutrinoDB, err = btcwalletdb.Create("bdb", neutrinoDBPath, true, dbTimeout)
