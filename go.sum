@@ -1434,6 +1434,8 @@ github.com/quasilyte/regex/syntax v0.0.0-20200805063351-8f842688393c/go.mod h1:r
 github.com/rcrowley/go-metrics v0.0.0-20181016184325-3113b8401b8a/go.mod h1:bCqnVzQkZxMG4s8nGwiZ5l3QUCyqpo9Y+/ZMZ9VjZe4=
 github.com/realrouse/lbcd-spv/neutrino v0.0.0-20260824141231-6480a0e769b3 h1:SucFbOmTJvZin9h7z6o3E69DQhvxJBpOvBGnd12bHBQ=
 github.com/realrouse/lbcd-spv/neutrino v0.0.0-20260824141231-6480a0e769b3/go.mod h1:kKBSAfXb/qTPyGGr8ty3A2Hq9IZf8RNn3Wdkq7NYC4Y=
+github.com/realrouse/lbcd-spv/neutrino v0.0.0-20260825210504-7ad54e5eb11b h1:rmveMkvoFUrzh7xsbLmdtJq1qPjfJ1E2JJs7mpAsKIg=
+github.com/realrouse/lbcd-spv/neutrino v0.0.0-20260825210504-7ad54e5eb11b/go.mod h1:kKBSAfXb/qTPyGGr8ty3A2Hq9IZf8RNn3Wdkq7NYC4Y=
 github.com/rivo/uniseg v0.1.0/go.mod h1:J6wj4VEh+S6ZtnVlnTBMWIodfgj8LQOQFoIToxlJtxc=
 github.com/rivo/uniseg v0.2.0/go.mod h1:J6wj4VEh+S6ZtnVlnTBMWIodfgj8LQOQFoIToxlJtxc=
 github.com/rivo/uniseg v0.4.7 h1:WUdvkW8uEhrYfLC4ZzdpI2ztxP1I582+49Oc5Mq64VQ=
