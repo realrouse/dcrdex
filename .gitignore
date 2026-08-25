@@ -66,3 +66,5 @@ client/cmd/verifymm/verifymm
 *.db
 evmrelay/cmd/evmrelay/evmrelay
 client/cmd/bisonw/bisonw-linux-amd64
+client/cmd/bisonw/bisonw-windows-amd64.exe
+client/cmd/bisonw/bisonw-windows-amd64.zip
