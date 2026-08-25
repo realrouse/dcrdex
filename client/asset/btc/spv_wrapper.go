@@ -457,6 +457,15 @@ func (w *spvWallet) SyncStatus() (*asset.SyncStatus, error) {
 
 	currentHeight := chainBlk.Height
 
+	// Neutrino BestBlock must include the header timestamp. Older LBC
+	// builds omitted it (zero time), which made this look like "still
+	// before birthday" forever and capped the UI at 99.9%.
+	if chainBlk.Timestamp.IsZero() && chainBlk.Height > 0 {
+		if hdr, herr := w.cl.GetBlockHeader(&chainBlk.Hash); herr == nil {
+			chainBlk.Timestamp = hdr.Timestamp
+		}
+	}
+
 	var target int32
 	if len(w.cl.Peers()) > 0 {
 		target = w.syncHeight()
@@ -494,12 +503,14 @@ func (w *spvWallet) SyncStatus() (*asset.SyncStatus, error) {
 		currentHeight = walletBlock.Height
 		synced = currentHeight >= target // maybe && w.wallet.ChainSynced()
 	} else {
-		// Chain service still syncing.
+		// Chain service still syncing, or the tip is older than the
+		// wallet birthday so there are no post-birthday filters to scan.
 		blk = &BlockVector{
 			Height: int64(currentHeight),
 			Hash:   chainBlk.Hash,
 		}
 		atomic.StoreInt32(&w.lastPrenatalHeight, currentHeight)
+		synced = currentHeight >= target
 	}
 
 	if target > 0 && atomic.SwapInt32(&w.syncTarget, target) == 0 {
@@ -975,11 +986,9 @@ func (w *spvWallet) checkRescanStall() bool {
 
 	walletStamp := w.wallet.SyncedTo()
 	walletHeight := walletStamp.Height
-	if walletHeight == 0 {
-		// Wallet hasn't started processing blocks yet (possibly a rescan
-		// is already in progress). Don't interfere.
-		return false
-	}
+	// Height 0 is normal while headers are still before birthday. Once the
+	// chain is past birthday, remaining at 0 for stallConfirmationTime
+	// means the rescan never started (LBC used to look stuck at 99.9%).
 
 	if len(w.cl.Peers()) == 0 {
 		return false
