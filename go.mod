@@ -73,7 +73,7 @@ require (
 	github.com/ltcsuite/ltcd/chaincfg/chainhash v1.0.2
 	github.com/ltcsuite/ltcd/ltcutil v1.1.4-0.20240131072528-64dfa402637a
 	github.com/pkg/browser v0.0.0-20240102092130-5ac0b6a4141c
-	github.com/realrouse/lbcd-spv/neutrino v0.0.0-20260825210504-7ad54e5eb11b
+	github.com/realrouse/lbcd-spv/neutrino v0.0.0-20260825212410-44b2916c9b75
 	github.com/skip2/go-qrcode v0.0.0-20200617195104-da1b6568686e
 	github.com/yuin/goldmark v1.7.16
 	go.etcd.io/bbolt v1.4.3
