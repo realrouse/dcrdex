@@ -5,6 +5,7 @@ package lbc
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"math"
 	"net"
@@ -17,9 +18,12 @@ import (
 	"decred.org/dcrdex/client/asset"
 	"decred.org/dcrdex/client/asset/btc"
 	"decred.org/dcrdex/dex"
+	"decred.org/dcrdex/dex/config"
 	dexbtc "decred.org/dcrdex/dex/networks/btc"
 	dexlbc "decred.org/dcrdex/dex/networks/lbc"
 	"github.com/btcsuite/btcd/chaincfg"
+	lbcchaincfg "github.com/lbryio/lbcd/chaincfg"
+	"github.com/lbryio/lbcwallet/wallet"
 )
 
 const (
@@ -31,9 +35,29 @@ const (
 	// small version.Numeric(). Operators of released binaries will still pass.
 	minNetworkVersion = 0
 	walletTypeRPC     = "lbcwalletRPC"
+	walletTypeSPV     = "SPV"
+	walletTypeLegacy  = ""
 )
 
 var (
+	rpcWalletDefinition = &asset.WalletDefinition{
+		Type:              walletTypeRPC,
+		Tab:               "External",
+		Description:       "Connect to your lbcwallet (port 9244). The DEX server cannot supply this password.",
+		DefaultConfigPath: dexbtc.SystemConfigPath("lbcwallet"),
+		ConfigOpts:        nil, // filled in init below after configOpts
+		MultiFundingOpts:  btc.MultiFundingOpts,
+		GuideLink:         "https://dex.revivel.app/",
+	}
+	spvWalletDefinition = &asset.WalletDefinition{
+		Type:             walletTypeSPV,
+		Tab:              "Native",
+		Description:      "Built-in light wallet. Does not download the LBRY blockchain.",
+		ConfigOpts:       btc.CommonConfigOpts("LBC", true),
+		Seeded:           true,
+		MultiFundingOpts: btc.MultiFundingOpts,
+	}
+
 	configOpts = append([]*asset.ConfigOption{
 		{
 			Key:         "rpcuser",
@@ -109,29 +133,74 @@ var (
 		Name:              "LBRY Credits",
 		SupportedVersions: []uint32{version},
 		UnitInfo:          dexlbc.UnitInfo,
-		AvailableWallets: []*asset.WalletDefinition{{
-			Type:              walletTypeRPC,
-			Tab:               "External",
-			Description:       "Connect to your lbcwallet (port 9244). The DEX server cannot supply this password.",
-			DefaultConfigPath: dexbtc.SystemConfigPath("lbcwallet"),
-			ConfigOpts:        configOpts,
-			MultiFundingOpts:  btc.MultiFundingOpts,
-			GuideLink:         "https://dex.revivel.app/",
-		}},
-		BlockchainClass: asset.BlockchainClassUTXO,
+		AvailableWallets: []*asset.WalletDefinition{
+			spvWalletDefinition,
+			rpcWalletDefinition,
+		},
+		LegacyWalletIndex: 1,
+		BlockchainClass:   asset.BlockchainClassUTXO,
 	}
 )
 
 func init() {
+	rpcWalletDefinition.ConfigOpts = configOpts
 	asset.Register(BipID, &Driver{})
 }
 
 // Driver implements asset.Driver.
 type Driver struct{}
 
+var _ asset.Driver = (*Driver)(nil)
+var _ asset.Creator = (*Driver)(nil)
+
 // Open creates the LBC exchange wallet.
 func (d *Driver) Open(cfg *asset.WalletConfig, logger dex.Logger, network dex.Network) (asset.Wallet, error) {
 	return NewWallet(cfg, logger, network)
+}
+
+// Exists reports whether a Native SPV wallet already exists. Part of Creator.
+func (d *Driver) Exists(walletType, dataDir string, _ map[string]string, net dex.Network) (bool, error) {
+	if walletType != walletTypeSPV {
+		return false, fmt.Errorf("no LBC wallet of type %q available", walletType)
+	}
+	chainParams, err := parseChainParams(net)
+	if err != nil {
+		return false, err
+	}
+	walletDir := filepath.Join(dataDir, chainParams.Name)
+	loader := wallet.NewLoader(chainParams, walletDir, true, dbTimeout, 250)
+	return loader.WalletExists()
+}
+
+// Create creates a Native SPV wallet. Part of Creator.
+func (d *Driver) Create(params *asset.CreateWalletParams) error {
+	if params.Type != walletTypeSPV {
+		return fmt.Errorf("SPV is the only seeded wallet type. required = %q, requested = %q", walletTypeSPV, params.Type)
+	}
+	if len(params.Seed) == 0 {
+		return errors.New("wallet seed cannot be empty")
+	}
+	if len(params.DataDir) == 0 {
+		return errors.New("must specify wallet data directory")
+	}
+	chainParams, err := parseChainParams(params.Net)
+	if err != nil {
+		return fmt.Errorf("error parsing chain: %w", err)
+	}
+
+	recoveryCfg := new(btc.RecoveryCfg)
+	if err := config.Unmapify(params.Settings, recoveryCfg); err != nil {
+		return err
+	}
+
+	bday := btc.DefaultWalletBirthday
+	if params.Birthday != 0 {
+		bday = time.Unix(int64(params.Birthday), 0)
+	}
+
+	walletDir := filepath.Join(params.DataDir, chainParams.Name)
+	return createSPVWallet(params.Pass, params.Seed, bday, walletDir,
+		params.Logger, recoveryCfg.NumExternalAddresses, recoveryCfg.NumInternalAddresses, chainParams)
 }
 
 // DecodeCoinID creates a human-readable representation of a coin ID for LBC.
@@ -146,17 +215,82 @@ func (d *Driver) Info() *asset.WalletInfo {
 
 // MinLotSize calculates the minimum lot size for a given fee rate.
 func (d *Driver) MinLotSize(maxFeeRate uint64) uint64 {
-	return dexbtc.MinLotSize(maxFeeRate, false)
+	return dexbtc.MinLotSize(maxFeeRate, true)
 }
 
 func toSatoshi(v float64) uint64 {
 	return uint64(math.Round(v * 1e8))
 }
 
+func parseCloneParams(network dex.Network) (*chaincfg.Params, error) {
+	switch network {
+	case dex.Mainnet:
+		return dexlbc.MainNetParams, nil
+	case dex.Testnet:
+		return dexlbc.TestNet3Params, nil
+	case dex.Regtest:
+		return dexlbc.RegressionNetParams, nil
+	default:
+		return nil, fmt.Errorf("unknown network ID %v", network)
+	}
+}
+
+func parseChainParams(net dex.Network) (*lbcchaincfg.Params, error) {
+	switch net {
+	case dex.Mainnet:
+		return &lbcchaincfg.MainNetParams, nil
+	case dex.Testnet:
+		return &lbcchaincfg.TestNet3Params, nil
+	case dex.Regtest:
+		return &lbcchaincfg.RegressionNetParams, nil
+	}
+	return nil, fmt.Errorf("unknown network ID %v", net)
+}
+
+func baseCloneCFG(cfg *asset.WalletConfig, logger dex.Logger, network dex.Network, params *chaincfg.Params) *btc.BTCCloneCFG {
+	return &btc.BTCCloneCFG{
+		WalletCFG:           cfg,
+		MinNetworkVersion:   minNetworkVersion,
+		MinProtocolVersion:  70013, // lbcd maxProtocolVersion
+		WalletInfo:          WalletInfo,
+		Symbol:              "lbc",
+		Logger:              logger,
+		Network:             network,
+		ChainParams:         params,
+		DefaultFallbackFee:  dexlbc.DefaultFee,
+		DefaultFeeRateLimit: dexlbc.DefaultFeeRateLimit,
+		BlockDeserializer:   dexlbc.DeserializeBlock,
+		AssetID:             BipID,
+		FeeEstimator: func(ctx context.Context, cl btc.RawRequester, confTarget uint64) (uint64, error) {
+			return dexlbc.DefaultFee, nil
+		},
+	}
+}
+
 // NewWallet is the exported constructor by which the DEX will import the
-// exchange wallet. Connect to lbcwallet's legacy JSON-RPC (default port 9244).
-// lbcwallet must be connected to an lbcd node for chain RPCs (passthrough).
+// exchange wallet. Native SPV needs no local lbcd. External RPC still talks to
+// lbcwallet on port 9244.
 func NewWallet(cfg *asset.WalletConfig, logger dex.Logger, network dex.Network) (asset.Wallet, error) {
+	params, err := parseCloneParams(network)
+	if err != nil {
+		return nil, err
+	}
+
+	switch cfg.Type {
+	case walletTypeSPV:
+		cloneCFG := baseCloneCFG(cfg, logger, network, params)
+		cloneCFG.Segwit = true
+		cloneCFG.InitTxSize = dexbtc.InitTxSizeSegwit
+		cloneCFG.InitTxSizeBase = dexbtc.InitTxSizeBaseSegwit
+		return btc.OpenSPVWallet(cloneCFG, openSPVWallet)
+	case walletTypeRPC, walletTypeLegacy:
+		return newRPCWallet(cfg, logger, network, params)
+	default:
+		return nil, fmt.Errorf("unknown wallet type %q", cfg.Type)
+	}
+}
+
+func newRPCWallet(cfg *asset.WalletConfig, logger dex.Logger, network dex.Network, params *chaincfg.Params) (asset.Wallet, error) {
 	if cfg.Settings == nil {
 		cfg.Settings = make(map[string]string)
 	}
@@ -172,18 +306,6 @@ func NewWallet(cfg *asset.WalletConfig, logger dex.Logger, network dex.Network) 
 		return nil, err
 	}
 
-	var params *chaincfg.Params
-	switch network {
-	case dex.Mainnet:
-		params = dexlbc.MainNetParams
-	case dex.Testnet:
-		params = dexlbc.TestNet3Params
-	case dex.Regtest:
-		params = dexlbc.RegressionNetParams
-	default:
-		return nil, fmt.Errorf("unknown network ID %v", network)
-	}
-
 	// Wallet RPC ports (lbcwallet), not node ports.
 	ports := dexbtc.NetPorts{
 		Mainnet: "9244",
@@ -191,59 +313,36 @@ func NewWallet(cfg *asset.WalletConfig, logger dex.Logger, network dex.Network) 
 		Simnet:  "29244",
 	}
 
-	// w is closed over by BalanceFunc / FeeEstimator (same pattern as ZCL).
+	// w is closed over by BalanceFunc (same pattern as ZCL).
 	var w *btc.ExchangeWalletFullNode
-	cloneCFG := &btc.BTCCloneCFG{
-		WalletCFG:           cfg,
-		MinNetworkVersion:   minNetworkVersion,
-		MinProtocolVersion:  70013, // lbcd maxProtocolVersion
-		WalletInfo:          WalletInfo,
-		Symbol:              "lbc",
-		Logger:              logger,
-		Network:             network,
-		ChainParams:         params,
-		Ports:               ports,
-		RPCUseTLS:           useTLS,
-		RPCTLSCert:          tlsCert,
-		DefaultFallbackFee:  dexlbc.DefaultFee,
-		DefaultFeeRateLimit: dexlbc.DefaultFeeRateLimit,
-		// lbcwallet has no getwalletinfo / getbalances; use getbalance.
-		BalanceFunc: func(ctx context.Context, locked uint64) (*asset.Balance, error) {
-			var bal float64
-			// minconf=0 to include unconfirmed; account "" is default.
-			if err := w.CallRPC("getbalance", []any{"*", 0}, &bal); err != nil {
-				// Fallback: no-arg getbalance
-				if err2 := w.CallRPC("getbalance", nil, &bal); err2 != nil {
-					return nil, fmt.Errorf("getbalance: %v (fallback: %v)", err, err2)
-				}
+	cloneCFG := baseCloneCFG(cfg, logger, network, params)
+	cloneCFG.Ports = ports
+	cloneCFG.RPCUseTLS = useTLS
+	cloneCFG.RPCTLSCert = tlsCert
+	cloneCFG.BalanceFunc = func(ctx context.Context, locked uint64) (*asset.Balance, error) {
+		var bal float64
+		if err := w.CallRPC("getbalance", []any{"*", 0}, &bal); err != nil {
+			if err2 := w.CallRPC("getbalance", nil, &bal); err2 != nil {
+				return nil, fmt.Errorf("getbalance: %v (fallback: %v)", err, err2)
 			}
-			return &asset.Balance{
-				Available: toSatoshi(bal) - locked,
-				Locked:    locked,
-				Other:     make(map[asset.BalanceCategory]asset.CustomBalance),
-			}, nil
-		},
-		// Non-segwit for lbcwallet RPC compatibility: getrawchangeaddress takes
-		// (account, addresstype); dcrdex would pass "bech32" as account. Legacy
-		// P2SH swap contracts still work on LBC mainnet (SegWit is optional).
-		// Follow-up: add AccountFirstChangeAddr support and enable Segwit.
-		Segwit:                   false,
-		InitTxSize:               dexbtc.InitTxSize,
-		InitTxSizeBase:           dexbtc.InitTxSizeBase,
-		OmitAddressType:          true,
-		LegacySignTxRPC:          true,
-		LegacyValidateAddressRPC: true,
-		SingularWallet:           true,
-		OptionalWalletInfo:       true, // lbcwallet has no getwalletinfo
-		UnlockSpends:             true, // lbcwallet may not auto-unlock spent coins
-		BlockDeserializer:        dexlbc.DeserializeBlock,
-		AssetID:                  BipID,
-		FeeEstimator: func(ctx context.Context, cl btc.RawRequester, confTarget uint64) (uint64, error) {
-			// Prefer estimatesmartfee if lbcd provides it via passthrough.
-			// Fall back to DefaultFee.
-			return dexlbc.DefaultFee, nil
-		},
+		}
+		return &asset.Balance{
+			Available: toSatoshi(bal) - locked,
+			Locked:    locked,
+			Other:     make(map[asset.BalanceCategory]asset.CustomBalance),
+		}, nil
 	}
+	// Non-segwit for lbcwallet RPC compatibility: getrawchangeaddress takes
+	// (account, addresstype); dcrdex would pass "bech32" as account.
+	cloneCFG.Segwit = false
+	cloneCFG.InitTxSize = dexbtc.InitTxSize
+	cloneCFG.InitTxSizeBase = dexbtc.InitTxSizeBase
+	cloneCFG.OmitAddressType = true
+	cloneCFG.LegacySignTxRPC = true
+	cloneCFG.LegacyValidateAddressRPC = true
+	cloneCFG.SingularWallet = true
+	cloneCFG.OptionalWalletInfo = true
+	cloneCFG.UnlockSpends = true
 
 	w, err = btc.BTCCloneWallet(cloneCFG)
 	return w, err
