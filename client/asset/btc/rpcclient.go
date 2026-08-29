@@ -128,12 +128,13 @@ type rpcCore struct {
 	walletInfoUnsupported atomic.Bool // getwalletinfo missing; skip further RPCs
 	locked                atomic.Bool // local lock flag when getwalletinfo is unavailable
 
-	log             dex.Logger
-	chainParams     *chaincfg.Params
-	omitAddressType bool
-	legacySignTx    bool
-	booleanGetBlock bool
-	unlockSpends    bool
+	log                 dex.Logger
+	chainParams         *chaincfg.Params
+	omitAddressType     bool
+	accountFirstAddrRPC bool
+	legacySignTx        bool
+	booleanGetBlock     bool
+	unlockSpends        bool
 
 	deserializeTx      func([]byte) (*wire.MsgTx, error)
 	serializeTx        func(*wire.MsgTx) ([]byte, error)
@@ -601,20 +602,42 @@ func (wc *rpcClient) ListLockUnspent() ([]*RPCOutpoint, error) {
 	return unspents, nil
 }
 
+func (wc *rpcClient) addrType() string {
+	if wc.segwit {
+		return "bech32"
+	}
+	return "legacy"
+}
+
+// changeAddressArgs is getrawchangeaddress params.
+// Bitcoin Core: ("bech32"|"legacy"). lbcwallet: ("default", "bech32"|"legacy").
+func (wc *rpcClient) changeAddressArgs() anylist {
+	if wc.accountFirstAddrRPC {
+		return anylist{"default", wc.addrType()}
+	}
+	if wc.omitAddressType {
+		// lbcwallet without an address type still needs the account name.
+		return anylist{"default"}
+	}
+	return anylist{wc.addrType()}
+}
+
+// newAddressArgs is getnewaddress params.
+func (wc *rpcClient) newAddressArgs(aType string) anylist {
+	if wc.accountFirstAddrRPC {
+		return anylist{"default", aType}
+	}
+	if wc.omitAddressType {
+		return anylist{""}
+	}
+	return anylist{"", aType}
+}
+
 // ChangeAddress gets a new internal address from the wallet. The address will
-// be bech32-encoded (P2WPKH).
+// be bech32-encoded (P2WPKH) when segwit is enabled.
 func (wc *rpcClient) ChangeAddress(ctx context.Context) (btcutil.Address, error) {
 	var addrStr string
-	var err error
-	switch {
-	case wc.omitAddressType:
-		// lbcwallet getrawchangeaddress requires an account name.
-		err = Call(ctx, wc.requester(), methodChangeAddress, anylist{"default"}, &addrStr)
-	case wc.segwit:
-		err = Call(ctx, wc.requester(), methodChangeAddress, anylist{"bech32"}, &addrStr)
-	default:
-		err = Call(ctx, wc.requester(), methodChangeAddress, anylist{"legacy"}, &addrStr)
-	}
+	err := Call(ctx, wc.requester(), methodChangeAddress, wc.changeAddressArgs(), &addrStr)
 	if err != nil {
 		return nil, err
 	}
@@ -622,21 +645,14 @@ func (wc *rpcClient) ChangeAddress(ctx context.Context) (btcutil.Address, error)
 }
 
 func (wc *rpcClient) ExternalAddress(ctx context.Context) (btcutil.Address, error) {
-	if wc.segwit {
-		return wc.address(ctx, "bech32")
-	}
-	return wc.address(ctx, "legacy")
+	return wc.address(ctx, wc.addrType())
 }
 
 // address is used internally for fetching addresses of various types from the
 // wallet.
 func (wc *rpcClient) address(ctx context.Context, aType string) (btcutil.Address, error) {
 	var addrStr string
-	args := anylist{""}
-	if !wc.omitAddressType {
-		args = append(args, aType)
-	}
-	err := Call(ctx, wc.requester(), methodNewAddress, args, &addrStr)
+	err := Call(ctx, wc.requester(), methodNewAddress, wc.newAddressArgs(aType), &addrStr)
 	if err != nil {
 		return nil, err
 	}

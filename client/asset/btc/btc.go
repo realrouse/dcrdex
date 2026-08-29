@@ -397,6 +397,12 @@ type BTCCloneCFG struct {
 	// OmitAddressType causes the address type (bech32, legacy) to be omitted
 	// from calls to getnewaddress.
 	OmitAddressType bool
+	// AccountFirstAddrRPC is for wallets whose getnewaddress and
+	// getrawchangeaddress take (account, addresstype), e.g. lbcwallet.
+	// Bitcoin Core's getrawchangeaddress takes only addresstype, so
+	// passing "bech32" as the first argument would be treated as an
+	// account name.
+	AccountFirstAddrRPC bool
 	// LegacySignTxRPC causes the RPC client to use the signrawtransaction
 	// endpoint instead of the signrawtransactionwithwallet endpoint.
 	LegacySignTxRPC bool
@@ -1250,12 +1256,13 @@ func newRPCWallet(requester RawRequester, cfg *BTCCloneCFG, parsedCfg *RPCWallet
 		minDescriptorVersion: descriptorVersion,
 		optionalWalletInfo:   cfg.OptionalWalletInfo,
 
-		log:             cfg.Logger.SubLogger("RPC"),
-		chainParams:     cfg.ChainParams,
-		omitAddressType: cfg.OmitAddressType,
-		legacySignTx:    cfg.LegacySignTxRPC,
-		booleanGetBlock: cfg.BooleanGetBlockRPC,
-		unlockSpends:    cfg.UnlockSpends,
+		log:                 cfg.Logger.SubLogger("RPC"),
+		chainParams:         cfg.ChainParams,
+		omitAddressType:     cfg.OmitAddressType,
+		accountFirstAddrRPC: cfg.AccountFirstAddrRPC,
+		legacySignTx:        cfg.LegacySignTxRPC,
+		booleanGetBlock:     cfg.BooleanGetBlockRPC,
+		unlockSpends:        cfg.UnlockSpends,
 
 		deserializeTx:      btc.deserializeTx,
 		serializeTx:        btc.serializeTx,

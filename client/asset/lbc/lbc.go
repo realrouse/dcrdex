@@ -332,12 +332,13 @@ func newRPCWallet(cfg *asset.WalletConfig, logger dex.Logger, network dex.Networ
 			Other:     make(map[asset.BalanceCategory]asset.CustomBalance),
 		}, nil
 	}
-	// Non-segwit for lbcwallet RPC compatibility: getrawchangeaddress takes
-	// (account, addresstype); dcrdex would pass "bech32" as account.
-	cloneCFG.Segwit = false
-	cloneCFG.InitTxSize = dexbtc.InitTxSize
-	cloneCFG.InitTxSizeBase = dexbtc.InitTxSizeBase
-	cloneCFG.OmitAddressType = true
+	// lbcwallet getrawchangeaddress is (account, addresstype). AccountFirstAddrRPC
+	// sends ("default", "bech32") instead of Bitcoin Core's ("bech32").
+	cloneCFG.Segwit = true
+	cloneCFG.InitTxSize = dexbtc.InitTxSizeSegwit
+	cloneCFG.InitTxSizeBase = dexbtc.InitTxSizeBaseSegwit
+	cloneCFG.AccountFirstAddrRPC = true
+	cloneCFG.OmitAddressType = true // skip fundrawtransaction ChangeType
 	cloneCFG.LegacySignTxRPC = true
 	cloneCFG.LegacyValidateAddressRPC = true
 	cloneCFG.SingularWallet = true

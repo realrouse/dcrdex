@@ -48,12 +48,12 @@ func (d *Driver) UnitInfo() dex.UnitInfo {
 
 // MinBondSize calculates the minimum bond size for a given fee rate.
 func (d *Driver) MinBondSize(maxFeeRate uint64) uint64 {
-	return dexbtc.MinBondSize(maxFeeRate, false)
+	return dexbtc.MinBondSize(maxFeeRate, true)
 }
 
 // MinLotSize calculates the minimum lot size for a given fee rate.
 func (d *Driver) MinLotSize(maxFeeRate uint64) uint64 {
-	return dexbtc.MinLotSize(maxFeeRate, false)
+	return dexbtc.MinLotSize(maxFeeRate, true)
 }
 
 // Name is the asset's name.
@@ -93,9 +93,8 @@ func NewBackend(cfg *asset.BackendConfig) (asset.Backend, error) {
 	}
 
 	return btc.NewBTCClone(&btc.BackendCloneConfig{
-		Name: assetName,
-		// Match client: non-segwit until lbcwallet address-type RPC is aligned.
-		Segwit:               false,
+		Name:                 assetName,
+		Segwit:               true,
 		ConfigPath:           configPath,
 		Logger:               cfg.Logger,
 		Net:                  cfg.Net,

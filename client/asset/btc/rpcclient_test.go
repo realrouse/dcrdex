@@ -26,6 +26,29 @@ func (c *countingRequester) RawRequest(_ context.Context, _ string, _ []json.Raw
 	return json.RawMessage(`{}`), nil
 }
 
+func TestAccountFirstAddrRPCArgs(t *testing.T) {
+	lbc := &rpcClient{rpcCore: &rpcCore{segwit: true, accountFirstAddrRPC: true, omitAddressType: true}}
+	if got, want := fmt.Sprint(lbc.changeAddressArgs()), "[default bech32]"; got != want {
+		t.Fatalf("lbc change args: got %s, want %s", got, want)
+	}
+	if got, want := fmt.Sprint(lbc.newAddressArgs("bech32")), "[default bech32]"; got != want {
+		t.Fatalf("lbc new args: got %s, want %s", got, want)
+	}
+
+	bitcoind := &rpcClient{rpcCore: &rpcCore{segwit: true}}
+	if got, want := fmt.Sprint(bitcoind.changeAddressArgs()), "[bech32]"; got != want {
+		t.Fatalf("bitcoind change args: got %s, want %s", got, want)
+	}
+	if got, want := fmt.Sprint(bitcoind.newAddressArgs("bech32")), "[ bech32]"; got != want {
+		t.Fatalf("bitcoind new args: got %s, want %s", got, want)
+	}
+
+	legacyOmit := &rpcClient{rpcCore: &rpcCore{omitAddressType: true}}
+	if got, want := fmt.Sprint(legacyOmit.changeAddressArgs()), "[default]"; got != want {
+		t.Fatalf("omit change args: got %s, want %s", got, want)
+	}
+}
+
 func TestListUnspentSpendableOmitted(t *testing.T) {
 	var u ListUnspentResult
 	if err := json.Unmarshal([]byte(`{"txid":"aa","vout":0,"amount":1.5}`), &u); err != nil {
