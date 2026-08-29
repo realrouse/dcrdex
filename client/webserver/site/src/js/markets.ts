@@ -194,6 +194,7 @@ export default class MarketsPage extends BasePage {
   loadingAnimations: { candles?: Wave, depth?: Wave }
   mmRunning: boolean | undefined
   forms: Forms
+  obView: 'both' | 'buy' | 'sell'
   constructor (main: HTMLElement, pageParams: MarketsPageParams) {
     super()
 
@@ -203,6 +204,7 @@ export default class MarketsPage extends BasePage {
     // There may be multiple pending updates to the max order. This makes sure
     // that the screen is updated with the most recent one.
     this.maxOrderUpdateCounter = 0
+    this.obView = 'both'
     this.metaOrders = {}
     this.recentMatches = []
     this.preorderCache = {}
@@ -300,6 +302,7 @@ export default class MarketsPage extends BasePage {
       page.orderRowTmpl, page.durBttnTemplate, page.booleanOptTmpl, page.rangeOptTmpl,
       page.orderOptTmpl, page.userOrderTmpl, page.recentMatchesTemplate
     )
+    this.bindOrderBookModes()
 
     // Buttons to show token approval form
     bind(page.approveBaseBttn, 'click', () => { this.showTokenApprovalForm(true) })
@@ -698,6 +701,50 @@ export default class MarketsPage extends BasePage {
     page.obHeadPriceUnit.textContent = `(${quote})`
     page.obHeadAmtUnit.textContent = `(${base})`
     page.obHeadTotalUnit.textContent = `(${quote})`
+  }
+
+  bindOrderBookModes () {
+    const page = this.page
+    if (!page.obModeBoth) return
+    bind(page.obModeBoth, 'click', () => { this.setOrderBookView('both') })
+    bind(page.obModeBuy, 'click', () => { this.setOrderBookView('buy') })
+    bind(page.obModeSell, 'click', () => { this.setOrderBookView('sell') })
+    this.setOrderBookView(this.obView)
+  }
+
+  setOrderBookView (view: 'both' | 'buy' | 'sell') {
+    this.obView = view
+    const book = this.page.orderBook
+    if (book) {
+      book.classList.remove('ob-view-both', 'ob-view-buy', 'ob-view-sell')
+      book.classList.add(`ob-view-${view}`)
+    }
+    const modes: Array<['both' | 'buy' | 'sell', PageElement]> = [
+      ['both', this.page.obModeBoth],
+      ['buy', this.page.obModeBuy],
+      ['sell', this.page.obModeSell]
+    ]
+    for (const [v, el] of modes) {
+      if (el) el.classList.toggle('active', v === view)
+    }
+  }
+
+  /* refreshOrderBookDepth sizes MEXC depth bars relative to the largest level. */
+  refreshOrderBookDepth () {
+    let max = 0
+    for (const side of [this.page.sellRows, this.page.buyRows]) {
+      if (!side) continue
+      for (const row of Array.from(side.children) as OrderRow[]) {
+        if (row.manager) max = Math.max(max, row.manager.baseQty())
+      }
+    }
+    if (max <= 0) max = 1
+    for (const side of [this.page.sellRows, this.page.buyRows]) {
+      if (!side) continue
+      for (const row of Array.from(side.children) as OrderRow[]) {
+        if (row.manager) row.manager.setDepthBar(max)
+      }
+    }
   }
 
   /* setHighLow calculates the high and low rates over the last 24 hours. */
@@ -2990,6 +3037,7 @@ export default class MarketsPage extends BasePage {
   loadTable () {
     this.loadTableSide(true)
     this.loadTableSide(false)
+    this.refreshOrderBookDepth()
   }
 
   /* binOrdersByRateAndEpoch takes a list of sorted orders and returns the
@@ -3044,6 +3092,7 @@ export default class MarketsPage extends BasePage {
         row = this.orderTableRow([order])
         tbody.insertBefore(row, tbody.firstChild)
       }
+      this.refreshOrderBookDepth()
       return
     }
     // Must be a limit order. Sort by rate. Skip the market order row.
@@ -3051,16 +3100,19 @@ export default class MarketsPage extends BasePage {
     while (row) {
       if (row.manager.compare(order) === 0) {
         row.manager.insertOrder(order)
+        this.refreshOrderBookDepth()
         return
       } else if (row.manager.compare(order) > 0) {
         const tr = this.orderTableRow([order])
         tbody.insertBefore(tr, row)
+        this.refreshOrderBookDepth()
         return
       }
       row = row.nextSibling as OrderRow
     }
     const tr = this.orderTableRow([order])
     tbody.appendChild(tr)
+    this.refreshOrderBookDepth()
   }
 
   /* removeTableOrder removes a single order from its table. */
@@ -3069,6 +3121,7 @@ export default class MarketsPage extends BasePage {
     for (const tbody of [this.page.sellRows, this.page.buyRows]) {
       for (const tr of (Array.from(tbody.children) as OrderRow[])) {
         if (tr.manager.removeOrder(token)) {
+          this.refreshOrderBookDepth()
           return
         }
       }
@@ -3080,6 +3133,7 @@ export default class MarketsPage extends BasePage {
     for (const tbody of [this.page.sellRows, this.page.buyRows]) {
       for (const tr of (Array.from(tbody.children) as OrderRow[])) {
         if (tr.manager.updateOrderQty(u)) {
+          this.refreshOrderBookDepth()
           return
         }
       }
@@ -3092,6 +3146,7 @@ export default class MarketsPage extends BasePage {
   clearOrderTableEpochs () {
     this.clearOrderTableEpochSide(this.page.sellRows)
     this.clearOrderTableEpochSide(this.page.buyRows)
+    this.refreshOrderBookDepth()
   }
 
   /*
@@ -3105,7 +3160,7 @@ export default class MarketsPage extends BasePage {
   }
 
   /*
-   * orderTableRow creates a new <tr> element to insert into an order table.
+   * orderTableRow creates a new row element to insert into an order table.
      Takes a bin of orders with the same rate, and displays the total quantity.
    */
   orderTableRow (orderBin: MiniOrder[]): OrderRow {
@@ -3595,39 +3650,56 @@ class OrderTableRowManager {
     this.epoch = !!orderBin[0].epoch
     this.baseUnitInfo = baseUnitInfo
     this.quoteUnitInfo = quoteUnitInfo
+    tableRow.classList.add(this.sell ? 'ob-ask' : 'ob-bid')
+    if (page.bar) page.bar.classList.add(this.sell ? 'ob-ask-bar' : 'ob-bid-bar')
     const rateText = Doc.formatRateFullPrecision(this.msgRate, baseUnitInfo, quoteUnitInfo, rateStep)
     Doc.setVis(this.isEpoch(), this.page.epoch)
     if (this.msgRate === 0) {
-      page.rate.innerText = 'market'
+      page.rate.textContent = 'market'
     } else {
       const cssClass = this.isSell() ? 'sellcolor' : 'buycolor'
-      page.rate.innerText = rateText
+      page.rate.textContent = rateText
       page.rate.title = rateText
       page.rate.classList.add(cssClass)
     }
     this.updateQtyNumOrdersEl()
   }
 
+  baseQty (): number {
+    return this.orderBin.reduce((total, curr) => total + curr.qtyAtomic, 0)
+  }
+
+  setDepthBar (maxQty: number) {
+    const bar = this.page.bar
+    if (!bar) return
+    const ratio = maxQty > 0 ? Math.min(1, this.baseQty() / maxQty) : 0
+    bar.style.transform = `scaleX(${ratio})`
+  }
+
   // updateQtyNumOrdersEl populates the quantity element in the row, and also
   // displays the number of orders if there is more than one order in the order
   // bin.
   updateQtyNumOrdersEl () {
-    const { page, orderBin } = this
-    const qty = orderBin.reduce((total, curr) => total + curr.qtyAtomic, 0)
-    const numOrders = orderBin.length
-    page.qty.innerText = Doc.formatCoinValue(qty, this.baseUnitInfo)
-    // Quote notional at this price level (MEXC "Total" column).
-    if (page.total) {
+    const { page } = this
+    const qty = this.baseQty()
+    const numOrders = this.orderBin.length
+    page.qty.textContent = Doc.formatCoinValue(qty, this.baseUnitInfo)
+    // Quote notional at this price level (MEXC "Total" column). Bind via the
+    // inner [data-tmpl=total] span — a td[data-tmpl] was not reliably found.
+    const totalEl = page.total || this.tableRow.querySelector('[data-tmpl="total"]') as PageElement
+    if (totalEl) {
       if (this.msgRate === 0) {
-        page.total.innerText = '—'
+        totalEl.textContent = '—'
       } else {
         const quoteAtomic = Math.round(qty * this.msgRate / OrderUtil.RateEncodingFactor)
-        page.total.innerText = Doc.formatCoinValue(quoteAtomic, this.quoteUnitInfo)
+        totalEl.textContent = Number.isFinite(quoteAtomic)
+          ? Doc.formatCoinValue(quoteAtomic, this.quoteUnitInfo)
+          : '—'
       }
     }
     if (numOrders > 1) {
       page.numOrders.removeAttribute('hidden')
-      page.numOrders.innerText = String(numOrders)
+      page.numOrders.textContent = String(numOrders)
       page.numOrders.title = `quantity is comprised of ${numOrders} orders`
     } else {
       page.numOrders.setAttribute('hidden', 'true')

@@ -112,51 +112,52 @@
         </div>
         <div id="mainContent">
 
-          {{- /* ORDER BOOK — MEXC-style Price / Amount / Total */ -}}
-          <section class="d-flex flex-column orderbook">
+          {{- /* ORDER BOOK — MEXC layout: header, asks, last, bids; Price / Amount / Total */ -}}
+          <section id="orderBook" class="d-flex flex-column orderbook ob-view-both">
+            <div class="ob-controller">
+              <div class="ob-dir-wrap">
+                <button type="button" id="obModeBoth" class="ob-mode active" title="Bids and asks">
+                  <svg viewBox="0 0 20 20" aria-hidden="true" focusable="false"><path fill-rule="evenodd" clip-rule="evenodd" d="M15.9947 5.46776C15.9947 5.88493 15.6565 6.22312 15.2393 6.22312L4.76122 6.22312C4.34404 6.22312 4.00586 5.88493 4.00586 5.46776C4.00586 5.05059 4.34404 4.7124 4.76122 4.7124L15.2393 4.7124C15.6565 4.7124 15.9947 5.05059 15.9947 5.46776Z" fill="#EE2C5A"/><path fill-rule="evenodd" clip-rule="evenodd" d="M15.9947 14.5322C15.9947 14.9494 15.6565 15.2876 15.2393 15.2876L4.76122 15.2876C4.34404 15.2876 4.00586 14.9494 4.00586 14.5322C4.00586 14.115 4.34404 13.7769 4.76122 13.7769L15.2393 13.7769C15.6565 13.7769 15.9947 14.115 15.9947 14.5322Z" fill="#16B979"/><path fill-rule="evenodd" clip-rule="evenodd" d="M13.4256 8.48924C13.4256 8.90642 13.0874 9.2446 12.6703 9.2446L4.76122 9.2446C4.34404 9.2446 4.00586 8.90642 4.00586 8.48924C4.00586 8.07207 4.34404 7.73389 4.76122 7.73389L12.6703 7.73389C13.0874 7.73389 13.4256 8.07207 13.4256 8.48924Z" fill="#EE2C5A"/><path fill-rule="evenodd" clip-rule="evenodd" d="M13.4256 11.5107C13.4256 11.9279 13.0874 12.2661 12.6703 12.2661L4.76122 12.2661C4.34404 12.2661 4.00586 11.9279 4.00586 11.5107C4.00586 11.0936 4.34404 10.7554 4.76122 10.7554L12.6703 10.7554C13.0874 10.7554 13.4256 11.0936 13.4256 11.5107Z" fill="#16B979"/></svg>
+                </button>
+                <button type="button" id="obModeBuy" class="ob-mode ob-mode-buy" title="Bids">
+                  <svg viewBox="0 0 20 20" aria-hidden="true" focusable="false"><path fill="currentColor" fill-rule="evenodd" clip-rule="evenodd" d="M15.9947 14.5322C15.9947 14.1151 15.6565 13.7769 15.2393 13.7769L4.76122 13.7769C4.34404 13.7769 4.00586 14.1151 4.00586 14.5322C4.00586 14.9494 4.34404 15.2876 4.76122 15.2876L15.2393 15.2876C15.6565 15.2876 15.9947 14.9494 15.9947 14.5322Z"/><path fill="currentColor" fill-rule="evenodd" clip-rule="evenodd" d="M13.4256 11.5108C13.4256 11.0936 13.0874 10.7554 12.6703 10.7554L4.76122 10.7554C4.34404 10.7554 4.00586 11.0936 4.00586 11.5108C4.00586 11.9279 4.34404 12.2661 4.76122 12.2661L12.6703 12.2661C13.0874 12.2661 13.4256 11.9279 13.4256 11.5108Z"/><path fill="currentColor" fill-rule="evenodd" clip-rule="evenodd" d="M13.4256 8.48927C13.4256 8.0721 13.0874 7.73391 12.6703 7.73391L4.76122 7.73391C4.34404 7.73391 4.00586 8.0721 4.00586 8.48927C4.00586 8.90644 4.34404 9.24463 4.76122 9.24463L12.6703 9.24463C13.0874 9.24463 13.4256 8.90644 13.4256 8.48927Z"/><path fill="currentColor" fill-rule="evenodd" clip-rule="evenodd" d="M13.4256 5.46779C13.4256 5.05062 13.0874 4.71243 12.6703 4.71243L4.76122 4.71243C4.34404 4.71243 4.00586 5.05062 4.00586 5.46779C4.00586 5.88496 4.34404 6.22314 4.76122 6.22314L12.6703 6.22314C13.0874 6.22314 13.4256 5.88496 13.4256 5.46779Z"/></svg>
+                </button>
+                <button type="button" id="obModeSell" class="ob-mode ob-mode-sell" title="Asks">
+                  <svg viewBox="0 0 20 20" aria-hidden="true" focusable="false"><path fill="currentColor" fill-rule="evenodd" clip-rule="evenodd" d="M15.9947 5.4677C15.9947 5.88487 15.6565 6.22306 15.2393 6.22306L4.76122 6.22306C4.34404 6.22306 4.00586 5.88487 4.00586 5.4677C4.00586 5.05053 4.34404 4.71234 4.76122 4.71234L15.2393 4.71234C15.6565 4.71234 15.9947 5.05053 15.9947 5.4677Z"/><path fill="currentColor" fill-rule="evenodd" clip-rule="evenodd" d="M13.4256 8.48918C13.4256 8.90635 13.0874 9.24454 12.6703 9.24454L4.76122 9.24454C4.34404 9.24454 4.00586 8.90635 4.00586 8.48918C4.00586 8.07201 4.34404 7.73383 4.76122 7.73383L12.6703 7.73383C13.0874 7.73383 13.4256 8.07201 13.4256 8.48918Z"/><path fill="currentColor" fill-rule="evenodd" clip-rule="evenodd" d="M13.4256 11.5107C13.4256 11.9278 13.0874 12.266 12.6703 12.266L4.76122 12.266C4.34404 12.266 4.00586 11.9278 4.00586 11.5107C4.00586 11.0935 4.34404 10.7553 4.76122 10.7553L12.6703 10.7553C13.0874 10.7553 13.4256 11.0935 13.4256 11.5107Z"/><path fill="currentColor" fill-rule="evenodd" clip-rule="evenodd" d="M13.4256 14.5323C13.4256 14.9494 13.0874 15.2876 12.6703 15.2876L4.76122 15.2876C4.34404 15.2876 4.00586 14.9494 4.00586 14.5323C4.00586 14.1151 4.34404 13.7769 4.76122 13.7769L12.6703 13.7769C13.0874 13.7769 13.4256 14.1151 13.4256 14.5323Z"/></svg>
+                </button>
+              </div>
+            </div>
             <div id="obColHead" class="ob-mexc-head">
-              <span>Price <small id="obHeadPriceUnit"></small></span>
-              <span>Amount <small id="obHeadAmtUnit"></small></span>
-              <span>Total <small id="obHeadTotalUnit"></small></span>
+              <span class="ob-col-price">Price<span class="ob-unit" id="obHeadPriceUnit"></span></span>
+              <span class="ob-col-amt">Amount<span class="ob-unit" id="obHeadAmtUnit"></span></span>
+              <span class="ob-col-total">Total<span class="ob-unit" id="obHeadTotalUnit"></span></span>
             </div>
             <div class="stylish-overflow hoveronly overflow-x-hidden flex-grow-1 ordertable-wrap reversible ob-sells">
-
-              {{- /* SELL ORDER LIST */ -}}
-              <table class="compact row-hover lh1 fs15 ob-table">
-                <tbody id="sellRows"></tbody>
-              </table>
+              <div id="sellRows" class="ob-rows ob-asks"></div>
             </div>
 
-            <div class="border-top border-bottom p-2 flex-center fs15 ob-spread">
-              <span class="flex-grow-1">Order Book</span>
-              <span class="flex-center">
-                <span id="obUp" class="ico-arrowup buycolor fs11"></span>
-                <span id="obDown" class="ico-arrowdown sellcolor fs11 d-hide"></span>
-                <span id="obPrice" class="buycolor ms-1"></span>
-              </span>
+            <div class="ob-spread">
+              <span id="obPrice" class="ob-last-price buycolor">-</span>
+              <span id="obUp" class="ico-arrowup buycolor fs11"></span>
+              <span id="obDown" class="ico-arrowdown sellcolor fs11 d-hide"></span>
             </div>
 
             <div class="stylish-overflow hoveronly overflow-x-hidden flex-grow-1 ordertable-wrap ob-buys">
-
-              {{- /* BUY ORDER LIST */ -}}
-              <table class="compact row-hover buys lh1 fs15 ob-table">
-                <tbody id="buyRows">
-                  {{- /* This row is used by the app as a template. */ -}}
-                  <tr id="orderRowTmpl" class="px-2 w-100">
-                    <td class="book-rate text-nowrap">
-                      <span class="text-end ico-check fs13 pe-1 d-hide" data-tmpl="epoch"></span>
-                      <span data-tmpl="rate">-</span>
-                    </td>
-                    <td class="book-qty">
-                      <div class="d-flex justify-content-end align-items-center">
-                        <div data-tmpl="qty">-</div>
-                        <small class="numorders lh1 rounded3 text-center ms-1" data-tmpl="numOrders">-</small>
-                      </div>
-                    </td>
-                    <td class="book-total text-end text-nowrap" data-tmpl="total">-</td>
-                  </tr>
-                </tbody>
-              </table> {{- /* END BUY ORDER LIST */ -}}
+              <div id="buyRows" class="ob-rows ob-bids">
+                {{- /* This row is used by the app as a template. data-tmpl lives on inner spans so parseTemplate always binds. */ -}}
+                <div id="orderRowTmpl" class="ob-row">
+                  <div class="ob-bar" data-tmpl="bar"></div>
+                  <div class="ob-col-price">
+                    <span class="text-end ico-check fs13 pe-1 d-hide" data-tmpl="epoch"></span>
+                    <span data-tmpl="rate">-</span>
+                  </div>
+                  <div class="ob-col-amt">
+                    <span data-tmpl="qty">-</span>
+                    <small class="numorders lh1 rounded3 text-center ms-1" data-tmpl="numOrders">-</small>
+                  </div>
+                  <div class="ob-col-total"><span data-tmpl="total">-</span></div>
+                </div>
+              </div>
             </div>
           </section> {{- /* END ORDER BOOK */ -}}
 

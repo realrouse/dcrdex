@@ -12,7 +12,7 @@ div[data-handler=markets] {
       @include border-top;
     }
 
-    tbody#sellRows {
+    #sellRows {
       @include border-top;
     }
   }
@@ -20,51 +20,167 @@ div[data-handler=markets] {
   .orderbook {
     min-width: 268px;
 
-    table {
-      width: 100%;
+    .ob-controller {
+      display: flex;
+      align-items: center;
+      justify-content: flex-start;
+      padding: 4px 6px 2px;
+      flex: 0 0 auto;
     }
 
-    td.book-rate,
-    td.book-qty,
-    td.book-total {
-      font-variant-numeric: tabular-nums;
+    .ob-dir-wrap {
+      display: flex;
+      align-items: center;
+      gap: 2px;
     }
 
-    td.book-rate {
-      min-width: 7em;
+    .ob-mode {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      width: 22px;
+      height: 22px;
+      padding: 0;
+      border: 0;
+      border-radius: 2px;
+      background: transparent;
+      color: var(--text-grey);
+      cursor: pointer;
+
+      svg {
+        width: 16px;
+        height: 16px;
+        display: block;
+      }
+
+      &:hover {
+        background-color: var(--tertiary-bg);
+      }
+
+      &.active {
+        background-color: var(--tertiary-bg);
+        color: var(--text-color);
+      }
+
+      &.ob-mode-buy.active {
+        color: var(--buy-color);
+      }
+
+      &.ob-mode-sell.active {
+        color: var(--sell-color);
+      }
     }
 
     .ob-mexc-head {
       display: grid;
       grid-template-columns: 1.15fr 1fr 1fr;
       gap: 0.25rem;
-      padding: 0.35rem 0.5rem;
+      padding: 0.3rem 8px 0.35rem;
       font-size: 11px;
       letter-spacing: 0.04em;
       text-transform: uppercase;
-      color: var(--text-muted, #888);
+      color: var(--text-grey);
       flex: 0 0 auto;
-      order: 0;
-      small { font-size: 10px; opacity: 0.8; text-transform: none; letter-spacing: 0; }
     }
 
-    .ob-table td {
-      padding-top: 0.12rem;
-      padding-bottom: 0.12rem;
+    .ob-unit {
+      font-size: 10px;
+      opacity: 0.8;
+      text-transform: none;
+      letter-spacing: 0;
+      margin-left: 0.15em;
     }
 
-    .ob-table tr {
+    .ob-rows {
+      display: flex;
+      flex-direction: column;
+      align-items: stretch;
+      width: 100%;
+    }
+
+    .ob-asks {
+      flex-direction: column-reverse;
+    }
+
+    .ob-bids {
+      flex-direction: column;
+    }
+
+    .ob-row {
+      position: relative;
       display: grid;
       grid-template-columns: 1.15fr 1fr 1fr;
       gap: 0.25rem;
       align-items: center;
       width: 100%;
+      height: 21px;
+      padding: 0 8px;
+      cursor: pointer;
+      font-size: 12px;
+      font-variant-numeric: tabular-nums;
+      line-height: 1;
+
+      &:hover {
+        background-color: var(--tertiary-bg);
+      }
     }
 
-    & > .ob-mexc-head { order: 0; }
-    & > .ob-sells { order: 3; }
-    & > .ob-spread { order: 1; }
-    & > .ob-buys { order: 2; }
+    .ob-bar {
+      position: absolute;
+      inset: 0;
+      transform: scaleX(0);
+      transform-origin: right center;
+      pointer-events: none;
+      z-index: 0;
+    }
+
+    .ob-ask-bar {
+      background-color: var(--sell-color);
+      opacity: 0.18;
+    }
+
+    .ob-bid-bar {
+      background-color: var(--buy-color);
+      opacity: 0.18;
+    }
+
+    .ob-col-price,
+    .ob-col-amt,
+    .ob-col-total {
+      position: relative;
+      z-index: 1;
+      min-width: 0;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .ob-col-amt,
+    .ob-col-total {
+      text-align: right;
+    }
+
+    .ob-spread {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      padding: 6px 8px;
+      flex: 0 0 auto;
+      @include border-top;
+      @include border-bottom;
+    }
+
+    .ob-last-price {
+      font-size: 16px;
+      font-weight: 600;
+      font-variant-numeric: tabular-nums;
+      line-height: 1.2;
+    }
+
+    &.ob-view-buy .ob-sells,
+    &.ob-view-sell .ob-buys {
+      display: none;
+    }
   }
 
   .order-panel {
@@ -662,17 +778,18 @@ div[data-handler=markets] {
         flex-direction: column-reverse;
       }
 
-      tbody {
+      .ob-rows {
         display: flex;
         align-items: stretch;
+        width: 100%;
       }
 
-      tbody#sellRows {
+      .ob-asks {
         flex-direction: column-reverse;
         border-top: none;
       }
 
-      tbody#buyRows {
+      .ob-bids {
         flex-direction: column;
       }
     }
@@ -680,10 +797,10 @@ div[data-handler=markets] {
     .orderbook {
       width: auto;
 
-      & > .ob-mexc-head { order: 1; }
-      & > .ob-sells { order: 2; }
-      & > .ob-spread { order: 3; }
-      & > .ob-buys { order: 4; }
+      &.ob-view-buy .ob-buys,
+      &.ob-view-sell .ob-sells {
+        height: calc(100% - 70px);
+      }
     }
 
     .order-panel {
