@@ -670,6 +670,7 @@ export default class MarketsPage extends BasePage {
     this.page.obPrice.textContent = convPrice > 0 ? Doc.formatFourSigFigs(convPrice) : '-'
     this.page.obPrice.classList.remove('sellcolor', 'buycolor')
     this.page.obPrice.classList.add(mkt.spot.change24 >= 0 ? 'buycolor' : 'sellcolor')
+    this.setOrderBookColumnUnits()
     Doc.setVis(mkt.spot.change24 >= 0, this.page.obUp)
     Doc.setVis(mkt.spot.change24 < 0, this.page.obDown)
   }
@@ -685,6 +686,18 @@ export default class MarketsPage extends BasePage {
       s.tmpl.baseSymbol.appendChild(Doc.symbolize(ba, true))
       s.tmpl.quoteSymbol.appendChild(Doc.symbolize(qa, true))
     }
+    this.setOrderBookColumnUnits()
+  }
+
+  /* setOrderBookColumnUnits labels MEXC-style Price / Amount / Total headers. */
+  setOrderBookColumnUnits () {
+    const page = this.page
+    if (!page.obHeadPriceUnit || !this.market) return
+    const base = this.market.baseUnitInfo.conventional.unit
+    const quote = this.market.quoteUnitInfo.conventional.unit
+    page.obHeadPriceUnit.textContent = `(${quote})`
+    page.obHeadAmtUnit.textContent = `(${base})`
+    page.obHeadTotalUnit.textContent = `(${quote})`
   }
 
   /* setHighLow calculates the high and low rates over the last 24 hours. */
@@ -3571,6 +3584,7 @@ class OrderTableRowManager {
   msgRate: number
   epoch: boolean
   baseUnitInfo: UnitInfo
+  quoteUnitInfo: UnitInfo
 
   constructor (tableRow: HTMLElement, orderBin: MiniOrder[], baseUnitInfo: UnitInfo, quoteUnitInfo: UnitInfo, rateStep: number) {
     this.tableRow = tableRow
@@ -3580,6 +3594,7 @@ class OrderTableRowManager {
     this.msgRate = orderBin[0].msgRate
     this.epoch = !!orderBin[0].epoch
     this.baseUnitInfo = baseUnitInfo
+    this.quoteUnitInfo = quoteUnitInfo
     const rateText = Doc.formatRateFullPrecision(this.msgRate, baseUnitInfo, quoteUnitInfo, rateStep)
     Doc.setVis(this.isEpoch(), this.page.epoch)
     if (this.msgRate === 0) {
@@ -3601,6 +3616,15 @@ class OrderTableRowManager {
     const qty = orderBin.reduce((total, curr) => total + curr.qtyAtomic, 0)
     const numOrders = orderBin.length
     page.qty.innerText = Doc.formatCoinValue(qty, this.baseUnitInfo)
+    // Quote notional at this price level (MEXC "Total" column).
+    if (page.total) {
+      if (this.msgRate === 0) {
+        page.total.innerText = '—'
+      } else {
+        const quoteAtomic = Math.round(qty * this.msgRate / OrderUtil.RateEncodingFactor)
+        page.total.innerText = Doc.formatCoinValue(quoteAtomic, this.quoteUnitInfo)
+      }
+    }
     if (numOrders > 1) {
       page.numOrders.removeAttribute('hidden')
       page.numOrders.innerText = String(numOrders)

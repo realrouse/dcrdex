@@ -112,17 +112,22 @@
         </div>
         <div id="mainContent">
 
-          {{- /* ORDER BOOK */ -}}
+          {{- /* ORDER BOOK — MEXC-style Price / Amount / Total */ -}}
           <section class="d-flex flex-column orderbook">
-            <div class="stylish-overflow hoveronly overflow-x-hidden flex-grow-1 ordertable-wrap reversible">
+            <div id="obColHead" class="ob-mexc-head">
+              <span>Price <small id="obHeadPriceUnit"></small></span>
+              <span>Amount <small id="obHeadAmtUnit"></small></span>
+              <span>Total <small id="obHeadTotalUnit"></small></span>
+            </div>
+            <div class="stylish-overflow hoveronly overflow-x-hidden flex-grow-1 ordertable-wrap reversible ob-sells">
 
               {{- /* SELL ORDER LIST */ -}}
-              <table class="compact row-hover lh1 fs15">
+              <table class="compact row-hover lh1 fs15 ob-table">
                 <tbody id="sellRows"></tbody>
               </table>
             </div>
 
-            <div class="border-top border-bottom p-2 flex-center fs15">
+            <div class="border-top border-bottom p-2 flex-center fs15 ob-spread">
               <span class="flex-grow-1">Order Book</span>
               <span class="flex-center">
                 <span id="obUp" class="ico-arrowup buycolor fs11"></span>
@@ -131,23 +136,24 @@
               </span>
             </div>
 
-            <div class="stylish-overflow hoveronly overflow-x-hidden flex-grow-1 ordertable-wrap">
+            <div class="stylish-overflow hoveronly overflow-x-hidden flex-grow-1 ordertable-wrap ob-buys">
 
               {{- /* BUY ORDER LIST */ -}}
-              <table class="compact row-hover buys lh1 fs15">
+              <table class="compact row-hover buys lh1 fs15 ob-table">
                 <tbody id="buyRows">
                   {{- /* This row is used by the app as a template. */ -}}
                   <tr id="orderRowTmpl" class="px-2 w-100">
-                    <td class="book-qty pe-2">
-                      <div class="d-flex justify-content-start align-items-center">
-                        <div data-tmpl="qty">-</div>
-                        <small class="numorders lh1 rounded3 text-center ms-2" data-tmpl="numOrders">-</small>
-                      </div>
-                    </td>
-                    <td class="book-rate text-end text-nowrap ps-2">
+                    <td class="book-rate text-nowrap">
                       <span class="text-end ico-check fs13 pe-1 d-hide" data-tmpl="epoch"></span>
                       <span data-tmpl="rate">-</span>
                     </td>
+                    <td class="book-qty">
+                      <div class="d-flex justify-content-end align-items-center">
+                        <div data-tmpl="qty">-</div>
+                        <small class="numorders lh1 rounded3 text-center ms-1" data-tmpl="numOrders">-</small>
+                      </div>
+                    </td>
+                    <td class="book-total text-end text-nowrap" data-tmpl="total">-</td>
                   </tr>
                 </tbody>
               </table> {{- /* END BUY ORDER LIST */ -}}
