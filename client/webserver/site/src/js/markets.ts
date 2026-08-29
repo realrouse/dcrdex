@@ -195,6 +195,8 @@ export default class MarketsPage extends BasePage {
   mmRunning: boolean | undefined
   forms: Forms
   obView: 'both' | 'buy' | 'sell'
+  obCumulative: boolean
+  obGroupConv: number
   constructor (main: HTMLElement, pageParams: MarketsPageParams) {
     super()
 
@@ -205,6 +207,8 @@ export default class MarketsPage extends BasePage {
     // that the screen is updated with the most recent one.
     this.maxOrderUpdateCounter = 0
     this.obView = 'both'
+    this.obCumulative = !!State.fetchLocal(State.obCumulativeLK)
+    this.obGroupConv = 0
     this.metaOrders = {}
     this.recentMatches = []
     this.preorderCache = {}
@@ -303,6 +307,7 @@ export default class MarketsPage extends BasePage {
       page.orderOptTmpl, page.userOrderTmpl, page.recentMatchesTemplate
     )
     this.bindOrderBookModes()
+    this.bindOrderBookViewControls()
 
     // Buttons to show token approval form
     bind(page.approveBaseBttn, 'click', () => { this.showTokenApprovalForm(true) })
@@ -729,22 +734,143 @@ export default class MarketsPage extends BasePage {
     }
   }
 
+  bindOrderBookViewControls () {
+    const page = this.page
+    if (page.obCumulative) {
+      const cumBox = page.obCumulative as HTMLInputElement
+      cumBox.checked = this.obCumulative
+      bind(cumBox, 'change', () => {
+        this.obCumulative = !!cumBox.checked
+        State.storeLocal(State.obCumulativeLK, this.obCumulative)
+        this.applyOrderBookDisplay()
+      })
+    }
+    if (page.obGroupSelect) {
+      bind(page.obGroupSelect, 'change', () => {
+        const v = parseFloat((page.obGroupSelect as unknown as HTMLSelectElement).value)
+        if (!Number.isFinite(v) || v <= 0) return
+        this.obGroupConv = v
+        State.storeLocal(State.obGroupConvLK, v)
+        this.loadTable()
+      })
+    }
+  }
+
+  nativeGroupConv (): number {
+    if (!this.market) return 0
+    const step = this.market.cfg.ratestep / this.market.rateConversionFactor
+    return step > 0 && Number.isFinite(step) ? step : 0
+  }
+
+  obGroupingActive (): boolean {
+    const native = this.nativeGroupConv()
+    return this.obGroupConv > native * 1.0000001
+  }
+
+  obGroupDecimals (): number | null {
+    if (!this.obGroupingActive()) return null
+    const d = Math.round(-Math.log10(this.obGroupConv))
+    return Number.isFinite(d) && d > 0 ? d : 0
+  }
+
+  syncOrderBookGroupSelect () {
+    const sel = this.page.obGroupSelect as unknown as HTMLSelectElement
+    if (!sel || !this.market) return
+    const native = this.nativeGroupConv()
+    const opts: number[] = []
+    // Powers of 10 from native step up to 0.01 (same ladder as MEXC / staging).
+    let v = 1
+    while (v > native * 1.001 && v > 1e-12) v /= 10
+    while (v < native * 0.999 && v < 0.01) v *= 10
+    while (v <= 0.01 + 1e-15) {
+      opts.push(v)
+      v *= 10
+    }
+    if (!opts.length && native > 0) opts.push(native)
+    const stored = Number(State.fetchLocal(State.obGroupConvLK))
+    let current = native
+    if (Number.isFinite(stored) && stored > 0) {
+      const match = opts.find(o => Math.abs(o - stored) / stored < 1e-6)
+      if (match) current = match
+    }
+    this.obGroupConv = current
+    Doc.empty(sel)
+    for (const g of opts) {
+      const opt = document.createElement('option')
+      const decimals = Math.max(0, Math.round(-Math.log10(g)))
+      opt.value = String(g)
+      opt.textContent = g.toFixed(decimals)
+      if (Math.abs(g - current) / current < 1e-6) opt.selected = true
+      sel.appendChild(opt)
+    }
+  }
+
+  groupedMsgRate (order: MiniOrder): number {
+    if (!order.msgRate || !this.obGroupingActive()) return order.msgRate
+    const g = this.obGroupConv
+    const conv = order.msgRate / this.market.rateConversionFactor
+    const grouped = order.sell
+      ? Math.ceil(conv / g - 1e-12) * g
+      : Math.floor(conv / g + 1e-12) * g
+    return Math.round(grouped * this.market.rateConversionFactor)
+  }
+
+  viewOrderBins (orders: MiniOrder[], sell: boolean): MiniOrder[][] {
+    if (!orders || !orders.length) return []
+    if (!this.obGroupingActive()) return this.binOrdersByRateAndEpoch(orders)
+    const markets: MiniOrder[] = []
+    const buckets = new Map<number, MiniOrder[]>()
+    for (const o of orders) {
+      if (!o.msgRate) {
+        markets.push(o)
+        continue
+      }
+      const key = this.groupedMsgRate(o)
+      const bin = buckets.get(key)
+      if (bin) bin.push(o)
+      else buckets.set(key, [o])
+    }
+    const keys = Array.from(buckets.keys()).sort((a, b) => sell ? a - b : b - a)
+    const bins: MiniOrder[][] = []
+    if (markets.length) bins.push(markets)
+    for (const k of keys) bins.push(buckets.get(k) as MiniOrder[])
+    return bins
+  }
+
+  /* applyOrderBookDisplay sets Amount/Total and depth bars, optionally cumulative from the spread. */
+  applyOrderBookDisplay () {
+    const cum = this.obCumulative
+    for (const side of [this.page.sellRows, this.page.buyRows]) {
+      if (!side) continue
+      const rows = Array.from(side.children) as OrderRow[]
+      let runQty = 0
+      let runQuote = 0
+      let maxQty = 0
+      const levels: Array<{ row: OrderRow, qty: number, quote: number }> = []
+      for (const row of rows) {
+        if (!row.manager) continue
+        const qty = row.manager.baseQty()
+        const quote = row.manager.quoteQty()
+        if (cum) {
+          runQty += qty
+          runQuote += quote
+          levels.push({ row, qty: runQty, quote: runQuote })
+          maxQty = Math.max(maxQty, runQty)
+        } else {
+          levels.push({ row, qty, quote })
+          maxQty = Math.max(maxQty, qty)
+        }
+      }
+      if (maxQty <= 0) maxQty = 1
+      for (const { row, qty, quote } of levels) {
+        row.manager.setView(qty, quote, qty / maxQty)
+      }
+    }
+  }
+
   /* refreshOrderBookDepth sizes MEXC depth bars relative to the largest level. */
   refreshOrderBookDepth () {
-    let max = 0
-    for (const side of [this.page.sellRows, this.page.buyRows]) {
-      if (!side) continue
-      for (const row of Array.from(side.children) as OrderRow[]) {
-        if (row.manager) max = Math.max(max, row.manager.baseQty())
-      }
-    }
-    if (max <= 0) max = 1
-    for (const side of [this.page.sellRows, this.page.buyRows]) {
-      if (!side) continue
-      for (const row of Array.from(side.children) as OrderRow[]) {
-        if (row.manager) row.manager.setDepthBar(max)
-      }
-    }
+    this.applyOrderBookDisplay()
   }
 
   /* setHighLow calculates the high and low rates over the last 24 hours. */
@@ -1249,6 +1375,7 @@ export default class MarketsPage extends BasePage {
     }
 
     this.market = mkt
+    this.syncOrderBookGroupSelect()
     this.mm.setMarket(host, baseID, quoteID)
     this.mmRunning = undefined
     page.lotSize.textContent = Doc.formatCoinValue(mkt.cfg.lotsize, mkt.baseUnitInfo)
@@ -3035,6 +3162,7 @@ export default class MarketsPage extends BasePage {
 
   /* loadTable reloads the table from the current order book information. */
   loadTable () {
+    if (!this.book) return
     this.loadTableSide(true)
     this.loadTableSide(false)
     this.refreshOrderBookDepth()
@@ -3074,12 +3202,17 @@ export default class MarketsPage extends BasePage {
     const tbody = sell ? this.page.sellRows : this.page.buyRows
     Doc.empty(tbody)
     if (!bookSide || !bookSide.length) return
-    const orderBins = this.binOrdersByRateAndEpoch(bookSide)
+    const orderBins = this.viewOrderBins(bookSide, sell)
     orderBins.forEach(bin => { tbody.appendChild(this.orderTableRow(bin)) })
   }
 
   /* addTableOrder adds a single order to the appropriate table. */
   addTableOrder (order: MiniOrder) {
+    if (order.rate === 0 && order.qtyAtomic === 0) return // cancel
+    if (this.obGroupingActive()) {
+      this.loadTable()
+      return
+    }
     const tbody = order.sell ? this.page.sellRows : this.page.buyRows
     let row = tbody.firstChild as OrderRow
     // Handle market order differently.
@@ -3117,6 +3250,10 @@ export default class MarketsPage extends BasePage {
 
   /* removeTableOrder removes a single order from its table. */
   removeTableOrder (order: MiniOrder) {
+    if (this.obGroupingActive()) {
+      this.loadTable()
+      return
+    }
     const token = order.token
     for (const tbody of [this.page.sellRows, this.page.buyRows]) {
       for (const tr of (Array.from(tbody.children) as OrderRow[])) {
@@ -3130,6 +3267,10 @@ export default class MarketsPage extends BasePage {
 
   /* updateTableOrder looks for the order in the table and updates the qty */
   updateTableOrder (u: RemainderUpdate) {
+    if (this.obGroupingActive()) {
+      this.loadTable()
+      return
+    }
     for (const tbody of [this.page.sellRows, this.page.buyRows]) {
       for (const tr of (Array.from(tbody.children) as OrderRow[])) {
         if (tr.manager.updateOrderQty(u)) {
@@ -3166,7 +3307,8 @@ export default class MarketsPage extends BasePage {
   orderTableRow (orderBin: MiniOrder[]): OrderRow {
     const tr = this.page.orderRowTmpl.cloneNode(true) as OrderRow
     const { baseUnitInfo, quoteUnitInfo, rateConversionFactor, cfg: { ratestep: rateStep } } = this.market
-    const manager = new OrderTableRowManager(tr, orderBin, baseUnitInfo, quoteUnitInfo, rateStep)
+    const displayRate = this.groupedMsgRate(orderBin[0])
+    const manager = new OrderTableRowManager(tr, orderBin, baseUnitInfo, quoteUnitInfo, rateStep, displayRate, this.obGroupDecimals())
     tr.manager = manager
     bind(tr, 'click', () => {
       this.reportDepthClick(tr.manager.getRate() / rateConversionFactor)
@@ -3640,19 +3782,28 @@ class OrderTableRowManager {
   epoch: boolean
   baseUnitInfo: UnitInfo
   quoteUnitInfo: UnitInfo
+  priceDecimals: number | null
 
-  constructor (tableRow: HTMLElement, orderBin: MiniOrder[], baseUnitInfo: UnitInfo, quoteUnitInfo: UnitInfo, rateStep: number) {
+  constructor (tableRow: HTMLElement, orderBin: MiniOrder[], baseUnitInfo: UnitInfo, quoteUnitInfo: UnitInfo, rateStep: number, displayMsgRate?: number, priceDecimals?: number | null) {
     this.tableRow = tableRow
     const page = this.page = Doc.parseTemplate(tableRow)
     this.orderBin = orderBin
     this.sell = orderBin[0].sell
-    this.msgRate = orderBin[0].msgRate
-    this.epoch = !!orderBin[0].epoch
+    this.msgRate = displayMsgRate ?? orderBin[0].msgRate
+    this.epoch = orderBin.some(o => !!o.epoch)
     this.baseUnitInfo = baseUnitInfo
     this.quoteUnitInfo = quoteUnitInfo
+    this.priceDecimals = priceDecimals ?? null
     tableRow.classList.add(this.sell ? 'ob-ask' : 'ob-bid')
     if (page.bar) page.bar.classList.add(this.sell ? 'ob-ask-bar' : 'ob-bid-bar')
-    const rateText = Doc.formatRateFullPrecision(this.msgRate, baseUnitInfo, quoteUnitInfo, rateStep)
+    let rateText = Doc.formatRateFullPrecision(this.msgRate, baseUnitInfo, quoteUnitInfo, rateStep)
+    if (this.priceDecimals !== null && this.msgRate !== 0) {
+      const conv = this.msgRate * baseUnitInfo.conventional.conversionFactor / quoteUnitInfo.conventional.conversionFactor / OrderUtil.RateEncodingFactor
+      rateText = conv.toLocaleString(undefined, {
+        minimumFractionDigits: this.priceDecimals,
+        maximumFractionDigits: this.priceDecimals
+      })
+    }
     Doc.setVis(this.isEpoch(), this.page.epoch)
     if (this.msgRate === 0) {
       page.rate.textContent = 'market'
@@ -3669,11 +3820,30 @@ class OrderTableRowManager {
     return this.orderBin.reduce((total, curr) => total + curr.qtyAtomic, 0)
   }
 
+  quoteQty (): number {
+    return this.orderBin.reduce((total, curr) => {
+      if (!curr.msgRate) return total
+      return total + Math.round(curr.qtyAtomic * curr.msgRate / OrderUtil.RateEncodingFactor)
+    }, 0)
+  }
+
   setDepthBar (maxQty: number) {
     const bar = this.page.bar
     if (!bar) return
     const ratio = maxQty > 0 ? Math.min(1, this.baseQty() / maxQty) : 0
     bar.style.transform = `scaleX(${ratio})`
+  }
+
+  setView (qty: number, quote: number, barRatio: number) {
+    const { page } = this
+    page.qty.textContent = Doc.formatCoinValue(qty, this.baseUnitInfo)
+    const totalEl = page.total || this.tableRow.querySelector('[data-tmpl="total"]') as PageElement
+    if (totalEl) {
+      totalEl.textContent = this.msgRate === 0
+        ? '—'
+        : Doc.formatCoinValue(quote, this.quoteUnitInfo)
+    }
+    if (page.bar) page.bar.style.transform = `scaleX(${Math.min(1, Math.max(0, barRatio))})`
   }
 
   // updateQtyNumOrdersEl populates the quantity element in the row, and also

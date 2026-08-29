@@ -20,6 +20,8 @@ export default class State {
   static notificationsLK = 'notifications' // DEPRECATED before v1
   static orderDisclaimerAckedLK = 'ordAck'
   static lastCandleDurationLK = 'lastCandleDuration'
+  static obCumulativeLK = 'obCumulative'
+  static obGroupConvLK = 'obGroupConv'
   static localeSpecsKey = 'localeSpecsLK'
   static localeKey = 'localeLK'
   static newUserBannerDismissedLK = 'newUserBannerDismissed'
