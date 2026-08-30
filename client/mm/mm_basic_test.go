@@ -447,6 +447,9 @@ func TestBasicMMRebalance(t *testing.T) {
 				t.Fatal("expected both buy and sell orders placed")
 			}
 			buys, sells := tcore.multiTradesPlaced[0], tcore.multiTradesPlaced[1]
+			if buys.Sell {
+				buys, sells = sells, buys
+			}
 
 			expOrdersN := len(tt.expBuyPlacements) + len(tt.expSellPlacements)
 			if len(buys.Placements)+len(sells.Placements) != expOrdersN {

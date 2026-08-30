@@ -998,7 +998,7 @@ func withinTolerance(rate, target uint64, driftTolerance float64) bool {
 	return rate >= lowerBound && rate <= upperBound
 }
 
-func (u *unifiedExchangeAdaptor) placeMultiTrade(placements []*dexOrderInfo, sell bool) []*core.MultiTradeResult {
+func (u *unifiedExchangeAdaptor) placeMultiTrade(placements []*dexOrderInfo, sell bool, currEpoch uint64) []*core.MultiTradeResult {
 	corePlacements := make([]*core.QtyRate, 0, len(placements))
 	for _, p := range placements {
 		corePlacements = append(corePlacements, p.placement)
@@ -1048,6 +1048,9 @@ func (u *unifiedExchangeAdaptor) placeMultiTrade(placements []*dexOrderInfo, sel
 		}
 
 		o := res.Order
+		if o.Epoch == 0 {
+			o.Epoch = currEpoch
+		}
 		var orderID order.OrderID
 		copy(orderID[:], o.ID)
 
@@ -1259,8 +1262,27 @@ func (u *unifiedExchangeAdaptor) multiTrade(
 	cancels := make([]dex.Bytes, 0, len(placements))
 
 	addCancel := func(o *core.Order) {
-		if currEpoch-o.Epoch < 2 { // TODO: check epoch
+		// Never cancel an epoch-status order: the server revokes it
+		// (score hit) instead of booking a cancel. core.Order.Epoch is
+		// often 0, so the old currEpoch-o.Epoch < 2 guard never fired.
+		if o.Status == order.OrderStatusEpoch {
+			u.log.Debugf("multiTrade: skipping cancel of epoch-status order %s", o.ID)
+			return
+		}
+		if o.Epoch != 0 && currEpoch >= o.Epoch && currEpoch-o.Epoch < 2 {
 			u.log.Debugf("multiTrade: skipping cancel not past free cancel threshold")
+			return
+		}
+		if o.Epoch == 0 && o.Stamp > 0 {
+			placed := time.UnixMilli(int64(o.Stamp))
+			if time.Since(placed) < 12*time.Second {
+				u.log.Debugf("multiTrade: skipping cancel of recently placed order %s", o.ID)
+				return
+			}
+		}
+		const maxCancelsPerCall = 8
+		if len(cancels) >= maxCancelsPerCall {
+			u.log.Debugf("multiTrade: skipping further cancels this epoch (cap %d)", maxCancelsPerCall)
 			return
 		}
 		cancels = append(cancels, o.ID)
@@ -1437,7 +1459,7 @@ func (u *unifiedExchangeAdaptor) multiTrade(
 	}
 
 	if len(orderInfos) > 0 {
-		results := u.placeMultiTrade(orderInfos, sell)
+		results := u.placeMultiTrade(orderInfos, sell, currEpoch)
 		ordered := make(map[order.OrderID]*dexOrderInfo, len(placements))
 		for i, res := range results {
 			if res.Error != nil {
@@ -1474,7 +1496,7 @@ func (u *unifiedExchangeAdaptor) DEXTrade(rate, qty uint64, sell bool) (*core.Or
 
 	// multiTrade is used instead of Trade because Trade does not support
 	// maxLock.
-	results := u.placeMultiTrade(placements, sell)
+	results := u.placeMultiTrade(placements, sell, 0)
 	if len(results) == 0 {
 		return nil, fmt.Errorf("no orders placed")
 	}

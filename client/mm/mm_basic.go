@@ -832,16 +832,16 @@ func (m *basicMarketMaker) applyDoNotCross(buys, sells []*TradePlacement) {
 	if step == 0 {
 		step = 1
 	}
+	// Only lift asks that would take a live bid. Do not re-ladder the rest
+	// of the book (that walked every level up by one rateStep each epoch
+	// and caused cancel/replace storms).
 	if bid, ok := m.foreignBest(false); ok {
 		minAsk := bid + step
 		for _, p := range sells {
-			if p.Rate != 0 && p.Rate < minAsk {
+			if p.Rate != 0 && p.Rate <= bid {
 				m.log.Debugf("do-not-cross: raising sell %s -> %s (foreign bid %s)",
 					m.fmtRate(p.Rate), m.fmtRate(minAsk), m.fmtRate(bid))
 				p.Rate = minAsk
-			}
-			if p.Rate >= minAsk {
-				minAsk = p.Rate + step
 			}
 		}
 	}
@@ -855,19 +855,13 @@ func (m *basicMarketMaker) applyDoNotCross(buys, sells []*TradePlacement) {
 		}
 		maxBid := ask - step
 		for _, p := range buys {
-			if p.Rate != 0 && p.Rate > maxBid {
+			if p.Rate != 0 && p.Rate >= ask {
 				m.log.Debugf("do-not-cross: lowering buy %s -> %s (foreign ask %s)",
 					m.fmtRate(p.Rate), m.fmtRate(maxBid), m.fmtRate(ask))
 				p.Rate = maxBid
 			}
 			if p.Rate == 0 {
 				p.Lots = 0
-				continue
-			}
-			if p.Rate > step {
-				maxBid = p.Rate - step
-			} else {
-				maxBid = 0
 			}
 		}
 	}
@@ -972,8 +966,11 @@ func (m *basicMarketMaker) rebalance(newEpoch uint64) {
 	if determinePlacementsErr != nil {
 		m.tryCancelOrders(m.ctx, &newEpoch, false)
 	} else {
-		_, buysReport = m.multiTrade(buyOrders, false, m.cfg().DriftTolerance, newEpoch)
+		// Sells first so the offer side is not stuck behind a long buy
+		// FundMultiOrder when the LBC wallet can only fund one order per
+		// epoch (Native SPV UTXO split).
 		_, sellsReport = m.multiTrade(sellOrders, true, m.cfg().DriftTolerance, newEpoch)
+		_, buysReport = m.multiTrade(buyOrders, false, m.cfg().DriftTolerance, newEpoch)
 	}
 
 	epochReport := &EpochReport{

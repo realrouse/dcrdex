@@ -116,7 +116,7 @@ func (c *NoteFeed) ReturnFeed() {
 }
 
 // NotificationFeed returns a new receiving channel for notifications. The
-// channel has capacity 1024, and should be monitored for the lifetime of the
+// channel has capacity 8192, and should be monitored for the lifetime of the
 // Core. Blocking channels are silently ignored.
 func (c *Core) NotificationFeed() *NoteFeed {
 	id, ch := c.notificationFeed()
@@ -127,7 +127,7 @@ func (c *Core) NotificationFeed() *NoteFeed {
 }
 
 func (c *Core) notificationFeed() (uint64, <-chan Notification) {
-	ch := make(chan Notification, 1024)
+	ch := make(chan Notification, 8192)
 	cid := atomic.AddUint64(&noteChanCounter, 1)
 	c.noteMtx.Lock()
 	c.noteChans[cid] = ch
