@@ -1222,6 +1222,20 @@ func (u *unifiedExchangeAdaptor) multiTrade(
 	sell bool,
 	driftTolerance float64,
 	currEpoch uint64,
+) (map[order.OrderID]*dexOrderInfo, *OrderReport) {
+	return u.multiTradeN(placements, sell, driftTolerance, currEpoch, 0)
+}
+
+// multiTradeN is multiTrade with a cap on how many new orders this call
+// may submit. maxNewOrders == 0 means no cap. Standing-order cancels
+// still consider every placement. Hitting the cap is not treated as
+// insufficient balance (lower-priority standing orders are kept).
+func (u *unifiedExchangeAdaptor) multiTradeN(
+	placements []*TradePlacement,
+	sell bool,
+	driftTolerance float64,
+	currEpoch uint64,
+	maxNewOrders uint64,
 ) (_ map[order.OrderID]*dexOrderInfo, or *OrderReport) {
 	or = newOrderReport(placements)
 
@@ -1387,6 +1401,10 @@ func (u *unifiedExchangeAdaptor) multiTrade(
 	for i, placement := range or.Placements {
 		if placement.requiredLots() == 0 {
 			continue
+		}
+
+		if maxNewOrders > 0 && uint64(len(orderInfos)) >= maxNewOrders {
+			break
 		}
 
 		if rateCausesSelfMatch(placement.Rate) {

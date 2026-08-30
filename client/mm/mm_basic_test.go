@@ -401,6 +401,7 @@ func TestBasicMMRebalance(t *testing.T) {
 				calculator: calculator,
 			}
 			tcore := newTCore()
+			tcore.autoMultiTradeResult = true
 			tcore.setWalletsAndExchange(&core.Market{
 				BaseID:  baseID,
 				QuoteID: quoteID,
@@ -443,43 +444,67 @@ func TestBasicMMRebalance(t *testing.T) {
 
 			mm.rebalance(100)
 
-			if len(tcore.multiTradesPlaced) != 2 {
+			if len(tcore.multiTradesPlaced) < 2 {
 				t.Fatal("expected both buy and sell orders placed")
 			}
-			buys, sells := tcore.multiTradesPlaced[0], tcore.multiTradesPlaced[1]
-			if buys.Sell {
-				buys, sells = sells, buys
+			for i, form := range tcore.multiTradesPlaced {
+				if len(form.Placements) != 1 {
+					t.Fatalf("multiTrade %d: expected 1 new order, got %d", i, len(form.Placements))
+				}
+				wantSell := i%2 == 1
+				if form.Sell != wantSell {
+					t.Fatalf("multiTrade %d: expected sell=%v (buy, sell, buy, sell)", i, wantSell)
+				}
 			}
 
-			expOrdersN := len(tt.expBuyPlacements) + len(tt.expSellPlacements)
-			if len(buys.Placements)+len(sells.Placements) != expOrdersN {
-				t.Fatalf("expected %d orders, got %d", expOrdersN, len(buys.Placements)+len(sells.Placements))
-			}
-
-			buyRateLots := make(map[uint64]uint64, len(buys.Placements))
-			for _, p := range buys.Placements {
-				buyRateLots[p.Rate] = p.Qty / lotSize
-			}
-			for _, expBuy := range tt.expBuyPlacements {
-				if lots, found := buyRateLots[expBuy.Rate]; !found {
-					t.Fatalf("buy rate %d not found", expBuy.Rate)
-				} else {
-					if expBuy.Lots != lots {
-						t.Fatalf("wrong lots %d for buy at rate %d", lots, expBuy.Rate)
+			buyRateLots := make(map[uint64]uint64)
+			sellRateLots := make(map[uint64]uint64)
+			for _, form := range tcore.multiTradesPlaced {
+				for _, p := range form.Placements {
+					if form.Sell {
+						sellRateLots[p.Rate] += p.Qty / lotSize
+					} else {
+						buyRateLots[p.Rate] += p.Qty / lotSize
 					}
 				}
 			}
-			sellRateLots := make(map[uint64]uint64, len(sells.Placements))
-			for _, p := range sells.Placements {
-				sellRateLots[p.Rate] = p.Qty / lotSize
+			if len(buyRateLots) == 0 || len(sellRateLots) == 0 {
+				t.Fatal("expected lots on both sides")
 			}
-			for _, expSell := range tt.expSellPlacements {
-				if lots, found := sellRateLots[expSell.Rate]; !found {
-					t.Fatalf("sell rate %d not found", expSell.Rate)
-				} else {
-					if expSell.Lots != lots {
-						t.Fatalf("wrong lots %d for sell at rate %d", lots, expSell.Rate)
+			if tcore.multiTradesPlaced[0].Placements[0].Rate != tt.expBuyPlacements[0].Rate {
+				t.Fatalf("first buy rate %d, want %d", tcore.multiTradesPlaced[0].Placements[0].Rate, tt.expBuyPlacements[0].Rate)
+			}
+			if tcore.multiTradesPlaced[1].Placements[0].Rate != tt.expSellPlacements[0].Rate {
+				t.Fatalf("first sell rate %d, want %d", tcore.multiTradesPlaced[1].Placements[0].Rate, tt.expSellPlacements[0].Rate)
+			}
+			for rate, lots := range buyRateLots {
+				var exp uint64
+				for _, p := range tt.expBuyPlacements {
+					if p.Rate == rate {
+						exp = p.Lots
+						break
 					}
+				}
+				if exp == 0 {
+					t.Fatalf("unexpected buy rate %d", rate)
+				}
+				if lots > exp {
+					t.Fatalf("buy rate %d: placed %d lots, want at most %d", rate, lots, exp)
+				}
+			}
+			for rate, lots := range sellRateLots {
+				var exp uint64
+				for _, p := range tt.expSellPlacements {
+					if p.Rate == rate {
+						exp = p.Lots
+						break
+					}
+				}
+				if exp == 0 {
+					t.Fatalf("unexpected sell rate %d", rate)
+				}
+				if lots > exp {
+					t.Fatalf("sell rate %d: placed %d lots, want at most %d", rate, lots, exp)
 				}
 			}
 		})

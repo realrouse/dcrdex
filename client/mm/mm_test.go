@@ -62,38 +62,40 @@ type sendArgs struct {
 }
 
 type tCore struct {
-	assetBalances       map[uint32]*core.WalletBalance
-	assetBalanceErr     error
-	market              *core.Market
-	singleLotSellFees   *OrderFees
-	singleLotBuyFees    *OrderFees
-	singleLotFeesErr    error
-	multiTradeResult    []*core.MultiTradeResult
-	noteFeed            chan core.Notification
-	isAccountLocker     map[uint32]bool
-	isWithdrawer        map[uint32]bool
-	isDynamicSwapper    map[uint32]bool
-	cancelsPlaced       []order.OrderID
-	multiTradesPlaced   []*core.MultiTradeForm
-	maxFundingFees      uint64
-	book                *orderbook.OrderBook
-	bookFeed            *tBookFeed
-	sends               []*sendArgs
-	sendCoinID          []byte
-	newDepositAddress   string
-	orders              map[order.OrderID]*core.Order
-	walletTxsMtx        sync.Mutex
-	walletTxs           map[string]*asset.WalletTransaction
-	walletTxAssets      map[string]uint32
-	bridgeFeesAndLimits map[string]*core.BridgeFeesAndLimits
-	estimateSendTxFee   map[uint32]uint64
-	broadcastsMtx       sync.Mutex
-	broadcasts          []core.Notification
-	fiatRates           map[uint32]float64
-	userParcels         uint32
-	parcelLimit         uint32
-	exchange            *core.Exchange
-	walletStates        map[uint32]*core.WalletState
+	assetBalances        map[uint32]*core.WalletBalance
+	assetBalanceErr      error
+	market               *core.Market
+	singleLotSellFees    *OrderFees
+	singleLotBuyFees     *OrderFees
+	singleLotFeesErr     error
+	multiTradeResult     []*core.MultiTradeResult
+	noteFeed             chan core.Notification
+	isAccountLocker      map[uint32]bool
+	isWithdrawer         map[uint32]bool
+	isDynamicSwapper     map[uint32]bool
+	cancelsPlaced        []order.OrderID
+	multiTradesPlaced    []*core.MultiTradeForm
+	autoMultiTradeResult bool
+	tradeResultID        uint64
+	maxFundingFees       uint64
+	book                 *orderbook.OrderBook
+	bookFeed             *tBookFeed
+	sends                []*sendArgs
+	sendCoinID           []byte
+	newDepositAddress    string
+	orders               map[order.OrderID]*core.Order
+	walletTxsMtx         sync.Mutex
+	walletTxs            map[string]*asset.WalletTransaction
+	walletTxAssets       map[string]uint32
+	bridgeFeesAndLimits  map[string]*core.BridgeFeesAndLimits
+	estimateSendTxFee    map[uint32]uint64
+	broadcastsMtx        sync.Mutex
+	broadcasts           []core.Notification
+	fiatRates            map[uint32]float64
+	userParcels          uint32
+	parcelLimit          uint32
+	exchange             *core.Exchange
+	walletStates         map[uint32]*core.WalletState
 }
 
 func newTCore() *tCore {
@@ -156,7 +158,29 @@ func (c *tCore) AssetBalance(assetID uint32) (*core.WalletBalance, error) {
 }
 func (c *tCore) MultiTrade(pw []byte, forms *core.MultiTradeForm) []*core.MultiTradeResult {
 	c.multiTradesPlaced = append(c.multiTradesPlaced, forms)
-	return c.multiTradeResult
+	if c.multiTradeResult != nil {
+		return c.multiTradeResult
+	}
+	if !c.autoMultiTradeResult {
+		return c.multiTradeResult
+	}
+	// Synthesize matching results so pendingDEXOrders (standing lots)
+	// update between interleaved multiTradeN calls.
+	res := make([]*core.MultiTradeResult, len(forms.Placements))
+	for i, p := range forms.Placements {
+		c.tradeResultID++
+		id := make([]byte, order.OrderIDSize)
+		id[0] = byte(c.tradeResultID)
+		id[1] = byte(c.tradeResultID >> 8)
+		res[i] = &core.MultiTradeResult{Order: &core.Order{
+			ID:     id,
+			Sell:   forms.Sell,
+			Qty:    p.Qty,
+			Rate:   p.Rate,
+			Status: order.OrderStatusBooked,
+		}}
+	}
+	return res
 }
 func (c *tCore) WalletTraits(assetID uint32) (asset.WalletTrait, error) {
 	isAccountLocker := c.isAccountLocker[assetID]

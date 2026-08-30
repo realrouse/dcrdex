@@ -966,18 +966,34 @@ func (m *basicMarketMaker) rebalance(newEpoch uint64) {
 	if determinePlacementsErr != nil {
 		m.tryCancelOrders(m.ctx, &newEpoch, false)
 	} else {
-		// Native SPV often funds only one new order per multiTrade. Always
-		// stock the thinner side first so one book does not starve the other.
-		place := func(orders []*TradePlacement, sell bool) *OrderReport {
-			_, rep := m.multiTrade(orders, sell, m.cfg().DriftTolerance, newEpoch)
+		// FundMultiOrder will happily fund an entire side (many sells,
+		// zero buys) before the other side is attempted. Place at most
+		// one new order per call and interleave buy, sell, buy, sell so
+		// both sides are on the book in the first epoch.
+		placeOne := func(orders []*TradePlacement, sell bool) *OrderReport {
+			_, rep := m.multiTradeN(orders, sell, m.cfg().DriftTolerance, newEpoch, 1)
 			return rep
 		}
-		if m.bookedLots(false) <= m.bookedLots(true) {
-			buysReport = place(buyOrders, false)
-			sellsReport = place(sellOrders, true)
-		} else {
-			sellsReport = place(sellOrders, true)
-			buysReport = place(buyOrders, false)
+		orderedLots := func(rep *OrderReport) uint64 {
+			if rep == nil {
+				return 0
+			}
+			var n uint64
+			for _, p := range rep.Placements {
+				n += p.OrderedLots
+			}
+			return n
+		}
+		const pairsPerEpoch = 2
+		for pass := 0; pass < pairsPerEpoch; pass++ {
+			m.log.Debugf("rebalance: interleaved place buy then sell (pass %d/%d, 1 new order per side)", pass+1, pairsPerEpoch)
+			buyRep := placeOne(buyOrders, false)
+			sellRep := placeOne(sellOrders, true)
+			buysReport = mergeOrderReport(buysReport, buyRep)
+			sellsReport = mergeOrderReport(sellsReport, sellRep)
+			if orderedLots(buyRep) == 0 && orderedLots(sellRep) == 0 {
+				break
+			}
 		}
 	}
 
@@ -988,6 +1004,38 @@ func (m *basicMarketMaker) rebalance(newEpoch uint64) {
 	}
 	epochReport.setPreOrderProblems(determinePlacementsErr)
 	m.updateEpochReport(epochReport)
+}
+
+// mergeOrderReport folds next into acc. OrderedLots and used balances
+// accumulate; remaining balances and standing lots come from next.
+func mergeOrderReport(acc, next *OrderReport) *OrderReport {
+	if next == nil {
+		return acc
+	}
+	if acc == nil {
+		return next
+	}
+	n := len(acc.Placements)
+	if len(next.Placements) < n {
+		n = len(next.Placements)
+	}
+	for i := 0; i < n; i++ {
+		next.Placements[i].OrderedLots += acc.Placements[i].OrderedLots
+		if next.Placements[i].Error == nil {
+			next.Placements[i].Error = acc.Placements[i].Error
+		}
+	}
+	if next.UsedDEXBals == nil {
+		next.UsedDEXBals = make(map[uint32]uint64)
+	}
+	for assetID, v := range acc.UsedDEXBals {
+		next.UsedDEXBals[assetID] += v
+	}
+	next.UsedCEXBal += acc.UsedCEXBal
+	if next.Error == nil {
+		next.Error = acc.Error
+	}
+	return next
 }
 
 func (m *basicMarketMaker) botLoop(ctx context.Context) (*sync.WaitGroup, error) {
@@ -1005,12 +1053,16 @@ func (m *basicMarketMaker) botLoop(ctx context.Context) (*sync.WaitGroup, error)
 		log:    m.log,
 	}
 
-	// Process book updates
+	// Process book updates. Rebalance runs in its own goroutine so a
+	// slow FundMultiOrder cannot block the feed (bookie then drops
+	// updates: "feed N is blocking and book update was thrown away").
 	var wg sync.WaitGroup
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
 		defer bookFeed.Close()
+		var rbWg sync.WaitGroup
+		defer rbWg.Wait()
 		for {
 			select {
 			case ni, ok := <-bookFeed.Next():
@@ -1021,7 +1073,12 @@ func (m *basicMarketMaker) botLoop(ctx context.Context) (*sync.WaitGroup, error)
 				}
 				switch epoch := ni.Payload.(type) {
 				case *core.ResolvedEpoch:
-					m.rebalance(epoch.Current)
+					ep := epoch.Current
+					rbWg.Add(1)
+					go func() {
+						defer rbWg.Done()
+						m.rebalance(ep)
+					}()
 				}
 			case <-ctx.Done():
 				return
