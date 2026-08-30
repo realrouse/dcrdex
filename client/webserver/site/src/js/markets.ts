@@ -678,7 +678,8 @@ export default class MarketsPage extends BasePage {
     const convBook = this.midGapConventional() || 0
     const convPrice = convSpot > 0 ? convSpot : convBook
     const usd = pairToUsd(convPrice, mkt.quoteid)
-    const pairTxt = convPrice > 0 ? Doc.formatFourSigFigs(convPrice) : '-'
+    const quoteUnit = this.market.quoteUnitInfo.conventional.unit
+    const pairTxt = convPrice > 0 ? `${Doc.formatFourSigFigs(convPrice)} ${quoteUnit}` : '-'
     const usdTxt = usd ? formatUsd(usd) : ''
     if (this.obShowUsd && usdTxt) {
       this.page.obPrice.textContent = usdTxt
@@ -4049,7 +4050,13 @@ function pairToUsd (convPairRate: number, quoteID: number): number {
 function setPriceAndChange (tmpl: Record<string, PageElement>, xc: Exchange, mkt: Market) {
   if (!mkt.spot) return
   const pair = app().conventionalRate(mkt.baseid, mkt.quoteid, mkt.spot.rate, xc)
-  tmpl.price.textContent = Doc.formatFourSigFigs(pair)
+  const pairTxt = Doc.formatFourSigFigs(pair)
+  if (tmpl.priceUsd) {
+    const qUnit = app().unitInfo(mkt.quoteid, xc).conventional.unit
+    tmpl.price.textContent = pairTxt ? `${pairTxt} ${qUnit}` : ''
+  } else {
+    tmpl.price.textContent = pairTxt
+  }
   const usd = pairToUsd(pair, mkt.quoteid)
   if (tmpl.priceUsd) tmpl.priceUsd.textContent = usd ? formatUsd(usd) : ''
   const sign = mkt.spot.change24 > 0 ? '+' : ''
