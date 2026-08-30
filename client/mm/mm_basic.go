@@ -966,11 +966,19 @@ func (m *basicMarketMaker) rebalance(newEpoch uint64) {
 	if determinePlacementsErr != nil {
 		m.tryCancelOrders(m.ctx, &newEpoch, false)
 	} else {
-		// Sells first so the offer side is not stuck behind a long buy
-		// FundMultiOrder when the LBC wallet can only fund one order per
-		// epoch (Native SPV UTXO split).
-		_, sellsReport = m.multiTrade(sellOrders, true, m.cfg().DriftTolerance, newEpoch)
-		_, buysReport = m.multiTrade(buyOrders, false, m.cfg().DriftTolerance, newEpoch)
+		// Native SPV often funds only one new order per multiTrade. Always
+		// stock the thinner side first so one book does not starve the other.
+		place := func(orders []*TradePlacement, sell bool) *OrderReport {
+			_, rep := m.multiTrade(orders, sell, m.cfg().DriftTolerance, newEpoch)
+			return rep
+		}
+		if m.bookedLots(false) <= m.bookedLots(true) {
+			buysReport = place(buyOrders, false)
+			sellsReport = place(sellOrders, true)
+		} else {
+			sellsReport = place(sellOrders, true)
+			buysReport = place(buyOrders, false)
+		}
 	}
 
 	epochReport := &EpochReport{
