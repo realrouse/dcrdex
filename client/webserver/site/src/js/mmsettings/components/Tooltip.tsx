@@ -11,6 +11,8 @@ const Tooltip: React.FC<TooltipProps> = ({ content, children }) => {
   const [position, setPosition] = React.useState({ top: 0, left: 0 })
   const triggerRef = React.useRef<HTMLElement>(null)
 
+  if (!content) return children
+
   const handleMouseEnter = () => {
     if (triggerRef.current) {
       const rect = triggerRef.current.getBoundingClientRect()
@@ -23,8 +25,13 @@ const Tooltip: React.FC<TooltipProps> = ({ content, children }) => {
         left = window.innerWidth - tooltipWidth - 5
       }
 
+      // Bootstrap's `.tooltip` class is opacity:0. Place below if there is
+      // no room above the trigger.
+      const above = rect.top - 8
+      const top = above < 48 ? rect.bottom + 8 : above - 28
+
       setPosition({
-        top: rect.top - 35, // Position above the element
+        top,
         left: left
       })
       setIsVisible(true)
@@ -48,7 +55,7 @@ const Tooltip: React.FC<TooltipProps> = ({ content, children }) => {
       {childWithHandlers}
       {isVisible && createPortal(
         <div
-          className="tooltip"
+          className="mm-settings-tooltip"
           style={{
             position: 'fixed',
             top: `${position.top}px`,

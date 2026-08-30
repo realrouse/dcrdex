@@ -192,6 +192,15 @@ const (
 	mmChooseBotID                  = "MM_CHOOSE_BOT"
 	mmDriftToleranceID             = "MM_DRIFT_TOLERANCE"
 	mmDriftToleranceTooltipID      = "MM_DRIFT_TOLERANCE_TOOLTIP"
+	mmInventorySkewID              = "MM_INVENTORY_SKEW"
+	mmInventorySkewTooltipID       = "MM_INVENTORY_SKEW_TOOLTIP"
+	mmInventorySkewCapID           = "MM_INVENTORY_SKEW_CAP"
+	mmInventorySkewCapTooltipID    = "MM_INVENTORY_SKEW_CAP_TOOLTIP"
+	mmBookProtectionID             = "MM_BOOK_PROTECTION"
+	mmDoNotCrossID                 = "MM_DO_NOT_CROSS"
+	mmDoNotCrossTooltipID          = "MM_DO_NOT_CROSS_TOOLTIP"
+	mmBidAnchorFadeHoursID         = "MM_BID_ANCHOR_FADE_HOURS"
+	mmBidAnchorFadeHoursTooltipID  = "MM_BID_ANCHOR_FADE_HOURS_TOOLTIP"
 	mmOrderPersistenceID           = "MM_ORDER_PERSISTENCE"
 	mmOrderPersistenceTooltipID    = "MM_ORDER_PERSISTENCE_TOOLTIP"
 	mmMultiHopArbID                = "MM_MULTI_HOP_ARB"
@@ -603,6 +612,15 @@ var enUS = map[string]*intl.Translation{
 	mmChooseBotID:                  {T: "Choose Your Bot"},
 	mmDriftToleranceID:             {T: "Drift Tolerance"},
 	mmDriftToleranceTooltipID:      {T: "If an existing DEX order drifts too far from the bot's current target price, the bot cancels and replaces it."},
+	mmInventorySkewID:              {T: "Inventory Skew"},
+	mmInventorySkewTooltipID:       {T: "Slide both bids and asks when your base inventory is above or below target. Strength is measured against the lots you are quoting, not the whole wallet. Does not follow last trade. 1 = full (up to the cap). 0 = off."},
+	mmInventorySkewCapID:           {T: "Inventory Skew Cap"},
+	mmInventorySkewCapTooltipID:    {T: "Maximum percent the bot may move quotes away from the oracle price due to inventory."},
+	mmBookProtectionID:             {T: "Book Protection"},
+	mmDoNotCrossID:                 {T: "Do Not Cross the Book"},
+	mmDoNotCrossTooltipID:          {T: "Never sell into a live bid or buy into a live ask. Stops the bot from restocking at the MEXC price and taking a leftover aggressive bid. Asks lift; bids stay on the MEXC book so you do not buy the pump."},
+	mmBidAnchorFadeHoursID:         {T: "Hours to Fade Back to MEXC"},
+	mmBidAnchorFadeHoursTooltipID:  {T: "After an aggressive bid or ask that ran the book is gone, walk quotes linearly back to the MEXC (oracle) book over this many hours. 4 = slow return. 0 = snap back as soon as it cancels. Only the lifted side moves; the other side stays at MEXC."},
 	mmOrderPersistenceID:           {T: "Order Persistence"},
 	mmOrderPersistenceTooltipID:    {T: "How many epochs an unfilled arbitrage order can remain open before the bot cancels it."},
 	mmMultiHopArbID:                {T: "Multi-Hop Arbitrage"},

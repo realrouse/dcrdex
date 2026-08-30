@@ -795,6 +795,10 @@ export interface BasicMarketMakingConfig {
   sellPlacements: OrderPlacement[]
   buyPlacements: OrderPlacement[]
   driftTolerance: number
+  inventorySkew?: number
+  inventorySkewCap?: number
+  doNotCross?: boolean
+  bidAnchorFadeHours?: number
 }
 
 export interface ArbMarketMakingPlacement {

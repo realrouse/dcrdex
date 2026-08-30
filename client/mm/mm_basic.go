@@ -13,8 +13,10 @@ import (
 	"time"
 
 	"decred.org/dcrdex/client/core"
+	"decred.org/dcrdex/client/orderbook"
 	"decred.org/dcrdex/dex"
 	"decred.org/dcrdex/dex/calc"
+	"decred.org/dcrdex/dex/order"
 	"decred.org/dcrdex/dex/utils"
 )
 
@@ -72,7 +74,42 @@ type BasicMarketMakingConfig struct {
 	// before they are replaced (units: ratio of price). Default: 0.1%.
 	// 0 <= x <= 0.01.
 	DriftTolerance float64 `json:"driftTolerance"`
+
+	// InventorySkew is how strongly quotes slide when the bot's base
+	// inventory differs from its allocated target. 0 = off, 1 = full
+	// (a 100% inventory deviation moves price by InventorySkewCap).
+	// Nil means default 1. Explicit 0 stays off.
+	InventorySkew *float64 `json:"inventorySkew,omitempty"`
+
+	// InventorySkewCap is the maximum fractional shift away from the
+	// oracle basis (e.g. 0.03 = 3%). Nil means default 0.03.
+	InventorySkewCap *float64 `json:"inventorySkewCap,omitempty"`
+
+	// DoNotCross, when true, never places a sell at or below a live
+	// foreign bid, or a buy at or above a live foreign ask. Nil means
+	// default true. Explicit false stays off.
+	DoNotCross *bool `json:"doNotCross,omitempty"`
+
+	// BidAnchorFadeHours is how long, after an aggressive foreign bid
+	// or ask that would have taken our restock is gone, to walk quotes
+	// linearly back to the inventory-skewed oracle. Nil means default 4.
+	// Explicit 0 means snap back as soon as it cancels (do-not-cross
+	// still applies while it is live). 0 <= x <= 24.
+	BidAnchorFadeHours *float64 `json:"bidAnchorFadeHours,omitempty"`
 }
+
+const (
+	defaultInventorySkew      = 1.0
+	defaultInventorySkewCap   = 0.03
+	defaultDoNotCross         = true
+	defaultBidAnchorFadeHours = 4.0
+	maxBidAnchorFadeHours     = 24.0
+	anchorCollarMult          = 2.0
+	recentMatchWindow         = 30 * time.Second
+)
+
+func floatPtr(v float64) *float64 { return &v }
+func boolPtr(v bool) *bool        { return &v }
 
 func needBreakEvenHalfSpread(strat GapStrategy) bool {
 	return strat == GapStrategyAbsolutePlus || strat == GapStrategyPercentPlus || strat == GapStrategyMultiplier
@@ -84,6 +121,27 @@ func (c *BasicMarketMakingConfig) validate() error {
 	}
 	if c.DriftTolerance < 0 || c.DriftTolerance > 0.01 {
 		return fmt.Errorf("drift tolerance %f out of bounds", c.DriftTolerance)
+	}
+
+	if c.InventorySkew == nil {
+		c.InventorySkew = floatPtr(defaultInventorySkew)
+	} else if *c.InventorySkew < 0 || *c.InventorySkew > 1 {
+		return fmt.Errorf("inventory skew %f out of bounds [0, 1]", *c.InventorySkew)
+	}
+	if c.InventorySkewCap == nil {
+		c.InventorySkewCap = floatPtr(defaultInventorySkewCap)
+	} else if *c.InventorySkewCap < 0 || *c.InventorySkewCap > 0.1 {
+		return fmt.Errorf("inventory skew cap %f out of bounds [0, 0.1]", *c.InventorySkewCap)
+	}
+
+	if c.DoNotCross == nil {
+		c.DoNotCross = boolPtr(defaultDoNotCross)
+	}
+
+	if c.BidAnchorFadeHours == nil {
+		c.BidAnchorFadeHours = floatPtr(defaultBidAnchorFadeHours)
+	} else if *c.BidAnchorFadeHours < 0 || *c.BidAnchorFadeHours > maxBidAnchorFadeHours {
+		return fmt.Errorf("bid anchor fade hours %f out of bounds [0, %g]", *c.BidAnchorFadeHours, maxBidAnchorFadeHours)
 	}
 
 	if c.GapStrategy != GapStrategyMultiplier &&
@@ -151,6 +209,23 @@ func (c *BasicMarketMakingConfig) copy() *BasicMarketMakingConfig {
 
 	cfg.SellPlacements = utils.Map(c.SellPlacements, copyOrderPlacement)
 	cfg.BuyPlacements = utils.Map(c.BuyPlacements, copyOrderPlacement)
+
+	if c.InventorySkew != nil {
+		v := *c.InventorySkew
+		cfg.InventorySkew = &v
+	}
+	if c.InventorySkewCap != nil {
+		v := *c.InventorySkewCap
+		cfg.InventorySkewCap = &v
+	}
+	if c.DoNotCross != nil {
+		v := *c.DoNotCross
+		cfg.DoNotCross = &v
+	}
+	if c.BidAnchorFadeHours != nil {
+		v := *c.BidAnchorFadeHours
+		cfg.BidAnchorFadeHours = &v
+	}
 
 	return &cfg
 }
@@ -326,18 +401,41 @@ func (b *basicMMCalculatorImpl) feeGapStats(basisPrice uint64) (*FeeGapStats, er
 	}, nil
 }
 
+// mmBook is the DEX order book surface the basic MM needs for book protection.
+type mmBook interface {
+	BestNOrders(n int, sell bool) ([]*orderbook.Order, bool, error)
+	RecentMatches() []*orderbook.MatchSummary
+}
+
 type basicMarketMaker struct {
 	*unifiedExchangeAdaptor
 	core             botCoreAdaptor
 	oracle           oracle
 	rebalanceRunning atomic.Bool
 	calculator       basicMMCalculator
+	book             mmBook
+	nowFn            func() time.Time
+
+	anchorMtx          sync.Mutex
+	sellAnchor         uint64    // high-water aggressive foreign bid (msg rate)
+	sellFadeStart      time.Time // zero while that bid is still live
+	prevSellBookedLots uint64
+	buyAnchor          uint64 // low-water aggressive foreign ask
+	buyFadeStart       time.Time
+	prevBuyBookedLots  uint64
 }
 
 var _ bot = (*basicMarketMaker)(nil)
 
 func (m *basicMarketMaker) cfg() *BasicMarketMakingConfig {
 	return m.botCfg().BasicMMConfig
+}
+
+func (m *basicMarketMaker) now() time.Time {
+	if m.nowFn != nil {
+		return m.nowFn()
+	}
+	return time.Now()
 }
 
 func (m *basicMarketMaker) orderPrice(basisPrice, feeAdj uint64, sell bool, gapFactor float64) uint64 {
@@ -372,13 +470,417 @@ func (m *basicMarketMaker) orderPrice(basisPrice, feeAdj uint64, sell bool, gapF
 	return basisPrice - adj
 }
 
+func (m *basicMarketMaker) targetBaseInventory() uint64 {
+	var target int64
+	if m.initialBalances != nil {
+		target = int64(m.initialBalances[m.dexBaseID])
+	}
+	if m.inventoryMods != nil {
+		target += m.inventoryMods[m.dexBaseID]
+	}
+	if target < 0 {
+		return 0
+	}
+	return uint64(target)
+}
+
+func (m *basicMarketMaker) currentBaseInventory() uint64 {
+	bal := m.DEXBalance(m.dexBaseID)
+	return bal.Available + bal.Locked + bal.Pending
+}
+
+func (m *basicMarketMaker) inventorySkewParams() (skew, cap float64) {
+	skew, cap = defaultInventorySkew, defaultInventorySkewCap
+	cfg := m.cfg()
+	if cfg == nil {
+		return
+	}
+	if cfg.InventorySkew != nil {
+		skew = *cfg.InventorySkew
+	}
+	if cfg.InventorySkewCap != nil {
+		cap = *cfg.InventorySkewCap
+	}
+	return
+}
+
+func (m *basicMarketMaker) doNotCrossEnabled() bool {
+	cfg := m.cfg()
+	if cfg == nil || cfg.DoNotCross == nil {
+		return defaultDoNotCross
+	}
+	return *cfg.DoNotCross
+}
+
+func (m *basicMarketMaker) fadeDuration() time.Duration {
+	h := defaultBidAnchorFadeHours
+	cfg := m.cfg()
+	if cfg != nil && cfg.BidAnchorFadeHours != nil {
+		h = *cfg.BidAnchorFadeHours
+	}
+	if h <= 0 {
+		return 0
+	}
+	return time.Duration(h * float64(time.Hour))
+}
+
+func placementQty(ps []*OrderPlacement, lotSize uint64) uint64 {
+	var lots uint64
+	for _, p := range ps {
+		lots += p.Lots
+	}
+	return lots * lotSize
+}
+
+func (m *basicMarketMaker) quotedInventoryDenom(diff float64) uint64 {
+	lotSize := m.lotSize.Load()
+	if lotSize == 0 {
+		return 0
+	}
+	cfg := m.cfg()
+	var denom uint64
+	if cfg != nil {
+		if diff < 0 {
+			denom = placementQty(cfg.SellPlacements, lotSize)
+		} else if diff > 0 {
+			denom = placementQty(cfg.BuyPlacements, lotSize)
+		}
+	}
+	if denom == 0 {
+		denom = lotSize
+	}
+	return denom
+}
+
+// applyInventorySkew slides the oracle basis toward selling or buying base
+// depending on how far the bot's base inventory is from its allocated target.
+// Deviation is scaled by lots currently quoted, not the warehouse allocation.
+// Ghost matches with no swap do not change DEXBalance, so they do not skew.
+func (m *basicMarketMaker) applyInventorySkew(basisPrice uint64) uint64 {
+	if basisPrice == 0 {
+		return 0
+	}
+	skew, cap := m.inventorySkewParams()
+	if skew == 0 || cap == 0 {
+		return basisPrice
+	}
+	target := m.targetBaseInventory()
+	if target == 0 {
+		return basisPrice
+	}
+	current := m.currentBaseInventory()
+	diff := float64(current) - float64(target)
+	if diff == 0 {
+		return basisPrice
+	}
+	denom := m.quotedInventoryDenom(diff)
+	if denom == 0 {
+		return basisPrice
+	}
+	n := diff / float64(denom)
+	shift := -n * skew * cap
+	if shift > cap {
+		shift = cap
+	} else if shift < -cap {
+		shift = -cap
+	}
+	skewed := uint64(math.Round(float64(basisPrice) * (1 + shift)))
+	out := steppedRate(skewed, m.rateStep.Load())
+	m.log.Debugf("inventory skew: target=%s current=%s denom=%s n=%.4f shift=%.2f%% basis=%s skewed=%s",
+		m.fmtBase(target), m.fmtBase(current), m.fmtBase(denom), n, shift*100, m.fmtRate(basisPrice), m.fmtRate(out))
+	return out
+}
+
+func lerpRate(from, to uint64, t float64) uint64 {
+	if t <= 0 {
+		return from
+	}
+	if t >= 1 {
+		return to
+	}
+	return uint64(math.Round(float64(from) + (float64(to)-float64(from))*t))
+}
+
+func clampAnchor(anchor, invBasis uint64, sellSide bool) uint64 {
+	if invBasis == 0 || anchor == 0 {
+		return anchor
+	}
+	if sellSide {
+		var maxA uint64
+		if invBasis > math.MaxUint64/uint64(anchorCollarMult) {
+			maxA = math.MaxUint64
+		} else {
+			maxA = uint64(float64(invBasis) * anchorCollarMult)
+		}
+		if anchor > maxA {
+			return maxA
+		}
+		return anchor
+	}
+	minA := invBasis / uint64(anchorCollarMult)
+	if minA == 0 {
+		minA = 1
+	}
+	if anchor < minA {
+		return minA
+	}
+	return anchor
+}
+
+func (m *basicMarketMaker) ownOrderIDs() map[order.OrderID]struct{} {
+	ids := make(map[order.OrderID]struct{})
+	if m.unifiedExchangeAdaptor == nil {
+		return ids
+	}
+	m.balancesMtx.RLock()
+	defer m.balancesMtx.RUnlock()
+	for oid := range m.pendingDEXOrders {
+		ids[oid] = struct{}{}
+	}
+	return ids
+}
+
+func (m *basicMarketMaker) bookedLots(sell bool) uint64 {
+	if m.unifiedExchangeAdaptor == nil {
+		return 0
+	}
+	lotSize := m.lotSize.Load()
+	if lotSize == 0 {
+		return 0
+	}
+	var lots uint64
+	m.balancesMtx.RLock()
+	defer m.balancesMtx.RUnlock()
+	for _, po := range m.pendingDEXOrders {
+		st := po.currentState()
+		if st == nil || st.order == nil {
+			continue
+		}
+		o := st.order
+		if o.Sell != sell || o.Status > order.OrderStatusBooked {
+			continue
+		}
+		if o.Qty > o.Filled {
+			lots += (o.Qty - o.Filled) / lotSize
+		}
+	}
+	return lots
+}
+
+// foreignBest returns the best booked rate on the requested side that is not
+// one of our own orders. sell=true means asks.
+func (m *basicMarketMaker) foreignBest(sell bool) (uint64, bool) {
+	if m.book == nil {
+		return 0, false
+	}
+	orders, _, err := m.book.BestNOrders(32, sell)
+	if err != nil || len(orders) == 0 {
+		return 0, false
+	}
+	own := m.ownOrderIDs()
+	for _, o := range orders {
+		if o == nil || o.Rate == 0 {
+			continue
+		}
+		if _, mine := own[o.OrderID]; mine {
+			continue
+		}
+		return o.Rate, true
+	}
+	return 0, false
+}
+
+func (m *basicMarketMaker) liftMatchRate(makerSell bool, threshold uint64, now time.Time) (uint64, bool) {
+	if m.book == nil || threshold == 0 {
+		return 0, false
+	}
+	matches := m.book.RecentMatches()
+	if len(matches) == 0 {
+		return 0, false
+	}
+	nowMS := now.UnixMilli()
+	var best uint64
+	found := false
+	for i, ms := range matches {
+		if i >= 8 {
+			break
+		}
+		if ms == nil || ms.Rate == 0 {
+			continue
+		}
+		if ms.Stamp != 0 && nowMS > int64(ms.Stamp) && time.Duration(nowMS-int64(ms.Stamp))*time.Millisecond > recentMatchWindow {
+			continue
+		}
+		if makerSell {
+			if ms.Rate >= threshold && ms.Rate >= best {
+				best = ms.Rate
+				found = true
+			}
+			continue
+		}
+		if ms.Rate <= threshold && (!found || ms.Rate < best) {
+			best = ms.Rate
+			found = true
+		}
+	}
+	return best, found
+}
+
+func (m *basicMarketMaker) updateAnchors(now time.Time, invBasis, intendedAsk0, intendedBid0 uint64) {
+	foreignBid, hasBid := m.foreignBest(false)
+	foreignAsk, hasAsk := m.foreignBest(true)
+	sellLots := m.bookedLots(true)
+	buyLots := m.bookedLots(false)
+
+	m.anchorMtx.Lock()
+	defer m.anchorMtx.Unlock()
+
+	protect := m.doNotCrossEnabled()
+	aggressiveBid := protect && hasBid && intendedAsk0 > 0 && foreignBid >= intendedAsk0
+	if aggressiveBid {
+		clamped := clampAnchor(foreignBid, invBasis, true)
+		if clamped > m.sellAnchor {
+			m.sellAnchor = clamped
+		}
+		m.sellFadeStart = time.Time{}
+	} else {
+		if m.prevSellBookedLots > sellLots {
+			if rate, ok := m.liftMatchRate(true, intendedAsk0, now); ok {
+				clamped := clampAnchor(rate, invBasis, true)
+				if clamped > m.sellAnchor {
+					m.sellAnchor = clamped
+				}
+			}
+		}
+		if m.sellAnchor > 0 && m.sellFadeStart.IsZero() {
+			m.sellFadeStart = now
+		}
+	}
+	m.prevSellBookedLots = sellLots
+
+	aggressiveAsk := protect && hasAsk && intendedBid0 > 0 && foreignAsk <= intendedBid0
+	if aggressiveAsk {
+		clamped := clampAnchor(foreignAsk, invBasis, false)
+		if m.buyAnchor == 0 || clamped < m.buyAnchor {
+			m.buyAnchor = clamped
+		}
+		m.buyFadeStart = time.Time{}
+	} else {
+		if m.prevBuyBookedLots > buyLots {
+			if rate, ok := m.liftMatchRate(false, intendedBid0, now); ok {
+				clamped := clampAnchor(rate, invBasis, false)
+				if m.buyAnchor == 0 || clamped < m.buyAnchor {
+					m.buyAnchor = clamped
+				}
+			}
+		}
+		if m.buyAnchor > 0 && m.buyFadeStart.IsZero() {
+			m.buyFadeStart = now
+		}
+	}
+	m.prevBuyBookedLots = buyLots
+
+	d := m.fadeDuration()
+	if m.sellAnchor > 0 && !m.sellFadeStart.IsZero() && (d <= 0 || !now.Before(m.sellFadeStart.Add(d))) {
+		m.log.Debugf("book protection: sell anchor fade complete (was %s)", m.fmtRate(m.sellAnchor))
+		m.sellAnchor = 0
+		m.sellFadeStart = time.Time{}
+	}
+	if m.buyAnchor > 0 && !m.buyFadeStart.IsZero() && (d <= 0 || !now.Before(m.buyFadeStart.Add(d))) {
+		m.log.Debugf("book protection: buy anchor fade complete (was %s)", m.fmtRate(m.buyAnchor))
+		m.buyAnchor = 0
+		m.buyFadeStart = time.Time{}
+	}
+}
+
+func (m *basicMarketMaker) fadedRate(anchor uint64, fadeStart time.Time, now time.Time, invBasis uint64) uint64 {
+	if anchor == 0 {
+		return 0
+	}
+	if fadeStart.IsZero() {
+		return anchor
+	}
+	d := m.fadeDuration()
+	if d <= 0 {
+		return 0
+	}
+	elapsed := now.Sub(fadeStart)
+	if elapsed >= d {
+		return 0
+	}
+	if elapsed < 0 {
+		elapsed = 0
+	}
+	t := float64(elapsed) / float64(d)
+	return steppedRate(lerpRate(anchor, invBasis, t), m.rateStep.Load())
+}
+
+func (m *basicMarketMaker) askFloor(now time.Time, invBasis uint64) uint64 {
+	m.anchorMtx.Lock()
+	defer m.anchorMtx.Unlock()
+	return m.fadedRate(m.sellAnchor, m.sellFadeStart, now, invBasis)
+}
+
+func (m *basicMarketMaker) bidCeil(now time.Time, invBasis uint64) uint64 {
+	m.anchorMtx.Lock()
+	defer m.anchorMtx.Unlock()
+	return m.fadedRate(m.buyAnchor, m.buyFadeStart, now, invBasis)
+}
+
+func (m *basicMarketMaker) applyDoNotCross(buys, sells []*TradePlacement) {
+	step := m.rateStep.Load()
+	if step == 0 {
+		step = 1
+	}
+	if bid, ok := m.foreignBest(false); ok {
+		minAsk := bid + step
+		for _, p := range sells {
+			if p.Rate != 0 && p.Rate < minAsk {
+				m.log.Debugf("do-not-cross: raising sell %s -> %s (foreign bid %s)",
+					m.fmtRate(p.Rate), m.fmtRate(minAsk), m.fmtRate(bid))
+				p.Rate = minAsk
+			}
+			if p.Rate >= minAsk {
+				minAsk = p.Rate + step
+			}
+		}
+	}
+	if ask, ok := m.foreignBest(true); ok {
+		if ask <= step {
+			for _, p := range buys {
+				p.Rate = 0
+				p.Lots = 0
+			}
+			return
+		}
+		maxBid := ask - step
+		for _, p := range buys {
+			if p.Rate != 0 && p.Rate > maxBid {
+				m.log.Debugf("do-not-cross: lowering buy %s -> %s (foreign ask %s)",
+					m.fmtRate(p.Rate), m.fmtRate(maxBid), m.fmtRate(ask))
+				p.Rate = maxBid
+			}
+			if p.Rate == 0 {
+				p.Lots = 0
+				continue
+			}
+			if p.Rate > step {
+				maxBid = p.Rate - step
+			} else {
+				maxBid = 0
+			}
+		}
+	}
+}
+
 func (m *basicMarketMaker) ordersToPlace() (buyOrders, sellOrders []*TradePlacement, err error) {
 	basisPrice, err := m.calculator.basisPrice()
 	if err != nil {
 		return nil, nil, err
 	}
+	invBasis := m.applyInventorySkew(basisPrice)
 
-	feeGap, err := m.calculator.feeGapStats(basisPrice)
+	feeGap, err := m.calculator.feeGapStats(invBasis)
 	if err != nil {
 		return nil, nil, fmt.Errorf("error calculating fee gap stats: %w", err)
 	}
@@ -391,13 +893,41 @@ func (m *basicMarketMaker) ordersToPlace() (buyOrders, sellOrders []*TradePlacem
 
 	if m.log.Level() == dex.LevelTrace {
 		m.log.Tracef("ordersToPlace %s, basis price = %s, break-even fee adjustment = %s",
-			m.name, m.fmtRate(basisPrice), m.fmtRate(feeAdj))
+			m.name, m.fmtRate(invBasis), m.fmtRate(feeAdj))
 	}
 
-	orders := func(orderPlacements []*OrderPlacement, sell bool) []*TradePlacement {
+	cfg := m.cfg()
+	now := m.now()
+	var intendedAsk0, intendedBid0 uint64
+	if len(cfg.SellPlacements) > 0 {
+		intendedAsk0 = m.orderPrice(invBasis, feeAdj, true, cfg.SellPlacements[0].GapFactor)
+	}
+	if len(cfg.BuyPlacements) > 0 {
+		intendedBid0 = m.orderPrice(invBasis, feeAdj, false, cfg.BuyPlacements[0].GapFactor)
+	}
+
+	m.updateAnchors(now, invBasis, intendedAsk0, intendedBid0)
+
+	// Asks may lift to the aggressive-bid floor. Bids stay on invBasis
+	// unless a dump (aggressive ask) pulls them down. Raising bids with a
+	// pump would buy the pump.
+	askBasis := invBasis
+	if floor := m.askFloor(now, invBasis); floor > askBasis {
+		askBasis = floor
+		m.log.Debugf("book protection: ask basis %s (inv %s, floor %s)",
+			m.fmtRate(askBasis), m.fmtRate(invBasis), m.fmtRate(floor))
+	}
+	bidBasis := invBasis
+	if ceil := m.bidCeil(now, invBasis); ceil > 0 && ceil < bidBasis {
+		bidBasis = ceil
+		m.log.Debugf("book protection: bid basis %s (inv %s, ceil %s)",
+			m.fmtRate(bidBasis), m.fmtRate(invBasis), m.fmtRate(ceil))
+	}
+
+	orders := func(orderPlacements []*OrderPlacement, sell bool, basis uint64) []*TradePlacement {
 		placements := make([]*TradePlacement, 0, len(orderPlacements))
 		for i, p := range orderPlacements {
-			rate := m.orderPrice(basisPrice, feeAdj, sell, p.GapFactor)
+			rate := m.orderPrice(basis, feeAdj, sell, p.GapFactor)
 
 			if m.log.Level() == dex.LevelTrace {
 				m.log.Tracef("ordersToPlace.orders: %s placement # %d, gap factor = %f, rate = %s, %+v",
@@ -416,8 +946,11 @@ func (m *basicMarketMaker) ordersToPlace() (buyOrders, sellOrders []*TradePlacem
 		return placements
 	}
 
-	buyOrders = orders(m.cfg().BuyPlacements, false)
-	sellOrders = orders(m.cfg().SellPlacements, true)
+	buyOrders = orders(cfg.BuyPlacements, false, bidBasis)
+	sellOrders = orders(cfg.SellPlacements, true, askBasis)
+	if m.doNotCrossEnabled() {
+		m.applyDoNotCross(buyOrders, sellOrders)
+	}
 	return buyOrders, sellOrders, nil
 }
 
@@ -453,10 +986,11 @@ func (m *basicMarketMaker) rebalance(newEpoch uint64) {
 }
 
 func (m *basicMarketMaker) botLoop(ctx context.Context) (*sync.WaitGroup, error) {
-	_, bookFeed, err := m.core.SyncBook(m.host, m.dexBaseID, m.dexQuoteID)
+	ob, bookFeed, err := m.core.SyncBook(m.host, m.dexBaseID, m.dexQuoteID)
 	if err != nil {
 		return nil, fmt.Errorf("failed to sync book: %v", err)
 	}
+	m.book = ob
 
 	m.calculator = &basicMMCalculatorImpl{
 		market: m.market,

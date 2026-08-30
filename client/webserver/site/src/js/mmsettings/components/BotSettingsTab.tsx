@@ -15,6 +15,11 @@ import {
   ID_MM_LIMIT_BUFFER, ID_MM_LIMIT_BUFFER_TOOLTIP,
   ID_MM_TRADING,
   ID_MM_DRIFT_TOLERANCE, ID_MM_DRIFT_TOLERANCE_TOOLTIP,
+  ID_MM_INVENTORY_SKEW, ID_MM_INVENTORY_SKEW_TOOLTIP,
+  ID_MM_INVENTORY_SKEW_CAP, ID_MM_INVENTORY_SKEW_CAP_TOOLTIP,
+  ID_MM_BOOK_PROTECTION,
+  ID_MM_DO_NOT_CROSS, ID_MM_DO_NOT_CROSS_TOOLTIP,
+  ID_MM_BID_ANCHOR_FADE_HOURS, ID_MM_BID_ANCHOR_FADE_HOURS_TOOLTIP,
   ID_MM_ORDER_PERSISTENCE, ID_MM_ORDER_PERSISTENCE_TOOLTIP,
   ID_MM_MULTI_HOP_ARB,
   ID_MM_NO_CONFIG_OPTIONS,
@@ -278,6 +283,10 @@ const BotSettingsTab: React.FC = () => {
 
   const driftTolerance = botConfig.basicMarketMakingConfig?.driftTolerance ??
                          botConfig.arbMarketMakingConfig?.driftTolerance ?? 0.001
+  const inventorySkew = botConfig.basicMarketMakingConfig?.inventorySkew ?? 1
+  const inventorySkewCap = botConfig.basicMarketMakingConfig?.inventorySkewCap ?? 0.03
+  const doNotCross = botConfig.basicMarketMakingConfig?.doNotCross ?? true
+  const bidAnchorFadeHours = botConfig.basicMarketMakingConfig?.bidAnchorFadeHours ?? 4
   const orderPersistence = botConfig.arbMarketMakingConfig?.orderPersistence ??
     botConfig.simpleArbConfig?.numEpochsLeaveOpen ?? 2
 
@@ -327,6 +336,97 @@ const BotSettingsTab: React.FC = () => {
                     suffix="%"
                   />
                 </div>
+              )}
+
+              {botConfig.basicMarketMakingConfig && (
+                <>
+                  <div className="d-flex align-items-center">
+                    <div className="fs16 me-3 flex-shrink-0">
+                      {prep(ID_MM_INVENTORY_SKEW)}
+                      <Tooltip content={prep(ID_MM_INVENTORY_SKEW_TOOLTIP)}>
+                        <span className="ico-info fs12 ms-1"></span>
+                      </Tooltip>
+                    </div>
+                    <NumberInput
+                      sliderPosition="inline"
+                      className="p-1 text-center fs14"
+                      min={0}
+                      max={1}
+                      precision={2}
+                      value={inventorySkew}
+                      onChange={(value) => dispatch({
+                        type: 'UPDATE_INVENTORY_SKEW',
+                        payload: value
+                      })}
+                      withSlider={true}
+                    />
+                  </div>
+                  <div className="d-flex align-items-center">
+                    <div className="fs16 me-3 flex-shrink-0">
+                      {prep(ID_MM_INVENTORY_SKEW_CAP)}
+                      <Tooltip content={prep(ID_MM_INVENTORY_SKEW_CAP_TOOLTIP)}>
+                        <span className="ico-info fs12 ms-1"></span>
+                      </Tooltip>
+                    </div>
+                    <NumberInput
+                      sliderPosition="inline"
+                      className="p-1 text-center fs14"
+                      min={0}
+                      max={10}
+                      precision={2}
+                      value={inventorySkewCap * 100}
+                      onChange={(value) => dispatch({
+                        type: 'UPDATE_INVENTORY_SKEW_CAP',
+                        payload: value / 100
+                      })}
+                      withSlider={true}
+                      suffix="%"
+                    />
+                  </div>
+                  <div className="mt-1">
+                    <span className="fs16 demi d-block mb-2">{prep(ID_MM_BOOK_PROTECTION) || 'Book Protection'}</span>
+                    <div className="form-check d-flex align-items-center mb-2">
+                      <input
+                        className="form-check-input me-2"
+                        type="checkbox"
+                        id="mmDoNotCross"
+                        checked={doNotCross}
+                        onChange={(e) => dispatch({
+                          type: 'UPDATE_DO_NOT_CROSS',
+                          payload: e.target.checked
+                        })}
+                      />
+                      <label className="form-check-label" htmlFor="mmDoNotCross">
+                        {prep(ID_MM_DO_NOT_CROSS) || 'Do Not Cross the Book'}
+                      </label>
+                      <Tooltip content={prep(ID_MM_DO_NOT_CROSS_TOOLTIP)}>
+                        <span className="ico-info fs12 ms-1"></span>
+                      </Tooltip>
+                    </div>
+                    <div className="d-flex align-items-center">
+                      <div className="fs16 me-3 flex-shrink-0">
+                        {prep(ID_MM_BID_ANCHOR_FADE_HOURS) || 'Hours to Fade Back to MEXC'}
+                        <Tooltip content={prep(ID_MM_BID_ANCHOR_FADE_HOURS_TOOLTIP)}>
+                          <span className="ico-info fs12 ms-1"></span>
+                        </Tooltip>
+                      </div>
+                      <NumberInput
+                        sliderPosition="inline"
+                        className="p-1 text-center fs14"
+                        min={0}
+                        max={24}
+                        precision={2}
+                        value={bidAnchorFadeHours}
+                        onChange={(value) => dispatch({
+                          type: 'UPDATE_BID_ANCHOR_FADE_HOURS',
+                          payload: value
+                        })}
+                        withSlider={true}
+                        suffix="h"
+                      />
+                    </div>
+                  </div>
+                </>
               )}
 
               {(botConfig.arbMarketMakingConfig || botConfig.simpleArbConfig) && (
