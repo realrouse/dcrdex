@@ -78,9 +78,12 @@
   
         <div class="d-flex flex-column">
           <span class="fs15 grey">[[[:title:price]]]</span>
-          <div class="flex-center me-2">
-            <span data-tmpl="price"></span>
-            <div data-tmpl="change" class="ms-2"></div>
+          <div class="d-flex align-items-end me-2">
+            <div class="d-flex flex-column">
+              <span data-tmpl="priceUsd" class="fs22 demi lh1"></span>
+              <span data-tmpl="price" class="fs13 grey"></span>
+            </div>
+            <div data-tmpl="change" class="ms-2 mb-1"></div>
           </div>
         </div>
 
@@ -127,6 +130,10 @@
                 </button>
               </div>
               <div class="ob-tools">
+                <label class="ob-cum-label" title="Show prices and quote totals in USD">
+                  <input type="checkbox" id="obShowUsd">
+                  <span>$</span>
+                </label>
                 <select id="obGroupSelect" class="ob-group-select" title="Price grouping"></select>
                 <label class="ob-cum-label" title="Running size from the spread">
                   <input type="checkbox" id="obCumulative">
@@ -145,6 +152,7 @@
 
             <div class="ob-spread">
               <span id="obPrice" class="ob-last-price buycolor">-</span>
+              <span id="obPriceAlt" class="ob-last-alt grey"></span>
               <span id="obUp" class="ico-arrowup buycolor fs11"></span>
               <span id="obDown" class="ico-arrowdown sellcolor fs11 d-hide"></span>
             </div>
@@ -157,6 +165,7 @@
                   <div class="ob-col-price">
                     <span class="text-end ico-check fs13 pe-1 d-hide" data-tmpl="epoch"></span>
                     <span data-tmpl="rate">-</span>
+                    <span data-tmpl="rateAlt" class="ob-rate-alt"></span>
                   </div>
                   <div class="ob-col-amt">
                     <span data-tmpl="qty">-</span>

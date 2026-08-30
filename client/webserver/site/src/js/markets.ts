@@ -197,6 +197,7 @@ export default class MarketsPage extends BasePage {
   obView: 'both' | 'buy' | 'sell'
   obCumulative: boolean
   obGroupConv: number
+  obShowUsd: boolean
   constructor (main: HTMLElement, pageParams: MarketsPageParams) {
     super()
 
@@ -209,6 +210,7 @@ export default class MarketsPage extends BasePage {
     this.obView = 'both'
     this.obCumulative = !!State.fetchLocal(State.obCumulativeLK)
     this.obGroupConv = 0
+    this.obShowUsd = !!State.fetchLocal(State.obShowUsdLK)
     this.metaOrders = {}
     this.recentMatches = []
     this.preorderCache = {}
@@ -675,7 +677,16 @@ export default class MarketsPage extends BasePage {
     const convSpot = mkt.spot.rate / this.market.rateConversionFactor
     const convBook = this.midGapConventional() || 0
     const convPrice = convSpot > 0 ? convSpot : convBook
-    this.page.obPrice.textContent = convPrice > 0 ? Doc.formatFourSigFigs(convPrice) : '-'
+    const usd = pairToUsd(convPrice, mkt.quoteid)
+    const pairTxt = convPrice > 0 ? Doc.formatFourSigFigs(convPrice) : '-'
+    const usdTxt = usd ? formatUsd(usd) : ''
+    if (this.obShowUsd && usdTxt) {
+      this.page.obPrice.textContent = usdTxt
+      if (this.page.obPriceAlt) this.page.obPriceAlt.textContent = pairTxt
+    } else {
+      this.page.obPrice.textContent = pairTxt
+      if (this.page.obPriceAlt) this.page.obPriceAlt.textContent = usdTxt
+    }
     this.page.obPrice.classList.remove('sellcolor', 'buycolor')
     this.page.obPrice.classList.add(mkt.spot.change24 >= 0 ? 'buycolor' : 'sellcolor')
     this.setOrderBookColumnUnits()
@@ -703,9 +714,9 @@ export default class MarketsPage extends BasePage {
     if (!page.obHeadPriceUnit || !this.market) return
     const base = this.market.baseUnitInfo.conventional.unit
     const quote = this.market.quoteUnitInfo.conventional.unit
-    page.obHeadPriceUnit.textContent = `(${quote})`
+    page.obHeadPriceUnit.textContent = this.obShowUsd ? '($)' : `(${quote})`
     page.obHeadAmtUnit.textContent = `(${base})`
-    page.obHeadTotalUnit.textContent = `(${quote})`
+    page.obHeadTotalUnit.textContent = this.obShowUsd ? '($)' : `(${quote})`
   }
 
   bindOrderBookModes () {
@@ -736,6 +747,17 @@ export default class MarketsPage extends BasePage {
 
   bindOrderBookViewControls () {
     const page = this.page
+    if (page.obShowUsd) {
+      const usdBox = page.obShowUsd as HTMLInputElement
+      usdBox.checked = this.obShowUsd
+      bind(usdBox, 'change', () => {
+        this.obShowUsd = !!usdBox.checked
+        State.storeLocal(State.obShowUsdLK, this.obShowUsd)
+        this.setCurrMarketPrice()
+        this.updateTitle()
+        this.loadTable()
+      })
+    }
     if (page.obCumulative) {
       const cumBox = page.obCumulative as HTMLInputElement
       cumBox.checked = this.obCumulative
@@ -2085,9 +2107,15 @@ export default class MarketsPage extends BasePage {
     // gets first price value from buy or from sell, so we can show it on
     // title.
     const midGapValue = this.midGapConventional()
-    const { baseUnitInfo: { conventional: { unit: bUnit } }, quoteUnitInfo: { conventional: { unit: qUnit } } } = this.market
-    if (!midGapValue) document.title = `${bUnit}${qUnit} | ${this.ogTitle}`
-    else document.title = `${Doc.formatCoinValue(midGapValue)} | ${bUnit}${qUnit} | ${this.ogTitle}` // more than 6 numbers it gets too big for the title.
+    const { baseUnitInfo: { conventional: { unit: bUnit } }, quoteUnitInfo: { conventional: { unit: qUnit } }, quoteCfg } = this.market
+    if (!midGapValue) {
+      document.title = `${bUnit}-${qUnit} | ${this.ogTitle}`
+      return
+    }
+    const usd = pairToUsd(midGapValue, quoteCfg.id)
+    const pairTxt = Doc.formatFourSigFigs(midGapValue)
+    if (usd) document.title = `${formatUsd(usd)} | ${bUnit}-${qUnit} | ${this.ogTitle}`
+    else document.title = `${pairTxt} | ${bUnit}-${qUnit} | ${this.ogTitle}`
   }
 
   /* handleBookRoute is the handler for the 'book' notification, which is sent
@@ -3308,7 +3336,8 @@ export default class MarketsPage extends BasePage {
     const tr = this.page.orderRowTmpl.cloneNode(true) as OrderRow
     const { baseUnitInfo, quoteUnitInfo, rateConversionFactor, cfg: { ratestep: rateStep } } = this.market
     const displayRate = this.groupedMsgRate(orderBin[0])
-    const manager = new OrderTableRowManager(tr, orderBin, baseUnitInfo, quoteUnitInfo, rateStep, displayRate, this.obGroupDecimals())
+    const quoteFiat = app().fiatRatesMap[this.market.quoteCfg.id] || 0
+    const manager = new OrderTableRowManager(tr, orderBin, baseUnitInfo, quoteUnitInfo, rateStep, displayRate, this.obGroupDecimals(), this.obShowUsd, quoteFiat)
     tr.manager = manager
     bind(tr, 'click', () => {
       this.reportDepthClick(tr.manager.getRate() / rateConversionFactor)
@@ -3783,8 +3812,10 @@ class OrderTableRowManager {
   baseUnitInfo: UnitInfo
   quoteUnitInfo: UnitInfo
   priceDecimals: number | null
+  usdMode: boolean
+  quoteFiat: number
 
-  constructor (tableRow: HTMLElement, orderBin: MiniOrder[], baseUnitInfo: UnitInfo, quoteUnitInfo: UnitInfo, rateStep: number, displayMsgRate?: number, priceDecimals?: number | null) {
+  constructor (tableRow: HTMLElement, orderBin: MiniOrder[], baseUnitInfo: UnitInfo, quoteUnitInfo: UnitInfo, rateStep: number, displayMsgRate?: number, priceDecimals?: number | null, usdMode?: boolean, quoteFiat?: number) {
     this.tableRow = tableRow
     const page = this.page = Doc.parseTemplate(tableRow)
     this.orderBin = orderBin
@@ -3794,23 +3825,33 @@ class OrderTableRowManager {
     this.baseUnitInfo = baseUnitInfo
     this.quoteUnitInfo = quoteUnitInfo
     this.priceDecimals = priceDecimals ?? null
+    this.usdMode = !!usdMode
+    this.quoteFiat = quoteFiat || 0
     tableRow.classList.add(this.sell ? 'ob-ask' : 'ob-bid')
     if (page.bar) page.bar.classList.add(this.sell ? 'ob-ask-bar' : 'ob-bid-bar')
     let rateText = Doc.formatRateFullPrecision(this.msgRate, baseUnitInfo, quoteUnitInfo, rateStep)
+    const conv = this.msgRate * baseUnitInfo.conventional.conversionFactor / quoteUnitInfo.conventional.conversionFactor / OrderUtil.RateEncodingFactor
     if (this.priceDecimals !== null && this.msgRate !== 0) {
-      const conv = this.msgRate * baseUnitInfo.conventional.conversionFactor / quoteUnitInfo.conventional.conversionFactor / OrderUtil.RateEncodingFactor
       rateText = conv.toLocaleString(undefined, {
         minimumFractionDigits: this.priceDecimals,
         maximumFractionDigits: this.priceDecimals
       })
     }
+    const usdTxt = this.msgRate !== 0 && this.quoteFiat ? formatUsd(conv * this.quoteFiat) : ''
     Doc.setVis(this.isEpoch(), this.page.epoch)
     if (this.msgRate === 0) {
       page.rate.textContent = 'market'
     } else {
       const cssClass = this.isSell() ? 'sellcolor' : 'buycolor'
-      page.rate.textContent = rateText
-      page.rate.title = rateText
+      if (this.usdMode && usdTxt) {
+        page.rate.textContent = usdTxt
+        page.rate.title = `${usdTxt}  ${rateText}`
+        if (page.rateAlt) page.rateAlt.textContent = rateText
+      } else {
+        page.rate.textContent = rateText
+        page.rate.title = usdTxt ? `${rateText}  ${usdTxt}` : rateText
+        if (page.rateAlt) page.rateAlt.textContent = usdTxt
+      }
       page.rate.classList.add(cssClass)
     }
     this.updateQtyNumOrdersEl()
@@ -3839,9 +3880,14 @@ class OrderTableRowManager {
     page.qty.textContent = Doc.formatCoinValue(qty, this.baseUnitInfo)
     const totalEl = page.total || this.tableRow.querySelector('[data-tmpl="total"]') as PageElement
     if (totalEl) {
-      totalEl.textContent = this.msgRate === 0
-        ? '—'
-        : Doc.formatCoinValue(quote, this.quoteUnitInfo)
+      if (this.msgRate === 0) {
+        totalEl.textContent = '—'
+      } else if (this.usdMode && this.quoteFiat) {
+        const conv = quote / this.quoteUnitInfo.conventional.conversionFactor
+        totalEl.textContent = formatUsd(conv * this.quoteFiat) || Doc.formatCoinValue(quote, this.quoteUnitInfo)
+      } else {
+        totalEl.textContent = Doc.formatCoinValue(quote, this.quoteUnitInfo)
+      }
     }
     if (page.bar) page.bar.style.transform = `scaleX(${Math.min(1, Math.max(0, barRatio))})`
   }
@@ -3862,9 +3908,14 @@ class OrderTableRowManager {
         totalEl.textContent = '—'
       } else {
         const quoteAtomic = Math.round(qty * this.msgRate / OrderUtil.RateEncodingFactor)
-        totalEl.textContent = Number.isFinite(quoteAtomic)
-          ? Doc.formatCoinValue(quoteAtomic, this.quoteUnitInfo)
-          : '—'
+        if (!Number.isFinite(quoteAtomic)) {
+          totalEl.textContent = '—'
+        } else if (this.usdMode && this.quoteFiat) {
+          const conv = quoteAtomic / this.quoteUnitInfo.conventional.conversionFactor
+          totalEl.textContent = formatUsd(conv * this.quoteFiat) || Doc.formatCoinValue(quoteAtomic, this.quoteUnitInfo)
+        } else {
+          totalEl.textContent = Doc.formatCoinValue(quoteAtomic, this.quoteUnitInfo)
+        }
       }
     }
     if (numOrders > 1) {
@@ -3984,9 +4035,23 @@ function sortedMarkets (): ExchangeMarket[] {
   return mkts
 }
 
+function formatUsd (n: number): string {
+  if (!n || !Number.isFinite(n)) return ''
+  return '$' + Doc.formatFourSigFigs(n)
+}
+
+function pairToUsd (convPairRate: number, quoteID: number): number {
+  const qf = app().fiatRatesMap[quoteID]
+  if (!qf || !convPairRate) return 0
+  return convPairRate * qf
+}
+
 function setPriceAndChange (tmpl: Record<string, PageElement>, xc: Exchange, mkt: Market) {
   if (!mkt.spot) return
-  tmpl.price.textContent = Doc.formatFourSigFigs(app().conventionalRate(mkt.baseid, mkt.quoteid, mkt.spot.rate, xc))
+  const pair = app().conventionalRate(mkt.baseid, mkt.quoteid, mkt.spot.rate, xc)
+  tmpl.price.textContent = Doc.formatFourSigFigs(pair)
+  const usd = pairToUsd(pair, mkt.quoteid)
+  if (tmpl.priceUsd) tmpl.priceUsd.textContent = usd ? formatUsd(usd) : ''
   const sign = mkt.spot.change24 > 0 ? '+' : ''
   tmpl.change.classList.remove('buycolor', 'sellcolor')
   tmpl.change.classList.add(mkt.spot.change24 >= 0 ? 'buycolor' : 'sellcolor')

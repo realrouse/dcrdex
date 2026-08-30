@@ -215,6 +215,21 @@ div[data-handler=markets] {
       line-height: 1.2;
     }
 
+    .ob-last-alt,
+    .ob-rate-alt {
+      font-size: 10px;
+      color: var(--text-grey);
+      font-weight: 400;
+      margin-left: 4px;
+      font-variant-numeric: tabular-nums;
+    }
+
+    .ob-col-price {
+      display: flex;
+      align-items: baseline;
+      min-width: 0;
+    }
+
     &.ob-view-buy .ob-sells,
     &.ob-view-sell .ob-buys {
       display: none;

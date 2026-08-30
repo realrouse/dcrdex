@@ -29,7 +29,7 @@ fi
 
 echo "building bisonw -> $OUT"
 cd "$ROOT/client/cmd/bisonw"
-CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -trimpath \
+CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -trimpath -buildvcs=true \
   -ldflags "-s -w -X decred.org/dcrdex/client/app.Version=${VERSION}" \
   -o "$OUT" .
 echo "ok $(ls -lh "$OUT" | awk '{print $5}')"

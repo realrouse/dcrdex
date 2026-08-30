@@ -22,6 +22,7 @@ export default class State {
   static lastCandleDurationLK = 'lastCandleDuration'
   static obCumulativeLK = 'obCumulative'
   static obGroupConvLK = 'obGroupConv'
+  static obShowUsdLK = 'obShowUsd'
   static localeSpecsKey = 'localeSpecsLK'
   static localeKey = 'localeLK'
   static newUserBannerDismissedLK = 'newUserBannerDismissed'
