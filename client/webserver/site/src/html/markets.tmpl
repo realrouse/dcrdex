@@ -533,15 +533,56 @@
               </div>
 
               {{- /* USER ORDERS */ -}}
-              <div class="text-center fs20 mb-2">
-                [[[Your Orders]]]
+              <div class="user-orders-head mb-2">
+                <span class="fs20">[[[Your Orders]]]</span>
+                <span id="uoViewBttn" class="ico-settings fs15 pointer hoverbg user-orders-gear" data-tooltip="[[[uo_view_options]]]"></span>
+              </div>
+              <div id="uoViewMenu" class="user-orders-view border-top d-hide">
+                <label class="uo-opt">
+                  <input type="checkbox" id="uoShowCancelled">
+                  <span>[[[uo_show_cancelled]]]</span>
+                </label>
+                <label class="uo-opt">
+                  <input type="checkbox" id="uoShowFilled">
+                  <span>[[[uo_show_filled]]]</span>
+                </label>
+                <label class="uo-opt">
+                  <span>[[[uo_sides]]]</span>
+                  <select id="uoSideFilter" class="uo-side-select">
+                    <option value="both">[[[uo_both_sides]]]</option>
+                    <option value="buy">[[[uo_buys_only]]]</option>
+                    <option value="sell">[[[uo_sells_only]]]</option>
+                  </select>
+                </label>
+              </div>
+              <div id="uoBatch" class="user-orders-batch border-top d-hide">
+                <div class="uo-batch-row">
+                  <label class="uo-opt">
+                    <input type="checkbox" id="uoSelectAll">
+                    <span>[[[uo_select_all]]]</span>
+                  </label>
+                  <span id="uoSelCount" class="grey"></span>
+                  <span id="uoHiddenCount" class="grey ms-auto"></span>
+                </div>
+                <div class="uo-batch-row">
+                  <span class="grey">[[[uo_cancel]]]</span>
+                  <button id="uoCancelSelected" type="button" class="uo-btn" disabled>[[[uo_selected]]]</button>
+                  <button id="uoCancelAll" type="button" class="uo-btn">[[[uo_all]]]</button>
+                  <button id="uoCancelBuys" type="button" class="uo-btn buycolor">[[[uo_buys]]]</button>
+                  <button id="uoCancelSells" type="button" class="uo-btn sellcolor">[[[uo_sells]]]</button>
+                </div>
+                <div id="uoBatchStatus" class="d-hide"></div>
               </div>
               <div id="unreadyOrdersMsg" class="d-hide px-3 py-1 flex-center fs16 text-danger">[[[unready_wallets_msg]]]</div>
-              <div id="userNoOrders" class="p-3 flex-center fs16 grey">no active orders</div>
+              <div id="userNoOrders" class="p-3 flex-center flex-column fs16 grey">
+                <span>no active orders</span>
+                <span id="uoNoOrdersHidden" class="fs14 d-hide"></span>
+              </div>
               <div id="userOrders" class="border-bottom">
                 <div id="userOrderTmpl" class="user-order border-top">
                   <div data-tmpl="header" class="user-order-header pointer">
                     <div data-tmpl="sideLight" class="side-indicator"></div>
+                    <input data-tmpl="selector" type="checkbox" class="uo-select me-2 d-hide">
                     <span data-tmpl="side"></span>
                     <span data-tmpl="qty" class="ms-1"></span>
                     <span data-tmpl="baseSymbol" class="ms-1 grey"></span>
@@ -905,6 +946,19 @@
     {{- /* CANCEL ORDER FORM */ -}}
     <form class="d-hide" id="cancelForm" autocomplete="off">
       {{template "cancelOrderForm" .}}
+    </form>
+    {{- /* BATCH CANCEL FORM */ -}}
+    <form class="d-hide" id="batchCancelForm" autocomplete="off">
+      <div class="form-closer"><span class="ico-cross"></span></div>
+      <header>[[[uo_batch_cancel_title]]]</header>
+      <div id="batchCancelMsg" class="fs16"></div>
+      <div class="fs14 grey">[[[cancel_remain]]]</div>
+      <div id="batchCancelProgress" class="fs15 d-hide"></div>
+      <div id="batchCancelErrs" class="fs14 text-danger text-break d-hide"></div>
+      <div class="flex-stretch-column">
+        <button id="batchCancelSubmit" type="button" class="feature">[[[Submit]]]</button>
+        <button id="batchCancelDone" type="button" class="feature d-hide">[[[uo_close]]]</button>
+      </div>
     </form>
     <form class="d-hide" id="accelerateForm">
       {{template "accelerateForm" .}}

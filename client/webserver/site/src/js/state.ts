@@ -23,6 +23,7 @@ export default class State {
   static obCumulativeLK = 'obCumulative'
   static obGroupConvLK = 'obGroupConv'
   static obShowUsdLK = 'obShowUsd'
+  static userOrdersViewLK = 'userOrdersView'
   static localeSpecsKey = 'localeSpecsLK'
   static localeKey = 'localeLK'
   static newUserBannerDismissedLK = 'newUserBannerDismissed'

@@ -86,6 +86,25 @@ const epochMatchSummaryRoute = 'epoch_match_summary'
 const anHour = 60 * 60 * 1000 // milliseconds
 const maxUserOrdersShown = 10
 
+interface UserOrdersView {
+  showCancelled: boolean
+  showFilled: boolean
+  side: 'both' | 'buy' | 'sell'
+}
+
+/* loadUserOrdersView reads the persisted Your Orders view options. Recently
+ * cancelled orders are hidden by default. */
+function loadUserOrdersView (): UserOrdersView {
+  const v: UserOrdersView = { showCancelled: false, showFilled: true, side: 'both' }
+  const stored = State.fetchLocal(State.userOrdersViewLK)
+  if (stored && typeof stored === 'object') {
+    if (typeof stored.showCancelled === 'boolean') v.showCancelled = stored.showCancelled
+    if (typeof stored.showFilled === 'boolean') v.showFilled = stored.showFilled
+    if (stored.side === 'buy' || stored.side === 'sell') v.side = stored.side
+  }
+  return v
+}
+
 const buyBtnClass = 'buygreen-bg'
 const sellBtnClass = 'sellred-bg'
 
@@ -198,6 +217,11 @@ export default class MarketsPage extends BasePage {
   obCumulative: boolean
   obGroupConv: number
   obShowUsd: boolean
+  uoView: UserOrdersView
+  uoSelected: Set<string>
+  uoHidden: number
+  batchCancelOrders: Order[]
+  batchCancelRunning: boolean
   constructor (main: HTMLElement, pageParams: MarketsPageParams) {
     super()
 
@@ -212,6 +236,11 @@ export default class MarketsPage extends BasePage {
     this.obGroupConv = 0
     this.obShowUsd = !!State.fetchLocal(State.obShowUsdLK)
     this.metaOrders = {}
+    this.uoView = loadUserOrdersView()
+    this.uoSelected = new Set()
+    this.uoHidden = 0
+    this.batchCancelOrders = []
+    this.batchCancelRunning = false
     this.recentMatches = []
     this.preorderCache = {}
     this.depthLines = {
@@ -483,6 +512,7 @@ export default class MarketsPage extends BasePage {
       this.activeMarkerRate = null
       this.setDepthMarkers()
     })
+    this.bindUserOrdersControls()
 
     const stats0 = page.marketStats
     const stats1 = stats0.cloneNode(true) as PageElement
@@ -1903,6 +1933,15 @@ export default class MarketsPage extends BasePage {
       else if (!aActive && bActive) return 1
       return b.ord.submitTime - a.ord.submitTime
     })
+    // Apply the "Your Orders" view options (hide recently cancelled orders,
+    // filled orders, or one side) before trimming to the display limit.
+    let hidden = 0
+    sortedOrders = sortedOrders.filter((mord: MetaOrder) => {
+      if (this.userOrderVisible(mord.ord)) return true
+      hidden++
+      return false
+    })
+    this.uoHidden = hidden
     const n = this.maxUserOrderCount()
     if (sortedOrders.length > n) { sortedOrders = sortedOrders.slice(0, n) }
 
@@ -1913,6 +1952,7 @@ export default class MarketsPage extends BasePage {
     Doc.setVis(!sortedOrders?.length, page.userNoOrders)
 
     let unreadyOrders = false
+    let anySelectable = false
     for (const mord of sortedOrders) {
       const div = page.userOrderTmpl.cloneNode(true) as HTMLElement
       page.userOrders.appendChild(div)
@@ -1963,6 +2003,23 @@ export default class MarketsPage extends BasePage {
       const showAccelerate = (e: Event) => {
         e.stopPropagation()
         this.showAccelerate(ord)
+      }
+
+      // Every row gets a checkbox slot so the columns line up; the box is
+      // only visible for orders that can be cancelled.
+      Doc.show(header.selector)
+      header.selector.style.visibility = 'hidden'
+      if (orderID && this.orderSelectable(ord)) {
+        const cb = header.selector as HTMLInputElement
+        cb.style.visibility = ''
+        anySelectable = true
+        cb.checked = this.uoSelected.has(orderID)
+        bind(cb, 'click', (e: Event) => { e.stopPropagation() })
+        bind(cb, 'change', () => {
+          if (cb.checked) this.uoSelected.add(orderID)
+          else this.uoSelected.delete(orderID)
+          this.updateUserOrdersControls()
+        })
       }
 
       if (!orderID) {
@@ -2047,8 +2104,232 @@ export default class MarketsPage extends BasePage {
       })
       app().bindTooltips(div)
     }
+    if (!anySelectable) for (const { header } of Object.values(metaOrders)) Doc.hide(header.selector)
     Doc.setVis(unreadyOrders, page.unreadyOrdersMsg)
+    this.updateUserOrdersControls()
     this.setDepthMarkers()
+  }
+
+  /* bindUserOrdersControls sets up the Your Orders view options and batch
+   * cancel controls. */
+  bindUserOrdersControls () {
+    const page = this.page
+    const v = this.uoView
+    const cancelled = page.uoShowCancelled as HTMLInputElement
+    const filled = page.uoShowFilled as HTMLInputElement
+    const side = page.uoSideFilter as unknown as HTMLSelectElement
+    cancelled.checked = v.showCancelled
+    filled.checked = v.showFilled
+    side.value = v.side
+    const viewChanged = () => {
+      v.showCancelled = cancelled.checked
+      v.showFilled = filled.checked
+      v.side = side.value === 'buy' || side.value === 'sell' ? side.value : 'both'
+      State.storeLocal(State.userOrdersViewLK, v)
+      this.updateViewBttn()
+      // Reload from the DB so newly un-hidden inactive orders appear.
+      if (this.market) this.loadUserOrders()
+    }
+    bind(cancelled, 'change', viewChanged)
+    bind(filled, 'change', viewChanged)
+    bind(side, 'change', viewChanged)
+    bind(page.uoViewBttn, 'click', () => {
+      Doc.setVis(!Doc.isDisplayed(page.uoViewMenu), page.uoViewMenu)
+    })
+    bind(page.uoHiddenCount, 'click', () => { Doc.show(page.uoViewMenu) })
+    this.updateViewBttn()
+
+    for (const bttn of [page.uoCancelSelected, page.uoCancelAll, page.uoCancelBuys, page.uoCancelSells]) {
+      bttn.dataset.label = (bttn.textContent || '').trim()
+    }
+    bind(page.uoSelectAll, 'change', () => {
+      const selectable = this.selectableShownOrders()
+      const allSelected = selectable.length > 0 && selectable.every((o: Order) => this.uoSelected.has(o.id))
+      if (allSelected) this.uoSelected.clear()
+      else for (const o of selectable) this.uoSelected.add(o.id)
+      for (const mord of Object.values(this.metaOrders)) {
+        if (mord.header?.selector) (mord.header.selector as HTMLInputElement).checked = this.uoSelected.has(mord.ord.id)
+      }
+      this.updateUserOrdersControls()
+    })
+    bind(page.uoCancelSelected, 'click', () => { this.showBatchCancel('selected') })
+    bind(page.uoCancelAll, 'click', () => { this.showBatchCancel('all') })
+    bind(page.uoCancelBuys, 'click', () => { this.showBatchCancel('buy') })
+    bind(page.uoCancelSells, 'click', () => { this.showBatchCancel('sell') })
+    bind(page.batchCancelSubmit, 'click', () => { this.submitBatchCancel() })
+    bind(page.batchCancelDone, 'click', () => { this.forms.close() })
+  }
+
+  /* updateViewBttn highlights the view options gear when anything is hidden
+   * beyond the defaults. */
+  updateViewBttn () {
+    const v = this.uoView
+    const custom = v.showCancelled || !v.showFilled || v.side !== 'both'
+    this.page.uoViewBttn.classList.toggle('uo-custom', custom)
+  }
+
+  /* userOrderVisible applies the Your Orders view options to an order. */
+  userOrderVisible (ord: Order): boolean {
+    const { showCancelled, showFilled, side } = this.uoView
+    if (side === 'buy' && ord.sell) return false
+    if (side === 'sell' && !ord.sell) return false
+    if (ord.status < OrderUtil.StatusExecuted || OrderUtil.hasActiveMatches(ord)) return true
+    if (ord.status === OrderUtil.StatusCanceled || ord.status === OrderUtil.StatusRevoked) return showCancelled
+    // Executed with nothing filled, e.g. an immediate order that did not match.
+    if (OrderUtil.filled(ord) === 0) return showCancelled
+    return showFilled
+  }
+
+  /* orderSelectable is true for a booked/epoch standing limit order that does
+   * not already have a cancel in flight. */
+  orderSelectable (ord: Order): boolean {
+    return Boolean(ord.id) && OrderUtil.isCancellable(ord) && !ord.cancelling
+  }
+
+  /* cancellableOrders lists every cancellable order on the current market,
+   * whether or not it is shown by the view options. */
+  cancellableOrders (): Order[] {
+    if (!this.market?.dex) return []
+    const { dex: { host }, cfg: { name: mktID } } = this.market
+    let orders: Order[] = []
+    try { orders = app().orders(host, mktID) } catch { return [] }
+    return orders.filter((o: Order) => this.orderSelectable(o))
+  }
+
+  /* selectableShownOrders lists the cancellable orders that have a row. */
+  selectableShownOrders (): Order[] {
+    return Object.values(this.metaOrders).map((m: MetaOrder) => m.ord).filter((o: Order) => this.orderSelectable(o))
+  }
+
+  /* updateUserOrdersControls refreshes the batch cancel bar. */
+  updateUserOrdersControls () {
+    const page = this.page
+    const all = this.cancellableOrders()
+    const ids = new Set(all.map((o: Order) => o.id))
+    for (const oid of Array.from(this.uoSelected)) if (!ids.has(oid)) this.uoSelected.delete(oid)
+    const buys = all.filter((o: Order) => !o.sell).length
+    const sells = all.length - buys
+    const nSel = this.uoSelected.size
+    const label = (bttn: PageElement, n: number) => {
+      bttn.textContent = `${bttn.dataset.label} (${n})`;
+      (bttn as HTMLButtonElement).disabled = n === 0 || this.batchCancelRunning
+    }
+    label(page.uoCancelSelected, nSel)
+    label(page.uoCancelAll, all.length)
+    label(page.uoCancelBuys, buys)
+    label(page.uoCancelSells, sells)
+    const selectable = this.selectableShownOrders()
+    const nShownSel = selectable.filter((o: Order) => this.uoSelected.has(o.id)).length
+    const selAll = page.uoSelectAll as HTMLInputElement
+    selAll.checked = selectable.length > 0 && nShownSel === selectable.length
+    selAll.indeterminate = nShownSel > 0 && nShownSel < selectable.length
+    selAll.disabled = selectable.length === 0
+    page.uoSelCount.textContent = nSel ? `${nSel} selected` : ''
+    const hiddenTxt = this.uoHidden ? `${this.uoHidden} hidden by view options` : ''
+    page.uoHiddenCount.textContent = hiddenTxt
+    page.uoHiddenCount.classList.toggle('pointer', this.uoHidden > 0)
+    page.uoNoOrdersHidden.textContent = hiddenTxt
+    Doc.setVis(this.uoHidden > 0, page.uoNoOrdersHidden)
+    Doc.setVis(all.length > 0 || this.batchCancelRunning || Doc.isDisplayed(page.uoBatchStatus), page.uoBatch)
+  }
+
+  /* showBatchCancel opens the confirmation form for a batch cancel. */
+  showBatchCancel (kind: 'selected' | 'all' | 'buy' | 'sell') {
+    if (this.batchCancelRunning) return
+    const page = this.page
+    let orders = this.cancellableOrders()
+    if (kind === 'selected') orders = orders.filter((o: Order) => this.uoSelected.has(o.id))
+    else if (kind === 'buy') orders = orders.filter((o: Order) => !o.sell)
+    else if (kind === 'sell') orders = orders.filter((o: Order) => o.sell)
+    if (!orders.length) return
+    this.batchCancelOrders = orders
+    const n = orders.length
+    const sideTxt = kind === 'buy' ? 'buy ' : kind === 'sell' ? 'sell ' : kind === 'selected' ? 'selected ' : ''
+    const mkt = `${this.market.baseUnitInfo.conventional.unit}-${this.market.quoteUnitInfo.conventional.unit}`
+    page.batchCancelMsg.textContent = `Cancel ${kind === 'all' ? 'all ' : ''}${n} ${sideTxt}order${n === 1 ? '' : 's'} on ${mkt} at ${this.market.dex.host}?`
+    page.batchCancelProgress.textContent = ''
+    page.batchCancelErrs.textContent = ''
+    Doc.hide(page.batchCancelProgress, page.batchCancelErrs, page.batchCancelDone)
+    Doc.show(page.batchCancelSubmit)
+    this.forms.show(page.batchCancelForm)
+  }
+
+  /*
+   * submitBatchCancel cancels the confirmed orders through /api/cancel, two at
+   * a time so the server isn't flooded, and reports the results.
+   */
+  async submitBatchCancel () {
+    if (this.batchCancelRunning) return
+    const page = this.page
+    const orders = this.batchCancelOrders.slice()
+    if (!orders.length) return
+    this.batchCancelRunning = true
+    Doc.hide(page.batchCancelSubmit, page.batchCancelErrs)
+    Doc.show(page.batchCancelProgress, page.uoBatchStatus)
+    page.uoBatchStatus.className = 'grey'
+    this.updateUserOrdersControls()
+    const total = orders.length
+    let ok = 0
+    let skipped = 0
+    const errs: string[] = []
+    const report = (done: boolean) => {
+      const failed = errs.length
+      let txt = `${done ? 'Cancel submitted for' : 'Submitting cancels…'} ${ok} of ${total}`
+      if (skipped) txt += `, ${skipped} already closed`
+      if (failed) txt += `, ${failed} failed`
+      page.batchCancelProgress.textContent = txt
+      page.uoBatchStatus.textContent = txt
+    }
+    report(false)
+    const queue = orders.slice()
+    const worker = async () => {
+      for (;;) {
+        const ord = queue.shift()
+        if (!ord) return
+        const current = app().order(ord.id) || ord
+        if (!this.orderSelectable(current)) {
+          skipped++
+          this.uoSelected.delete(ord.id)
+          report(false)
+          continue
+        }
+        let res: any
+        try {
+          res = await postJSON('/api/cancel', { orderID: ord.id })
+        } catch (e) {
+          res = { msg: String(e) }
+        }
+        if (app().checkResponse(res)) {
+          ok++
+          current.cancelling = true
+          ord.cancelling = true
+          this.uoSelected.delete(ord.id)
+          const mord = this.metaOrders[ord.id]
+          if (mord) {
+            mord.ord.cancelling = true
+            Doc.hide(mord.details.cancelBttn)
+            mord.header.selector.style.visibility = 'hidden'
+          }
+        } else {
+          errs.push(`${ord.sell ? 'sell' : 'buy'} ${ord.id.slice(0, 8)}…: ${res?.msg || 'unknown error'}`)
+        }
+        report(false)
+        this.updateUserOrdersControls()
+      }
+    }
+    await Promise.all([worker(), worker()])
+    this.batchCancelRunning = false
+    report(true)
+    page.uoBatchStatus.className = errs.length ? 'text-danger' : 'grey'
+    if (errs.length) {
+      const shown = errs.slice(0, 10)
+      if (errs.length > shown.length) shown.push(`…and ${errs.length - shown.length} more`)
+      page.batchCancelErrs.textContent = shown.join('\n')
+      page.batchCancelErrs.style.whiteSpace = 'pre-line'
+      Doc.show(page.batchCancelErrs)
+    }
+    Doc.show(page.batchCancelDone)
+    this.updateUserOrdersControls()
   }
 
   /*
@@ -2903,6 +3184,21 @@ export default class MarketsPage extends BasePage {
     if (app().canAccelerateOrder(ord)) Doc.show(mord.details.accelerateBttn)
     else Doc.hide(mord.details.accelerateBttn)
     this.updateMetaOrder(mord)
+    if (!this.orderSelectable(ord)) {
+      mord.header.selector.style.visibility = 'hidden'
+      this.uoSelected.delete(ord.id)
+    }
+    // Hide orders that just became cancelled/revoked etc. if the view
+    // options say so, instead of leaving them lingering in the list.
+    if (!this.userOrderVisible(ord)) {
+      mord.div.remove()
+      delete this.metaOrders[ord.id]
+      this.uoHidden++
+      const any = Object.keys(this.metaOrders).length > 0
+      Doc.setVis(any, this.page.userOrders)
+      Doc.setVis(!any, this.page.userNoOrders)
+    }
+    this.updateUserOrdersControls()
     // Only reset markers if there is a change, since the chart is redrawn.
     if (
       (oldStatus === OrderUtil.StatusEpoch && ord.status === OrderUtil.StatusBooked) ||
