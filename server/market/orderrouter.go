@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"sync"
 	"time"
 
 	"decred.org/dcrdex/dex"
@@ -154,6 +155,17 @@ type OrderRouter struct {
 	feeSource   FeeSource
 	dexBalancer *DEXBalancer
 	swapper     MatchSwapper
+
+	// unfilledChecks tracks in-flight background sweeps of a user's
+	// existing unfilled orders (see checkUnfilledAsync), keyed by
+	// user and funding asset, so at most one runs per pair.
+	unfilledChecksMtx sync.Mutex
+	unfilledChecks    map[unfilledCheckKey]struct{}
+}
+
+type unfilledCheckKey struct {
+	user    account.AccountID
+	assetID uint32
 }
 
 // OrderRouterConfig is the configuration settings for an OrderRouter.
@@ -492,14 +504,12 @@ func (r *OrderRouter) processTrade(oRecord *orderRecord, tunnel MarketTunnel, as
 		coinStrs = append(coinStrs, coinStr)
 	}
 
-	// Use this as a chance to check user's existing market orders.
-	// TODO: check all markets?
-	for mktName, tunnel := range r.tunnels {
-		unbookedUnfunded := tunnel.CheckUnfilled(assets.funding.ID, oRecord.order.User())
-		for _, badLo := range unbookedUnfunded {
-			log.Infof("Unbooked unfunded order %v from market %s for user %v", badLo, mktName, oRecord.order.User())
-		}
-	}
+	// Use this as a chance to check user's existing market orders. This
+	// makes one backend RPC per funding coin of every unfilled order the
+	// user has booked, so it runs in the background: done inline it blocks
+	// this user's websocket read loop, and preimage responses queued behind
+	// it miss the 20 s collection window (orders and cancels revoked).
+	r.checkUnfilledAsync(assets.funding.ID, oRecord.order.User())
 
 	lotSize := tunnel.LotSize()
 
@@ -629,6 +639,42 @@ func (r *OrderRouter) processTrade(oRecord *orderRecord, tunnel MarketTunnel, as
 	})
 
 	return nil
+}
+
+// checkUnfilledAsync sweeps the user's unfilled orders funded by assetID in
+// all markets, unbooking any whose funding coins are spent. It returns
+// immediately; at most one sweep per user and asset is in flight.
+func (r *OrderRouter) checkUnfilledAsync(assetID uint32, user account.AccountID) {
+	key := unfilledCheckKey{user, assetID}
+	r.unfilledChecksMtx.Lock()
+	if r.unfilledChecks == nil {
+		r.unfilledChecks = make(map[unfilledCheckKey]struct{})
+	}
+	if _, running := r.unfilledChecks[key]; running {
+		r.unfilledChecksMtx.Unlock()
+		return
+	}
+	r.unfilledChecks[key] = struct{}{}
+	r.unfilledChecksMtx.Unlock()
+
+	tunnels := make(map[string]MarketTunnel, len(r.tunnels))
+	for mktName, tunnel := range r.tunnels {
+		tunnels[mktName] = tunnel
+	}
+
+	go func() {
+		defer func() {
+			r.unfilledChecksMtx.Lock()
+			delete(r.unfilledChecks, key)
+			r.unfilledChecksMtx.Unlock()
+		}()
+		for mktName, tunnel := range tunnels {
+			unbookedUnfunded := tunnel.CheckUnfilled(assetID, user)
+			for _, badLo := range unbookedUnfunded {
+				log.Infof("Unbooked unfunded order %v from market %s for user %v", badLo, mktName, user)
+			}
+		}
+	}()
 }
 
 // sufficientAccountBalance checks that the user's account-based asset balance
