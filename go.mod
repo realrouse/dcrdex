@@ -234,6 +234,7 @@ require (
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 )
 
-// lbcd claimtrie still called pebble.NewIter with the v0 API. go-ethereum pulls
-// pebble v1 (Iterator, error). The sibling tree has that 4-call-site fix.
-replace github.com/lbryio/lbcd => ../lbcd
+// lbcd claimtrie still calls pebble.NewIter with the v0 API. go-ethereum pulls
+// pebble v1 (Iterator, error). third_party/lbcd is lbcd v0.22.119 (a0ff51b) plus
+// that 4-call-site fix; see third_party/README.md.
+replace github.com/lbryio/lbcd => ./third_party/lbcd
