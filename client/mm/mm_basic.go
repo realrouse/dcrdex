@@ -96,6 +96,14 @@ type BasicMarketMakingConfig struct {
 	// Explicit 0 means snap back as soon as it cancels (do-not-cross
 	// still applies while it is live). 0 <= x <= 24.
 	BidAnchorFadeHours *float64 `json:"bidAnchorFadeHours,omitempty"`
+
+	// AutoTopUp is an opt-in per-asset hard cap, in atoms, on how much the
+	// running bot may add to its own allocation from the wallet's
+	// unallocated balance when a side cannot be fully placed for lack of
+	// funds. The cap is the total for one bot run. Nil or empty = off
+	// (the default); assets without an entry, or with 0, are never
+	// topped up.
+	AutoTopUp map[uint32]uint64 `json:"autoTopUp,omitempty"`
 }
 
 const (
@@ -106,6 +114,9 @@ const (
 	maxBidAnchorFadeHours     = 24.0
 	anchorCollarMult          = 2.0
 	recentMatchWindow         = 30 * time.Second
+	// autoTopUpInterval is the minimum time between two auto top-ups of
+	// the same asset.
+	autoTopUpInterval = time.Minute
 )
 
 func floatPtr(v float64) *float64 { return &v }
@@ -225,6 +236,12 @@ func (c *BasicMarketMakingConfig) copy() *BasicMarketMakingConfig {
 	if c.BidAnchorFadeHours != nil {
 		v := *c.BidAnchorFadeHours
 		cfg.BidAnchorFadeHours = &v
+	}
+	if c.AutoTopUp != nil {
+		cfg.AutoTopUp = make(map[uint32]uint64, len(c.AutoTopUp))
+		for assetID, v := range c.AutoTopUp {
+			cfg.AutoTopUp[assetID] = v
+		}
 	}
 
 	return &cfg
@@ -423,6 +440,12 @@ type basicMarketMaker struct {
 	buyAnchor          uint64 // low-water aggressive foreign ask
 	buyFadeStart       time.Time
 	prevBuyBookedLots  uint64
+
+	topUpMtx       sync.Mutex
+	topUpAdded     map[uint32]uint64 // total auto-added this run
+	topUpLast      map[uint32]time.Time
+	topUpInFlight  map[uint32]bool
+	topUpCapLogged map[uint32]bool
 }
 
 var _ bot = (*basicMarketMaker)(nil)
@@ -997,6 +1020,9 @@ func (m *basicMarketMaker) rebalance(newEpoch uint64) {
 		}
 	}
 
+	m.maybeAutoTopUp(buysReport)
+	m.maybeAutoTopUp(sellsReport)
+
 	epochReport := &EpochReport{
 		BuysReport:  buysReport,
 		SellsReport: sellsReport,
@@ -1004,6 +1030,97 @@ func (m *basicMarketMaker) rebalance(newEpoch uint64) {
 	}
 	epochReport.setPreOrderProblems(determinePlacementsErr)
 	m.updateEpochReport(epochReport)
+}
+
+// maybeAutoTopUp requests an auto top-up for each asset the report marks
+// as insufficient, if the config opts in for that asset.
+func (m *basicMarketMaker) maybeAutoTopUp(rep *OrderReport) {
+	caps := m.cfg().AutoTopUp
+	if len(caps) == 0 || rep == nil || rep.Error == nil {
+		return
+	}
+	for assetID, short := range rep.Error.InsufficientBalance {
+		capAmt := caps[assetID]
+		if !short || capAmt == 0 {
+			continue
+		}
+		var have uint64
+		if b := rep.AvailableDEXBals[assetID]; b != nil {
+			have = b.Available
+		}
+		need := rep.RequiredDEXBals[assetID]
+		if need <= have {
+			continue
+		}
+		m.requestTopUp(assetID, need-have, capAmt)
+	}
+}
+
+// requestTopUp moves up to want atoms of assetID from the wallet's
+// unallocated balance into the bot's allocation, never exceeding capAmt in
+// total for this run. It runs asynchronously: internalTransfer takes the
+// MarketMaker's startUpdateMtx, which a config update can hold while it
+// waits for the bot loop (and so this rebalance) to stop.
+func (m *basicMarketMaker) requestTopUp(assetID uint32, want, capAmt uint64) {
+	if m.internalTransfer == nil {
+		return
+	}
+	m.topUpMtx.Lock()
+	if m.topUpAdded == nil {
+		m.topUpAdded = make(map[uint32]uint64)
+		m.topUpLast = make(map[uint32]time.Time)
+		m.topUpInFlight = make(map[uint32]bool)
+		m.topUpCapLogged = make(map[uint32]bool)
+	}
+	if m.topUpInFlight[assetID] || time.Since(m.topUpLast[assetID]) < autoTopUpInterval {
+		m.topUpMtx.Unlock()
+		return
+	}
+	added := m.topUpAdded[assetID]
+	if added >= capAmt {
+		if !m.topUpCapLogged[assetID] {
+			m.topUpCapLogged[assetID] = true
+			m.log.Warnf("auto top-up: %s cap of %s reached, not adding more", dex.BipIDSymbol(assetID), fmtAssetAmt(assetID, capAmt))
+		}
+		m.topUpMtx.Unlock()
+		return
+	}
+	if want > capAmt-added {
+		want = capAmt - added
+	}
+	m.topUpInFlight[assetID] = true
+	m.topUpLast[assetID] = time.Now()
+	m.topUpMtx.Unlock()
+
+	go func() {
+		var moved uint64
+		defer func() {
+			m.topUpMtx.Lock()
+			m.topUpInFlight[assetID] = false
+			m.topUpAdded[assetID] += moved
+			total := m.topUpAdded[assetID]
+			m.topUpMtx.Unlock()
+			if moved > 0 {
+				m.log.Infof("auto top-up: allocated %s more to the bot (%s of %s cap used this run)",
+					fmtAssetAmt(assetID, moved), fmtAssetAmt(assetID, total), fmtAssetAmt(assetID, capAmt))
+			}
+		}()
+		if m.ctx == nil || m.ctx.Err() != nil {
+			return
+		}
+		err := m.internalTransfer(m.mwh, func(dexAvail, _ map[uint32]uint64) error {
+			amt := min(want, dexAvail[assetID])
+			if amt == 0 {
+				return fmt.Errorf("no unallocated %s in the wallet", dex.BipIDSymbol(assetID))
+			}
+			m.updateInventory(&BotInventoryDiffs{DEX: map[uint32]int64{assetID: int64(amt)}})
+			moved = amt
+			return nil
+		})
+		if err != nil {
+			m.log.Warnf("auto top-up of %s failed: %v", dex.BipIDSymbol(assetID), err)
+		}
+	}()
 }
 
 // mergeOrderReport folds next into acc. OrderedLots and used balances
@@ -1104,6 +1221,13 @@ func newBasicMarketMaker(cfg *BotConfig, adaptorCfg *exchangeAdaptorCfg, oracle 
 	err = cfg.BasicMMConfig.validate()
 	if err != nil {
 		return nil, fmt.Errorf("invalid market making config: %v", err)
+	}
+
+	for assetID := range cfg.BasicMMConfig.AutoTopUp {
+		if assetID != cfg.BaseID && assetID != cfg.QuoteID &&
+			assetID != feeAssetID(cfg.BaseID) && assetID != feeAssetID(cfg.QuoteID) {
+			return nil, fmt.Errorf("auto top-up configured for asset %d, which this market does not use", assetID)
+		}
 	}
 
 	basicMM := &basicMarketMaker{

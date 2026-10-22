@@ -983,3 +983,84 @@ func TestBookProtection(t *testing.T) {
 		}
 	})
 }
+
+func TestBasicMMAutoTopUp(t *testing.T) {
+	const baseID, quoteID = 42, 0
+	u := mustParseAdaptorFromMarket(&core.Market{
+		RateStep: 1e3, AtomToConv: 1, LotSize: 5e9, BaseID: baseID, QuoteID: quoteID,
+	})
+	u.inventoryMods = make(map[uint32]int64)
+	u.fiatRates.Store(map[uint32]float64{baseID: 1, quoteID: 1})
+	var unallocated uint64 = 3e8
+	u.internalTransfer = func(_ *MarketWithHost, fn doInternalTransferFunc) error {
+		return fn(map[uint32]uint64{quoteID: unallocated}, nil)
+	}
+	mm := &basicMarketMaker{unifiedExchangeAdaptor: u}
+	mm.botCfgV.Store(&BotConfig{BaseID: baseID, QuoteID: quoteID,
+		BasicMMConfig: &BasicMarketMakingConfig{AutoTopUp: map[uint32]uint64{quoteID: 2e8}}})
+
+	report := func(need, have uint64) *OrderReport {
+		return &OrderReport{
+			Error:            &BotProblems{InsufficientBalance: map[uint32]bool{quoteID: true}},
+			RequiredDEXBals:  map[uint32]uint64{quoteID: need},
+			AvailableDEXBals: map[uint32]*BotBalance{quoteID: {Available: have}},
+		}
+	}
+	waitIdle := func() {
+		for i := 0; i < 200; i++ {
+			mm.topUpMtx.Lock()
+			busy := mm.topUpInFlight[quoteID]
+			mm.topUpMtx.Unlock()
+			if !busy {
+				return
+			}
+			time.Sleep(5 * time.Millisecond)
+		}
+		t.Fatal("top-up did not finish")
+	}
+
+	// Short by 1.5e8: tops up 1.5e8.
+	mm.maybeAutoTopUp(report(2.5e8, 1e8))
+	waitIdle()
+	if got := u.baseDexBalances[quoteID]; got != 1.5e8 {
+		t.Fatalf("expected 1.5e8 added, got %d", got)
+	}
+
+	// Rate limited: a second request right away does nothing.
+	mm.maybeAutoTopUp(report(5e8, 0))
+	waitIdle()
+	if got := u.baseDexBalances[quoteID]; got != 1.5e8 {
+		t.Fatalf("expected rate limit, balance %d", got)
+	}
+
+	// After the interval, the cap (2e8 total) limits the next top-up to 5e7.
+	mm.topUpMtx.Lock()
+	mm.topUpLast[quoteID] = time.Now().Add(-2 * autoTopUpInterval)
+	mm.topUpMtx.Unlock()
+	mm.maybeAutoTopUp(report(5e8, 0))
+	waitIdle()
+	if got := u.baseDexBalances[quoteID]; got != 2e8 {
+		t.Fatalf("expected cap at 2e8, got %d", got)
+	}
+
+	// Cap reached: nothing more.
+	mm.topUpMtx.Lock()
+	mm.topUpLast[quoteID] = time.Time{}
+	mm.topUpMtx.Unlock()
+	mm.maybeAutoTopUp(report(5e8, 0))
+	waitIdle()
+	if got := u.baseDexBalances[quoteID]; got != 2e8 {
+		t.Fatalf("expected no top-up past cap, got %d", got)
+	}
+
+	// Off when not configured for the asset.
+	mm.botCfgV.Store(&BotConfig{BaseID: baseID, QuoteID: quoteID, BasicMMConfig: &BasicMarketMakingConfig{}})
+	mm.topUpMtx.Lock()
+	mm.topUpAdded[quoteID] = 0
+	mm.topUpMtx.Unlock()
+	mm.maybeAutoTopUp(report(5e8, 0))
+	waitIdle()
+	if got := u.baseDexBalances[quoteID]; got != 2e8 {
+		t.Fatalf("expected no top-up when off, got %d", got)
+	}
+}
