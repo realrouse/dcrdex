@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"math/rand"
 	"os"
@@ -404,6 +405,8 @@ type TBackend struct {
 	confsMinus2    int64
 	invalidFeeRate bool
 	unfunded       bool
+	// fundingGate, if set, blocks FundingCoin until it is closed.
+	fundingGate chan struct{}
 }
 
 func tNewUTXOBackend() *tUTXOBackend {
@@ -488,6 +491,9 @@ type tUTXOBackend struct {
 }
 
 func (b *tUTXOBackend) FundingCoin(ctx context.Context, coinID, redeemScript []byte) (asset.FundingCoin, error) {
+	if b.fundingGate != nil {
+		<-b.fundingGate
+	}
 	return b.utxo(coinID)
 }
 
@@ -2276,4 +2282,107 @@ func TestParcelLimits(t *testing.T) {
 
 	lo.Quantity += lotSize
 	ensureErr()
+}
+
+// TestLimitFundingCheckOffReadLoop ensures handleLimit returns without
+// waiting for the backend to find the funding coins, so the user's
+// websocket read loop keeps processing (e.g. preimage replies).
+func TestLimitFundingCheckOffReadLoop(t *testing.T) {
+	qty := uint64(dcrLotSize) * 3
+	user := oRig.user
+	pi := ordertest.RandomPreimage()
+	commit := pi.Commit()
+	limit := msgjson.LimitOrder{
+		Prefix: msgjson.Prefix{
+			AccountID:  user.acct[:],
+			Base:       dcrID,
+			Quote:      btcID,
+			OrderType:  msgjson.LimitOrderNum,
+			ClientTime: uint64(nowMs().UnixMilli()),
+			Commit:     commit[:],
+		},
+		Trade: msgjson.Trade{
+			Side:     msgjson.SellOrderNum,
+			Quantity: qty,
+			Coins: []*msgjson.Coin{
+				oRig.signedUTXO(dcrID, qty, 1),
+				oRig.signedUTXO(dcrID, dcrLotSize, 2),
+			},
+			Address: btcAddr,
+		},
+		Rate: 1000 * dcrRateStep,
+		TiF:  msgjson.StandingOrderNum,
+	}
+
+	// Other tests may swap the router's tunnels, so use the live one.
+	mkt := oRig.router.tunnels["dcr_btc"].(*TMarketTunnel)
+	oRig.auth.sent = make(chan *msgjson.Error, 1)
+	mkt.added = make(chan struct{}, 1)
+	gate := make(chan struct{})
+	oRig.dcr.fundingGate = gate
+	defer func() {
+		oRig.auth.sent = nil
+		mkt.added = nil
+		oRig.dcr.fundingGate = nil
+	}()
+
+	msg, _ := msgjson.NewRequest(7, msgjson.LimitRoute, limit)
+	done := make(chan *msgjson.Error, 1)
+	go func() { done <- oRig.router.handleLimit(user.acct, msg) }()
+	select {
+	case rpcErr := <-done:
+		if rpcErr != nil {
+			t.Fatalf("handleLimit error: %v", rpcErr)
+		}
+	case <-time.After(2 * time.Second):
+		close(gate)
+		t.Fatalf("handleLimit blocked on the funding coin lookup")
+	}
+
+	// Nothing is answered while the backend is still looking.
+	select {
+	case <-oRig.auth.sent:
+		t.Fatalf("response sent before funding coins were found")
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	close(gate)
+	select {
+	case rpcErr := <-oRig.auth.sent:
+		if rpcErr != nil {
+			t.Fatalf("unexpected error response: %v", rpcErr)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatalf("no response after funding coins were found")
+	}
+	select {
+	case <-mkt.added:
+	case <-time.After(time.Second):
+		t.Fatalf("order not submitted to epoch")
+	}
+	if mkt.pop() == nil {
+		t.Fatalf("no order submitted")
+	}
+}
+
+func TestLookupFundingCoinsTimeout(t *testing.T) {
+	be := tNewUTXOBackend()
+	gate := make(chan struct{})
+	be.fundingGate = gate
+	defer close(gate)
+	r := &OrderRouter{coinLookupSem: make(chan struct{}, 2)}
+	coins := map[int]*msgjson.Coin{0: {ID: []byte{1}}, 1: {ID: []byte{2}}, 2: {ID: []byte{3}}}
+	start := time.Now()
+	res := r.lookupFundingCoinsWithin(be, coins, 150*time.Millisecond)
+	if el := time.Since(start); el > 2*time.Second {
+		t.Fatalf("lookups not bounded by the timeout: %v", el)
+	}
+	if len(res) != 3 {
+		t.Fatalf("expected 3 results, got %d", len(res))
+	}
+	for k, lr := range res {
+		if !errors.Is(lr.err, asset.ErrRequestTimeout) {
+			t.Fatalf("coin %d: expected timeout, got %v", k, lr.err)
+		}
+	}
 }

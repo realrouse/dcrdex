@@ -161,7 +161,30 @@ type OrderRouter struct {
 	// user and funding asset, so at most one runs per pair.
 	unfilledChecksMtx sync.Mutex
 	unfilledChecks    map[unfilledCheckKey]struct{}
+
+	// firstCheckSem bounds the number of new orders whose first funding
+	// coin check runs concurrently (off the comms read loop).
+	firstCheckSem chan struct{}
+	// coinLookupSem bounds the number of concurrent backend funding coin
+	// lookups across all orders.
+	coinLookupSem chan struct{}
 }
+
+const (
+	// maxConcurrentFirstChecks is the most new orders whose first funding
+	// coin check may run at once. Further orders wait for a slot in their
+	// own goroutine, never on a websocket read loop.
+	maxConcurrentFirstChecks = 64
+	// maxConcurrentCoinLookups is the most backend funding coin lookups
+	// that may run at once.
+	maxConcurrentCoinLookups = 16
+	// coinLookupTimeout bounds how long one checkCoins pass waits for its
+	// funding coin lookups. A lookup still running at the deadline counts
+	// as not found yet (try again on a later tick), exactly like a
+	// backend request timeout. Some backends ignore their context, so
+	// this is enforced here.
+	coinLookupTimeout = 20 * time.Second
+)
 
 type unfilledCheckKey struct {
 	user    account.AccountID
@@ -181,13 +204,15 @@ type OrderRouterConfig struct {
 // NewOrderRouter is a constructor for an OrderRouter.
 func NewOrderRouter(cfg *OrderRouterConfig) *OrderRouter {
 	router := &OrderRouter{
-		auth:        cfg.AuthManager,
-		assets:      cfg.Assets,
-		tunnels:     cfg.Markets,
-		latencyQ:    wait.NewTickerQueue(2 * time.Second),
-		feeSource:   cfg.FeeSource,
-		dexBalancer: cfg.DEXBalancer,
-		swapper:     cfg.MatchSwapper,
+		firstCheckSem: make(chan struct{}, maxConcurrentFirstChecks),
+		coinLookupSem: make(chan struct{}, maxConcurrentCoinLookups),
+		auth:          cfg.AuthManager,
+		assets:        cfg.Assets,
+		tunnels:       cfg.Markets,
+		latencyQ:      wait.NewTickerQueue(2 * time.Second),
+		feeSource:     cfg.FeeSource,
+		dexBalancer:   cfg.DEXBalancer,
+		swapper:       cfg.MatchSwapper,
 	}
 	cfg.AuthManager.Route(msgjson.LimitRoute, router.handleLimit)
 	cfg.AuthManager.Route(msgjson.MarketRoute, router.handleMarket)
@@ -531,17 +556,23 @@ func (r *OrderRouter) processTrade(oRecord *orderRecord, tunnel MarketTunnel, as
 	}
 
 	checkCoins := func() (tryAgain bool, msgErr *msgjson.Error) {
+		// Look up all still-needed coins concurrently. The backend RPCs
+		// dominate the time spent here (one or more round trips per coin),
+		// so a 20-input order no longer costs 20 serial lookups.
+		lookups := r.lookupFundingCoins(fundingAsset.Backend, neededCoins)
 		for key, coin := range neededCoins {
-			// Get the coin from the backend and validate it.
-			dexCoin, err := fundingCoin(fundingAsset.Backend, coin.ID, coin.Redeem)
+			res := lookups[key]
+			dexCoin, err := res.coin, res.err
 			if err != nil {
 				if errors.Is(err, asset.CoinNotFoundError) {
-					return true, nil
+					tryAgain = true
+					continue
 				}
 				if errors.Is(err, asset.ErrRequestTimeout) {
 					log.Errorf("Deadline exceeded attempting to verify funding coin %v (%s). Will try again.",
 						coin.ID, fundingAsset.Symbol)
-					return true, nil
+					tryAgain = true
+					continue
 				}
 				log.Errorf("Error retrieving limit order funding coin ID %s. user = %s: %v", coin.ID, user, err)
 				return false, msgjson.NewError(msgjson.FundingError, "error retrieving coin ID %v", coin.ID)
@@ -571,6 +602,9 @@ func (r *OrderRouter) processTrade(oRecord *orderRecord, tunnel MarketTunnel, as
 			// for a change output in the final swap, which is actually not
 			// needed, so there's some buffer.
 			spendSize += dexCoin.SpendSize()
+		}
+		if tryAgain {
+			return true, nil
 		}
 
 		if valSum == 0 {
@@ -611,7 +645,7 @@ func (r *OrderRouter) processTrade(oRecord *orderRecord, tunnel MarketTunnel, as
 	}
 
 	log.Tracef("Searching for %s coins %v for new order", fundingAsset.Symbol, coinStrs)
-	r.latencyQ.Wait(&wait.Waiter{
+	waiter := &wait.Waiter{
 		Expiration: time.Now().Add(fundingTxWait),
 		TryFunc: func() wait.TryDirective {
 			tryAgain, msgErr := checkCoins()
@@ -636,9 +670,79 @@ func (r *OrderRouter) processTrade(oRecord *orderRecord, tunnel MarketTunnel, as
 			r.respondError(oRecord.msgID, user, msgjson.NewError(msgjson.TransactionUndiscovered,
 				"failed to find funding coins %v", coinStrs))
 		},
-	})
+	}
+
+	// TickerQueue.Wait runs the first attempt inline. processTrade is
+	// called from the user's websocket read loop, so doing that here
+	// blocked every later message from this user (preimage replies and
+	// cancels included) for as long as the backend took to find all of
+	// the funding coins: 35 s to over 2 min for LBC orders with many
+	// inputs, which missed the 20 s preimage window. Run it in its own
+	// goroutine; the response is already sent asynchronously.
+	go func() {
+		r.firstCheckSem <- struct{}{}
+		defer func() { <-r.firstCheckSem }()
+		if time.Now().After(waiter.Expiration) {
+			waiter.ExpireFunc()
+			return
+		}
+		r.latencyQ.Wait(waiter)
+	}()
 
 	return nil
+}
+
+// coinLookup is the result of one funding coin lookup.
+type coinLookup struct {
+	coin asset.FundingCoin
+	err  error
+}
+
+// lookupFundingCoins fetches the given funding coins from the backend
+// concurrently, at most maxConcurrentCoinLookups at a time across the
+// router. A lookup that has not returned within coinLookupTimeout is
+// reported as asset.ErrRequestTimeout; it is left to finish in the
+// background (holding its slot) since some backends ignore the context.
+func (r *OrderRouter) lookupFundingCoins(backend asset.Backend, coins map[int]*msgjson.Coin) map[int]coinLookup {
+	return r.lookupFundingCoinsWithin(backend, coins, coinLookupTimeout)
+}
+
+func (r *OrderRouter) lookupFundingCoinsWithin(backend asset.Backend, coins map[int]*msgjson.Coin, timeout time.Duration) map[int]coinLookup {
+	type keyed struct {
+		key int
+		coinLookup
+	}
+	resC := make(chan keyed, len(coins))
+	deadline := time.NewTimer(timeout)
+	defer deadline.Stop()
+	for key, coin := range coins {
+		go func(key int, coin *msgjson.Coin) {
+			select {
+			case r.coinLookupSem <- struct{}{}:
+			case <-time.After(timeout):
+				resC <- keyed{key, coinLookup{err: asset.ErrRequestTimeout}}
+				return
+			}
+			defer func() { <-r.coinLookupSem }()
+			c, err := fundingCoin(backend, coin.ID, coin.Redeem)
+			resC <- keyed{key, coinLookup{c, err}}
+		}(key, coin)
+	}
+	results := make(map[int]coinLookup, len(coins))
+	for len(results) < len(coins) {
+		select {
+		case res := <-resC:
+			results[res.key] = res.coinLookup
+		case <-deadline.C:
+			for key := range coins {
+				if _, found := results[key]; !found {
+					results[key] = coinLookup{err: asset.ErrRequestTimeout}
+				}
+			}
+			return results
+		}
+	}
+	return results
 }
 
 // checkUnfilledAsync sweeps the user's unfilled orders funded by assetID in
