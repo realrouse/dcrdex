@@ -274,6 +274,9 @@ type BotProblems struct {
 	CEXOrderbookUnsynced bool `json:"cexOrderbookUnsynced"`
 	// CausesSelfMatch is true if the order would cause a self match.
 	CausesSelfMatch bool `json:"causesSelfMatch"`
+	// InsufficientBalance is set for each asset whose bot balance was too
+	// low to place all of the configured lots on a side.
+	InsufficientBalance map[uint32]bool `json:"insufficientBalance,omitempty"`
 	// UnknownError is set if an error occurred that was not one of the above.
 	UnknownError string `json:"unknownError"`
 }
@@ -1884,14 +1887,14 @@ func marketFees(c clientCore, host string, baseID, quoteID uint32, useMaxFeeRate
 	}
 
 	return &LotFees{
-			Swap:   sellSwapFees,
-			Redeem: buyRedeemFees,
-			Refund: sellRefundFees,
-		}, &LotFees{
-			Swap:   buySwapFees,
-			Redeem: sellRedeemFees,
-			Refund: buyRefundFees,
-		}, nil
+		Swap:   sellSwapFees,
+		Redeem: buyRedeemFees,
+		Refund: sellRefundFees,
+	}, &LotFees{
+		Swap:   buySwapFees,
+		Redeem: sellRedeemFees,
+		Refund: buyRefundFees,
+	}, nil
 }
 
 func (m *MarketMaker) availableBalances(mkt *MarketWithHost, cexBaseID, cexQuoteID uint32, cexCfg *CEXConfig) (dexBalances, cexBalances map[uint32]uint64, _ error) {

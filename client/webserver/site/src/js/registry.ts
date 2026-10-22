@@ -988,6 +988,7 @@ export interface BotProblems {
   oracleFiatMismatch: boolean
   cexOrderbookUnsynced: boolean
   causesSelfMatch: boolean
+  insufficientBalance?: Record<number, boolean>
   unknownError: string
 }
 

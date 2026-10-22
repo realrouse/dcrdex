@@ -411,6 +411,7 @@ const (
 	idOrderReportTitle             = "ORDER_REPORT_TITLE"
 	idCEXBalances                  = "CEX_BALANCES"
 	idCausesSelfMatch              = "CAUSES_SELF_MATCH"
+	idInsufficientBotBalance       = "INSUFFICIENT_BOT_BALANCE"
 	idCexNotConnected              = "CEX_NOT_CONNECTED"
 	idDeleteBot                    = "DELETE_BOT"
 	idMarketOrderCapitalize        = "MARKET_ORDER_CAPITALIZE"
@@ -832,6 +833,7 @@ var enUS = map[string]*intl.Translation{
 	idOrderReportTitle:             {T: "{{ side }} orders report for epoch #{{ epochNum }}"},
 	idCEXBalances:                  {T: "{{ cexName }} Balances"},
 	idCausesSelfMatch:              {T: "This order would cause a self-match"},
+	idInsufficientBotBalance:       {T: "Not enough {{ assetSymbol }} allocated to the bot to place all orders on this side"},
 	idCexNotConnected:              {T: "{{ cexName }} not connected"},
 	idDeleteBot:                    {T: "Are you sure you want to delete this bot for the {{ baseTicker }}-{{ quoteTicker }} market on {{ host }}?"},
 	idMarketOrderCapitalize:        {T: "Market"},

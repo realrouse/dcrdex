@@ -1143,6 +1143,14 @@ function botProblemMessages (problems: BotProblems | undefined, cexName: string,
     msgs.push(intl.prep(intl.ID_CAUSES_SELF_MATCH))
   }
 
+  if (problems.insufficientBalance) {
+    for (const [assetID, short] of Object.entries(problems.insufficientBalance)) {
+      if (short) {
+        msgs.push(intl.prep(intl.ID_INSUFFICIENT_BOT_BALANCE, { assetSymbol: app().assets[Number(assetID)].symbol.toUpperCase() }))
+      }
+    }
+  }
+
   if (problems.unknownError) {
     msgs.push(problems.unknownError)
   }

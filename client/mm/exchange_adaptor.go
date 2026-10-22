@@ -463,6 +463,11 @@ type unifiedExchangeAdaptor struct {
 
 	autoRebalanceCfgV atomic.Value // *AutoRebalanceConfig
 
+	// shortfallLog is the last logged out-of-funds state per side
+	// (index 0 buy, 1 sell). It keeps the out-of-funds Info log to one
+	// line per state change instead of one per epoch.
+	shortfallLog [2]atomic.Value // string
+
 	subscriptionIDMtx sync.RWMutex
 	subscriptionID    *int
 
@@ -1377,6 +1382,15 @@ func (u *unifiedExchangeAdaptor) multiTradeN(
 	}
 
 	orderInfos := make([]*dexOrderInfo, 0, len(or.Placements))
+	var shortfall string
+	var capped bool
+	defer func() {
+		// A call that stopped at the new-order cap did not look at every
+		// placement, so it cannot clear a previously logged shortfall.
+		if shortfall != "" || !capped {
+			u.logShortfall(sell, shortfall)
+		}
+	}()
 
 	// Calculate required balances for each placement and the total required.
 	placementRequired := false
@@ -1404,6 +1418,7 @@ func (u *unifiedExchangeAdaptor) multiTradeN(
 		}
 
 		if maxNewOrders > 0 && uint64(len(orderInfos)) >= maxNewOrders {
+			capped = true
 			break
 		}
 
@@ -1446,6 +1461,20 @@ func (u *unifiedExchangeAdaptor) multiTradeN(
 		if lotsToPlace < placement.requiredLots() {
 			u.log.Tracef("multiTrade(%s,%d) out of funds for more placements. %d of %d lots for rate %s",
 				sellStr(sell), i, lotsToPlace, placement.requiredLots(), u.fmtRate(placement.Rate))
+			shortAssets, shortMsg := u.fundingShortfall(fundingReq, placement, lotsToPlace, or)
+			if len(shortAssets) > 0 {
+				shortfall = fmt.Sprintf("placement #%d: %d of %d lots at %s: %s",
+					i, lotsToPlace, placement.requiredLots(), u.fmtRate(placement.Rate), shortMsg)
+				if or.Error == nil {
+					or.Error = &BotProblems{}
+				}
+				if or.Error.InsufficientBalance == nil {
+					or.Error.InsufficientBalance = make(map[uint32]bool)
+				}
+				for _, assetID := range shortAssets {
+					or.Error.InsufficientBalance[assetID] = true
+				}
+			}
 			for _, o := range keptOrders {
 				if o.placementIndex > uint64(i) {
 					order := o.currentState().order
@@ -1481,7 +1510,10 @@ func (u *unifiedExchangeAdaptor) multiTradeN(
 		ordered := make(map[order.OrderID]*dexOrderInfo, len(placements))
 		for i, res := range results {
 			if res.Error != nil {
-				or.Placements[orderInfos[i].placementIndex].setError(res.Error)
+				oi := orderInfos[i]
+				u.log.Warnf("multiTrade(%s): placing %s at %s (placement #%d) failed: %v",
+					sellStr(sell), u.fmtBase(oi.placement.Qty), u.fmtRate(oi.placement.Rate), oi.placementIndex, res.Error)
+				or.Placements[oi.placementIndex].setError(res.Error)
 				continue
 			}
 			var orderID order.OrderID
@@ -1493,6 +1525,67 @@ func (u *unifiedExchangeAdaptor) multiTradeN(
 	}
 
 	return nil, or
+}
+
+// fmtAssetAmt formats atoms of any asset in conventional units with its
+// ticker.
+func fmtAssetAmt(assetID uint32, atoms uint64) string {
+	ui, err := asset.UnitInfo(assetID)
+	if err != nil {
+		return fmt.Sprintf("%d atoms of asset %d", atoms, assetID)
+	}
+	return ui.FormatAtoms(atoms) + " " + ui.Conventional.Unit
+}
+
+// fundingShortfall reports which assets are short for one more lot of the
+// placement beyond lotsToPlace, and a human readable need/have summary.
+func (u *unifiedExchangeAdaptor) fundingShortfall(
+	fundingReq func(rate, lots, counterTradeRate uint64) (map[uint32]uint64, uint64),
+	placement *TradePlacement, lotsToPlace uint64, or *OrderReport,
+) ([]uint32, string) {
+	dexReq, cexReq := fundingReq(placement.Rate, lotsToPlace+1, placement.CounterTradeRate)
+	assetIDs := make([]uint32, 0, len(dexReq))
+	for assetID := range dexReq {
+		assetIDs = append(assetIDs, assetID)
+	}
+	sort.Slice(assetIDs, func(i, j int) bool { return assetIDs[i] < assetIDs[j] })
+	// RemainingDEXBals already has the lots placed so far in this call
+	// removed, so add them back to compare against the total need.
+	used, _ := fundingReq(placement.Rate, lotsToPlace, placement.CounterTradeRate)
+	var short []uint32
+	var parts []string
+	for _, assetID := range assetIDs {
+		need := dexReq[assetID]
+		have := or.RemainingDEXBals[assetID] + used[assetID]
+		if have < need {
+			short = append(short, assetID)
+			parts = append(parts, fmt.Sprintf("need %s, have %s", fmtAssetAmt(assetID, need), fmtAssetAmt(assetID, have)))
+		}
+	}
+	if cexReq > or.RemainingCEXBal+placement.UsedCEX {
+		parts = append(parts, fmt.Sprintf("CEX balance short: need %d, have %d atoms", cexReq, or.RemainingCEXBal+placement.UsedCEX))
+	}
+	return short, strings.Join(parts, "; ")
+}
+
+// logShortfall logs an out-of-funds state for a side at Info when it
+// changes, so a side that silently stops placing orders is visible in the
+// log without repeating every epoch.
+func (u *unifiedExchangeAdaptor) logShortfall(sell bool, shortfall string) {
+	idx := 0
+	if sell {
+		idx = 1
+	}
+	prev, _ := u.shortfallLog[idx].Load().(string)
+	if prev == shortfall {
+		return
+	}
+	u.shortfallLog[idx].Store(shortfall)
+	if shortfall == "" {
+		u.log.Infof("multiTrade(%s): funds sufficient again, placing orders on this side", sellStr(sell))
+		return
+	}
+	u.log.Infof("multiTrade(%s): insufficient balance, side not fully placed: %s", sellStr(sell), shortfall)
 }
 
 // DEXTrade places a single order on the DEX order book.
