@@ -1281,6 +1281,10 @@ func (u *unifiedExchangeAdaptor) multiTradeN(
 	cancels := make([]dex.Bytes, 0, len(placements))
 
 	addCancel := func(o *core.Order) {
+		if o.Cancelling {
+			u.log.Debugf("multiTrade: order %s already has a cancel pending", o.ID)
+			return
+		}
 		// Never cancel an epoch-status order: the server revokes it
 		// (score hit) instead of booking a cancel. core.Order.Epoch is
 		// often 0, so the old currEpoch-o.Epoch < 2 guard never fired.
@@ -1491,6 +1495,21 @@ func (u *unifiedExchangeAdaptor) multiTradeN(
 	}
 
 	for _, cancel := range cancels {
+		// The order state the bot has may be stale, e.g. if a cancel
+		// was submitted last epoch or a note was missed. Check core's
+		// current state so we don't send a cancel the server will
+		// reject.
+		if latest, err := u.clientCore.Order(cancel); err == nil {
+			if latest.Status > order.OrderStatusBooked {
+				u.log.Debugf("multiTrade: order %s is already %s, not canceling", cancel, latest.Status)
+				u.handleDEXOrderUpdate(latest) // prunes it if complete
+				continue
+			}
+			if latest.Cancelling {
+				u.log.Debugf("multiTrade: order %s already has a cancel pending", cancel)
+				continue
+			}
+		}
 		if err := u.Cancel(cancel); err != nil {
 			u.log.Errorf("multiTrade: error canceling order %s: %v", cancel, err)
 			// If the server doesn't know the order, it's already

@@ -7043,3 +7043,75 @@ func TestLateOrderAdoptedCanceled(t *testing.T) {
 		t.Fatalf("untracked late order not canceled: %v", tCore.cancelsPlaced)
 	}
 }
+
+func TestMultiTradeSkipsStaleCancels(t *testing.T) {
+	const lotSize uint64 = 1e8
+	tCore := newTCore()
+	tCore.market = &core.Market{BaseID: 42, QuoteID: 0, LotSize: lotSize}
+	adaptor := mustParseAdaptor(&exchangeAdaptorCfg{
+		core:            tCore,
+		baseDexBalances: map[uint32]uint64{42: 100 * lotSize, 0: 100 * lotSize},
+		mwh:             &MarketWithHost{Host: "dex.com", BaseID: 42, QuoteID: 0},
+		eventLogDB:      &tEventLogDB{},
+	})
+	adaptor.buyFees = tFees(1e5, 2e5, 3e5, 4e5)
+	adaptor.sellFees = tFees(1e5, 2e5, 3e5, 4e5)
+
+	// Pending sell orders at a placement index that no longer exists, so
+	// the bot wants to cancel all of them.
+	addPending := func(b byte, status order.OrderStatus) order.OrderID {
+		oid := order.OrderID{b}
+		po := &pendingDEXOrder{
+			swaps:              make(map[string]*asset.WalletTransaction),
+			redeems:            make(map[string]*asset.WalletTransaction),
+			refunds:            make(map[string]*asset.WalletTransaction),
+			swapCoinIDToTxID:   make(map[string]string),
+			redeemCoinIDToTxID: make(map[string]string),
+			refundCoinIDToTxID: make(map[string]string),
+			placementIndex:     5,
+		}
+		po.state.Store(&dexOrderState{
+			dexBalanceEffects: newBalanceEffects(),
+			cexBalanceEffects: newBalanceEffects(),
+			order: &core.Order{
+				ID: oid[:], Sell: true, Qty: lotSize, Rate: 1e7, Epoch: 1, Status: status,
+			},
+		})
+		adaptor.pendingDEXOrders[oid] = po
+		return oid
+	}
+	live := addPending(1, order.OrderStatusBooked)
+	cancelling := addPending(2, order.OrderStatusBooked)
+	goneInCore := addPending(3, order.OrderStatusBooked)
+	// Already terminal in the bot's view: never a cancel candidate.
+	terminal := addPending(4, order.OrderStatusRevoked)
+
+	coreOrder := func(oid order.OrderID, status order.OrderStatus, cancelling bool) {
+		tCore.orders[oid] = &core.Order{
+			ID: oid[:], Sell: true, Qty: lotSize, Rate: 1e7, Epoch: 1,
+			Status: status, Cancelling: cancelling,
+			AllFeesConfirmed: status > order.OrderStatusBooked,
+		}
+	}
+	tCore.orders = make(map[order.OrderID]*core.Order)
+	coreOrder(live, order.OrderStatusBooked, false)
+	coreOrder(cancelling, order.OrderStatusBooked, true)
+	coreOrder(goneInCore, order.OrderStatusCanceled, false)
+	coreOrder(terminal, order.OrderStatusRevoked, false)
+
+	adaptor.multiTrade([]*TradePlacement{{Lots: 0, Rate: 1e7}}, true, 0.001, 100)
+
+	if len(tCore.cancelsPlaced) != 1 || tCore.cancelsPlaced[0] != live {
+		t.Fatalf("expected only the live order to be canceled, got %v", tCore.cancelsPlaced)
+	}
+	adaptor.balancesMtx.RLock()
+	defer adaptor.balancesMtx.RUnlock()
+	if _, found := adaptor.pendingDEXOrders[goneInCore]; found {
+		t.Fatalf("completed order not pruned")
+	}
+	for _, oid := range []order.OrderID{live, cancelling} {
+		if _, found := adaptor.pendingDEXOrders[oid]; !found {
+			t.Fatalf("active order %s pruned", oid)
+		}
+	}
+}
