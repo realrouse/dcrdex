@@ -3,6 +3,7 @@ package mm
 import (
 	"context"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"reflect"
 	"sync"
@@ -15,6 +16,7 @@ import (
 	"decred.org/dcrdex/client/orderbook"
 	"decred.org/dcrdex/dex"
 	"decred.org/dcrdex/dex/calc"
+	"decred.org/dcrdex/dex/msgjson"
 	"decred.org/dcrdex/dex/order"
 
 	_ "decred.org/dcrdex/client/asset/btc"     // register btc asset
@@ -62,6 +64,7 @@ type sendArgs struct {
 }
 
 type tCore struct {
+	cancelErrs           map[order.OrderID]error
 	assetBalances        map[uint32]*core.WalletBalance
 	assetBalanceErr      error
 	market               *core.Market
@@ -150,6 +153,9 @@ func (c *tCore) SingleLotFees(form *core.SingleLotFeesForm) (uint64, uint64, uin
 func (c *tCore) Cancel(oidB dex.Bytes) error {
 	var oid order.OrderID
 	copy(oid[:], oidB)
+	if err := c.cancelErrs[oid]; err != nil {
+		return err
+	}
 	c.cancelsPlaced = append(c.cancelsPlaced, oid)
 	return nil
 }
@@ -952,4 +958,37 @@ func TestAvailableBalances(t *testing.T) {
 	checkAvailableBalances(ethBtc, &binanceName, map[uint32]uint64{60: 7e5, 0: 3e5}, map[uint32]uint64{60: 9e5, 0: 5e5})
 	checkAvailableBalances(btcUsdc, &binanceName, map[uint32]uint64{0: 3e5, 60: 7e5, 60001: 4e5}, map[uint32]uint64{0: 5e5, 60001: 4e5})
 	checkAvailableBalances(dcrUsdc, &binanceUSName, map[uint32]uint64{42: 9e5, 60: 7e5, 60001: 4e5}, map[uint32]uint64{42: 7e5, 60001: 6e5})
+}
+
+func TestCancelMarketOrders(t *testing.T) {
+	tc := newTCore()
+	tc.orders = make(map[order.OrderID]*core.Order)
+	m := &MarketMaker{core: tc, log: tLogger}
+
+	ghost, live, done, failing := order.OrderID{1}, order.OrderID{2}, order.OrderID{3}, order.OrderID{4}
+	orders := []*core.Order{
+		{ID: ghost[:], Status: order.OrderStatusBooked},
+		{ID: live[:], Status: order.OrderStatusBooked},
+		{ID: done[:], Status: order.OrderStatusBooked},
+		{ID: order.OrderID{5}.Bytes(), Status: order.OrderStatusExecuted},
+	}
+	tc.cancelErrs = map[order.OrderID]error{
+		ghost: fmt.Errorf("rpc error: %w", msgjson.NewError(msgjson.UnknownOrderError, "target order not known")),
+		done:  errors.New("order not cancellable"),
+	}
+	tc.orders[done] = &core.Order{ID: done[:], Status: order.OrderStatusCanceled}
+
+	if err := m.cancelMarketOrders(orders); err != nil {
+		t.Fatalf("cancelMarketOrders failed: %v", err)
+	}
+	if len(tc.cancelsPlaced) != 1 || tc.cancelsPlaced[0] != live {
+		t.Fatalf("expected only the live order canceled, got %v", tc.cancelsPlaced)
+	}
+
+	// Any other cancel failure of an active order still stops the start.
+	tc.cancelErrs[failing] = errors.New("connection lost")
+	tc.orders[failing] = &core.Order{ID: failing[:], Status: order.OrderStatusBooked}
+	if err := m.cancelMarketOrders([]*core.Order{{ID: failing[:], Status: order.OrderStatusBooked}}); err == nil {
+		t.Fatalf("expected an error")
+	}
 }

@@ -22,6 +22,7 @@ import (
 	"decred.org/dcrdex/client/mm/libxc"
 	"decred.org/dcrdex/client/orderbook"
 	"decred.org/dcrdex/dex"
+	"decred.org/dcrdex/dex/msgjson"
 	"decred.org/dcrdex/dex/order"
 )
 
@@ -902,6 +903,33 @@ func (m *MarketMaker) newBot(cfg *BotConfig, adaptorCfg *exchangeAdaptorCfg) (bo
 	}
 }
 
+// cancelMarketOrders cancels the active orders on a market before a bot is
+// started on it. An order the server no longer knows is already gone there
+// (core retires it to the server's status), and an order that is no longer
+// active needs no cancel, so neither keeps the bot from starting.
+func (m *MarketMaker) cancelMarketOrders(orders []*core.Order) error {
+	for _, ord := range orders {
+		if ord.Status > order.OrderStatusBooked {
+			continue
+		}
+		err := m.core.Cancel(ord.ID)
+		if err == nil {
+			continue
+		}
+		var msgErr *msgjson.Error
+		if errors.As(err, &msgErr) && msgErr.Code == msgjson.UnknownOrderError {
+			m.log.Warnf("Order %s is not known by the server, not canceling it: %v", ord.ID, err)
+			continue
+		}
+		if latest, oErr := m.core.Order(ord.ID); oErr == nil && latest.Status > order.OrderStatusBooked {
+			m.log.Warnf("Order %s is already %s, not canceling it: %v", ord.ID, latest.Status, err)
+			continue
+		}
+		return fmt.Errorf("error canceling order %s: %v", ord.ID, err)
+	}
+	return nil
+}
+
 // StartBot starts a market making bot.
 func (m *MarketMaker) StartBot(mkt *MarketWithHost, alternateConfigPath *string, appPW []byte, overrideLotSizeChange bool) (err error) {
 	m.startUpdateMtx.Lock()
@@ -919,13 +947,8 @@ func (m *MarketMaker) StartBot(mkt *MarketWithHost, alternateConfigPath *string,
 		return fmt.Errorf("error getting market: %v", err)
 	}
 
-	for _, ord := range coreMkt.Orders {
-		if ord.Status <= order.OrderStatusBooked {
-			err = m.core.Cancel(ord.ID)
-			if err != nil {
-				return fmt.Errorf("error canceling order %s: %v", ord.ID, err)
-			}
-		}
+	if err := m.cancelMarketOrders(coreMkt.Orders); err != nil {
+		return err
 	}
 
 	botCfg, cexCfg, err := m.configsForMarket(mkt, alternateConfigPath)

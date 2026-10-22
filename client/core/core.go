@@ -766,6 +766,18 @@ func (c *Core) tryCancelTrade(dc *dexConnection, tracker *trackedTrade) error {
 		return newError(marketErr, "unknown market %q", tracker.mktID)
 	}
 
+	// If the server does not know the order, it is no longer active there.
+	// Get its actual status so it is retired instead of being shown as
+	// booked, and canceled again, forever. Done after the trade lock is
+	// released.
+	var unknownToServer bool
+	defer func() {
+		if unknownToServer {
+			dc.log.Warnf("Server does not know order %v targeted by our cancel. Requesting its status.", oid)
+			dc.syncOrderStatuses([]*trackedTrade{tracker})
+		}
+	}()
+
 	tracker.mtx.Lock()
 	defer tracker.mtx.Unlock()
 
@@ -787,6 +799,10 @@ func (c *Core) tryCancelTrade(dc *dexConnection, tracker *trackedTrade) error {
 	// Construct and send the order.
 	preImg, co, sig, commitSig, err := c.sendCancelOrder(dc, oid, tracker.Base(), tracker.Quote())
 	if err != nil {
+		var msgErr *msgjson.Error
+		if errors.As(err, &msgErr) && msgErr.Code == msgjson.UnknownOrderError {
+			unknownToServer = true
+		}
 		return err
 	}
 	defer close(commitSig)
@@ -866,6 +882,22 @@ type serverMatches struct {
 	perMatchAddrs map[string]string
 }
 
+// findStaleCancelTarget finds the trade whose last cancel order, cid, was
+// retired as stale by deleteStaleCancelOrder.
+func (dc *dexConnection) findStaleCancelTarget(cid order.OrderID) *trackedTrade {
+	dc.tradeMtx.RLock()
+	defer dc.tradeMtx.RUnlock()
+	for _, t := range dc.trades {
+		t.mtx.RLock()
+		found := t.staleCancelID == cid
+		t.mtx.RUnlock()
+		if found {
+			return t
+		}
+	}
+	return nil
+}
+
 // parseMatches sorts the list of matches and associates them with a trade. This
 // may be called from handleMatchRoute on receipt of a new 'match' request, or
 // by authDEX with the list of active matches returned by the 'connect' request.
@@ -889,6 +921,15 @@ func (dc *dexConnection) parseMatches(msgMatches []*msgjson.Match, checkSigs boo
 		var oid order.OrderID
 		copy(oid[:], msgMatch.OrderID)
 		tracker, isCancel := dc.findOrder(oid)
+		if tracker == nil {
+			// A cancel order retired as stale just before its match
+			// arrived is no longer linked, but its match is still valid.
+			if tracker = dc.findStaleCancelTarget(oid); tracker != nil {
+				dc.log.Warnf("Match %s for cancel order %v that was retired as stale. Processing it anyway.",
+					msgMatch.MatchID, oid)
+				isCancel = true
+			}
+		}
 		if tracker == nil {
 			dc.blindCancelsMtx.Lock()
 			_, found := dc.blindCancels[oid]
@@ -8900,7 +8941,11 @@ func (c *Core) negotiateMatches(sm *serverMatches) (assetMap, error) {
 	if sm.cancel != nil {
 		err := tracker.processCancelMatch(sm.cancel)
 		if err != nil {
-			return updatedAssets, fmt.Errorf("processCancelMatch for cancel order %v targeting order %v failed: %w",
+			// Still process the order's own matches below. In particular
+			// the maker side of this cancel match, without which the
+			// order would stay booked here although the server canceled
+			// it.
+			c.log.Errorf("processCancelMatch for cancel order %v targeting order %v failed: %v",
 				sm.cancel.OrderID, oid, err)
 		}
 	}
