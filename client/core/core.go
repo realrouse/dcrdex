@@ -125,6 +125,18 @@ var (
 	walletDisabledErrStr = "%s wallet is disabled"
 
 	errTimeout = errors.New("timeout")
+
+	// ErrTradeRequestTimeout is returned when the server does not answer a
+	// new order request in time. The order may still be accepted and
+	// adopted later, which is signaled with a TopicLateOrderAdopted note.
+	ErrTradeRequestTimeout = errors.New("order request timed out")
+	// tradeRequestTimeout is how long a trade request waits for the
+	// server's response before reporting a timeout to the caller.
+	tradeRequestTimeout = fundingTxWait + DefaultResponseTimeout
+	// lateOrderGrace is how much longer the funding coins stay locked and
+	// the commitment stays known after a trade request timed out, in case
+	// the server accepts the order late.
+	lateOrderGrace = 5 * time.Minute
 )
 
 type dexTicker struct {
@@ -7141,24 +7153,104 @@ func (c *Core) prepareMultiTradeRequests(pw []byte, form *MultiTradeForm) ([]*tr
 // sendTradeRequest sends an order, processes the result, then prepares and
 // stores the trackedTrade.
 func (c *Core) sendTradeRequest(tr *tradeRequest) (*Order, error) {
-	dc, dbOrder, wallets, form, route := tr.dc, tr.dbOrder, tr.wallets, tr.form, tr.route
-	mktID, msgOrder, preImg, recoveryCoin, coins := tr.mktID, tr.msgOrder, tr.preImg, tr.recoveryCoin, tr.coins
-	defer tr.errCloser.Done(c.log)
-	defer close(tr.commitSig) // signals on both success and failure
+	dc, route, mktID := tr.dc, tr.route, tr.mktID
 
-	// Send and get the result.
-	result := new(msgjson.OrderResult)
-	err := dc.signAndRequest(msgOrder, route, result, fundingTxWait+DefaultResponseTimeout)
+	if dc.acct.locked() {
+		tr.errCloser.Done(c.log)
+		close(tr.commitSig)
+		return nil, fmt.Errorf("new order request with DEX server %v market %v failed: cannot sign: %s account locked",
+			dc.acct.host, mktID, dc.acct.host)
+	}
+	sign(dc.acct.privKey, tr.msgOrder)
+	reqMsg, err := msgjson.NewRequest(dc.NextID(), route, tr.msgOrder)
 	if err != nil {
-		// At this point there is a possibility that the server got the request
-		// and created the trade order, but we lost the connection before
-		// receiving the response with the trade's order ID. Any preimage
-		// request will be unrecognized. This order is ABANDONED.
+		tr.errCloser.Done(c.log)
+		close(tr.commitSig)
+		return nil, fmt.Errorf("error encoding %q request: %w", route, err)
+	}
+
+	// The response handler stays registered for lateOrderGrace beyond the
+	// time we wait here, so that an order the server accepts after we gave
+	// up can still be adopted.
+	type orderResp struct {
+		result *msgjson.OrderResult
+		err    error
+	}
+	respC := make(chan *orderResp, 1)
+	err = dc.RequestWithTimeout(reqMsg, func(msg *msgjson.Message) {
+		result := new(msgjson.OrderResult)
+		respC <- &orderResp{result, msg.UnmarshalResult(result)}
+	}, tradeRequestTimeout+lateOrderGrace, func() {
+		respC <- &orderResp{err: fmt.Errorf("timed out waiting for %q response (%w)", route, errTimeout)}
+	})
+	if err != nil {
+		tr.errCloser.Done(c.log)
+		close(tr.commitSig)
 		return nil, fmt.Errorf("new order request with DEX server %v market %v failed: %w", dc.acct.host, mktID, err)
 	}
 
+	finish := func(resp *orderResp, adopted bool) (*Order, error) {
+		defer tr.errCloser.Done(c.log)
+		defer close(tr.commitSig) // signals on both success and failure
+		if resp.err != nil {
+			// At this point there is a possibility that the server got the
+			// request and created the trade order, but we lost the
+			// connection before receiving the response with the trade's
+			// order ID. Any preimage request will be unrecognized. This
+			// order is ABANDONED.
+			return nil, fmt.Errorf("new order request with DEX server %v market %v failed: %w", dc.acct.host, mktID, resp.err)
+		}
+		return c.finishTradeRequest(tr, resp.result, adopted)
+	}
+
+	select {
+	case resp := <-respC:
+		return finish(resp, false)
+	case <-time.After(tradeRequestTimeout):
+	}
+
+	// The server has not answered in time. It may still accept the order,
+	// e.g. if it is slow to validate the funding coins, and then ask for
+	// the preimage. Keep the funding coins locked and the commitment known
+	// for lateOrderGrace so a late acceptance can be adopted and the
+	// preimage request answered, instead of missing the preimage and
+	// leaving an order on the book that we don't know about.
+	c.log.Warnf("Order request to %s for market %s timed out after %v. Keeping its funding coins "+
+		"locked for up to %v in case the server accepts it late.", dc.acct.host, mktID, tradeRequestTimeout, lateOrderGrace)
+	c.wg.Add(1)
+	go func() {
+		defer c.wg.Done()
+		var resp *orderResp
+		select {
+		case resp = <-respC:
+		case <-c.ctx.Done():
+			resp = &orderResp{err: errors.New("shutting down")}
+		}
+		if resp.err != nil {
+			c.log.Infof("No late response for timed out order request to %s for market %s (%v). Funding coins released.",
+				dc.acct.host, mktID, resp.err)
+		}
+		if corder, err := finish(resp, true); err == nil {
+			c.log.Warnf("Adopted order %s on %s market %s that the server accepted after our request timed out.",
+				corder.ID, dc.acct.host, mktID)
+		} else if resp.err == nil {
+			c.log.Errorf("Failed to adopt late order response: %v", err)
+		}
+	}()
+
+	return nil, fmt.Errorf("new order request with DEX server %v market %v failed: %w", dc.acct.host, mktID,
+		fmt.Errorf("%w (timed out waiting for %q response after %v)", ErrTradeRequestTimeout, route, tradeRequestTimeout))
+}
+
+// finishTradeRequest validates and stores an accepted order and starts
+// tracking it. adopted indicates the response arrived after sendTradeRequest
+// had already reported a timeout to the caller.
+func (c *Core) finishTradeRequest(tr *tradeRequest, result *msgjson.OrderResult, adopted bool) (*Order, error) {
+	dc, dbOrder, wallets, form := tr.dc, tr.dbOrder, tr.wallets, tr.form
+	msgOrder, preImg, recoveryCoin, coins := tr.msgOrder, tr.preImg, tr.recoveryCoin, tr.coins
+
 	ord := dbOrder.Order
-	err = validateOrderResponse(dc, result, ord, msgOrder) // stamps the order, giving it a valid ID
+	err := validateOrderResponse(dc, result, ord, msgOrder) // stamps the order, giving it a valid ID
 	if err != nil {
 		c.log.Errorf("Abandoning order. preimage: %x, server time: %d: %v",
 			preImg[:], result.ServerTime, fmt.Sprintf("order response validation failure: %v", err))
@@ -7201,7 +7293,10 @@ func (c *Core) sendTradeRequest(tr *tradeRequest) (*Order, error) {
 
 	// Send a low-priority notification.
 	corder := tracker.coreOrder()
-	if !form.IsLimit && !form.Sell {
+	if adopted {
+		subject, details := c.formatDetails(TopicLateOrderAdopted, makeOrderToken(tracker.token()))
+		c.notify(newOrderNoteWithTempID(TopicLateOrderAdopted, subject, details, db.WarningLevel, corder, tr.tempID))
+	} else if !form.IsLimit && !form.Sell {
 		ui := wallets.quoteWallet.Info().UnitInfo
 		subject, details := c.formatDetails(TopicYoloPlaced,
 			ui.ConventionalString(corder.Qty), ui.Conventional.Unit, makeOrderToken(tracker.token()))

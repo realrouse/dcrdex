@@ -366,6 +366,7 @@ const (
 	TopicOrderResumeFailure   Topic = "OrderResumeFailure"
 	TopicBuyOrderPlaced       Topic = "BuyOrderPlaced"
 	TopicSellOrderPlaced      Topic = "SellOrderPlaced"
+	TopicLateOrderAdopted     Topic = "LateOrderAdopted"
 	TopicYoloPlaced           Topic = "YoloPlaced"
 	TopicMissingMatches       Topic = "MissingMatches"
 	TopicWalletMissing        Topic = "WalletMissing"

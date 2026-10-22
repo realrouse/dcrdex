@@ -180,6 +180,7 @@ type TWebsocket struct {
 	handlers       map[string][]func(*msgjson.Message, msgFunc) error
 	submittedBond  *msgjson.PostBond
 	liveBondExpiry uint64
+	lastExpire     func()
 }
 
 func newTWebsocket() *TWebsocket {
@@ -329,12 +330,13 @@ func (conn *TWebsocket) Request(msg *msgjson.Message, f msgFunc) error {
 func (conn *TWebsocket) RequestRaw(msgID uint64, rawMsg []byte, respHandler func(*msgjson.Message)) error {
 	return nil
 }
-func (conn *TWebsocket) RequestWithTimeout(msg *msgjson.Message, f func(*msgjson.Message), _ time.Duration, _ func()) error {
+func (conn *TWebsocket) RequestWithTimeout(msg *msgjson.Message, f func(*msgjson.Message), _ time.Duration, expire func()) error {
 	if conn.reqErr != nil {
 		return conn.reqErr
 	}
 	conn.mtx.Lock()
 	defer conn.mtx.Unlock()
+	conn.lastExpire = expire
 	handlers := conn.handlers[msg.Route]
 	if len(handlers) > 0 {
 		handler := handlers[0]

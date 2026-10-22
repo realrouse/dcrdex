@@ -16,6 +16,7 @@ import (
 
 	"decred.org/dcrdex/client/asset"
 	"decred.org/dcrdex/client/core"
+	"decred.org/dcrdex/client/db"
 	"decred.org/dcrdex/client/mm/libxc"
 	"decred.org/dcrdex/dex"
 	"decred.org/dcrdex/dex/calc"
@@ -6992,5 +6993,53 @@ func TestMultiTradeInsufficientBalanceReported(t *testing.T) {
 	_, rep = adaptor.multiTrade([]*TradePlacement{{Lots: 1, Rate: 1e7}}, true, 0.001, 100)
 	if rep.Error != nil {
 		t.Fatalf("unexpected sell side problem %+v", rep.Error)
+	}
+}
+
+func TestLateOrderAdoptedCanceled(t *testing.T) {
+	tCore := newTCore()
+	tCore.market = &core.Market{BaseID: 42, QuoteID: 0, LotSize: 1e8}
+	adaptor := mustParseAdaptor(&exchangeAdaptorCfg{
+		core:            tCore,
+		baseDexBalances: map[uint32]uint64{42: 1e10, 0: 1e10},
+		mwh:             &MarketWithHost{Host: "dex.com", BaseID: 42, QuoteID: 0},
+		eventLogDB:      &tEventLogDB{},
+	})
+
+	note := func(o *core.Order) *core.OrderNote {
+		return &core.OrderNote{
+			Notification: db.NewNotification(core.NoteTypeOrder, core.TopicLateOrderAdopted, "", "", db.WarningLevel),
+			Order:        o,
+		}
+	}
+	newOrder := func(host string, base uint32) *core.Order {
+		return &core.Order{Host: host, BaseID: base, QuoteID: 0, ID: encode.RandomBytes(order.OrderIDSize)}
+	}
+
+	// Another market or host: left alone.
+	adaptor.handleDEXNotification(note(newOrder("other.com", 42)))
+	adaptor.handleDEXNotification(note(newOrder("dex.com", 60)))
+	adaptor.wg.Wait()
+	if len(tCore.cancelsPlaced) != 0 {
+		t.Fatalf("canceled an order on another market")
+	}
+
+	// An order the bot tracks: left alone.
+	tracked := newOrder("dex.com", 42)
+	var trackedID order.OrderID
+	copy(trackedID[:], tracked.ID)
+	adaptor.pendingDEXOrders[trackedID] = &pendingDEXOrder{}
+	adaptor.handleDEXNotification(note(tracked))
+	adaptor.wg.Wait()
+	if len(tCore.cancelsPlaced) != 0 {
+		t.Fatalf("canceled a tracked order")
+	}
+
+	// An untracked late order on the bot's market: canceled.
+	late := newOrder("dex.com", 42)
+	adaptor.handleDEXNotification(note(late))
+	adaptor.wg.Wait()
+	if len(tCore.cancelsPlaced) != 1 || !bytes.Equal(tCore.cancelsPlaced[0][:], late.ID) {
+		t.Fatalf("untracked late order not canceled: %v", tCore.cancelsPlaced)
 	}
 }

@@ -97,6 +97,10 @@ var originLocale = map[Topic]*translation{
 		subject:  intl.Translation{T: "Order placed"},
 		template: intl.Translation{Version: 1, T: "Selling %s %s, rate = %s (%s)", Notes: "args: [qty, ticker, rate string, token]"},
 	},
+	TopicLateOrderAdopted: {
+		subject:  intl.Translation{T: "Late order accepted"},
+		template: intl.Translation{T: "The server accepted order %s after the order request timed out. The order was kept so its preimage could be sent.", Notes: "args: [token]"},
+	},
 	TopicMissingMatches: {
 		subject:  intl.Translation{T: "Missing matches"},
 		template: intl.Translation{T: "%d matches for order %s were not reported by %q and are considered revoked", Notes: "args: [missing count, token, host]"},

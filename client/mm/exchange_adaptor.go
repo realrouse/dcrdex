@@ -3412,9 +3412,67 @@ func (u *unifiedExchangeAdaptor) handleServerConfigUpdate() {
 	}
 }
 
+// lateOrderCancelRetry is the delay between attempts to cancel an adopted
+// late order. var for testing.
+var lateOrderCancelRetry = 15 * time.Second
+
+// handleLateOrderAdopted handles an order on the bot's market that the server
+// accepted after core had already reported the order request to the bot as
+// timed out. The order is not in the bot's books, so it would sit unmanaged
+// with funds the bot believes are free. Core has kept it so its preimage gets
+// sent; cancel it here so the bot can place orders it tracks instead.
+func (u *unifiedExchangeAdaptor) handleLateOrderAdopted(o *core.Order) {
+	if o == nil {
+		return
+	}
+	if o.Host != u.host || o.BaseID != u.dexBaseID || o.QuoteID != u.dexQuoteID {
+		return
+	}
+	var oid order.OrderID
+	copy(oid[:], o.ID)
+	u.balancesMtx.RLock()
+	_, tracked := u.pendingDEXOrders[oid]
+	u.balancesMtx.RUnlock()
+	if tracked {
+		return
+	}
+	u.log.Warnf("The server accepted order %s after its order request timed out. "+
+		"The bot does not track it, so it will be canceled.", oid)
+	u.wg.Add(1)
+	go func() {
+		defer u.wg.Done()
+		const maxTries = 5
+		for i := 1; ; i++ {
+			err := u.clientCore.Cancel(o.ID)
+			if err == nil {
+				u.log.Infof("Cancel submitted for untracked late order %s", oid)
+				return
+			}
+			if i == maxTries {
+				u.log.Warnf("Giving up canceling untracked late order %s: %v", oid, err)
+				return
+			}
+			u.log.Debugf("Cancel of untracked late order %s failed (attempt %d): %v", oid, i, err)
+			var done <-chan struct{}
+			if u.ctx != nil {
+				done = u.ctx.Done()
+			}
+			select {
+			case <-time.After(lateOrderCancelRetry):
+			case <-done:
+				return
+			}
+		}
+	}()
+}
+
 func (u *unifiedExchangeAdaptor) handleDEXNotification(n core.Notification) {
 	switch note := n.(type) {
 	case *core.OrderNote:
+		if note.Topic() == core.TopicLateOrderAdopted {
+			u.handleLateOrderAdopted(note.Order)
+			return
+		}
 		u.handleDEXOrderUpdate(note.Order)
 	case *core.MatchNote:
 		o, err := u.clientCore.Order(note.OrderID)
