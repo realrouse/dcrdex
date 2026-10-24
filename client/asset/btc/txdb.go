@@ -122,6 +122,21 @@ func (db *BadgerTxDB) Connect(ctx context.Context) (*sync.WaitGroup, error) {
 	if err != nil {
 		return nil, err
 	}
+	if !needs {
+		// A zero-filled or truncated table file makes badger panic in a
+		// background goroutine, crashing the app. The tx history is only a
+		// cache, so move a corrupt DB aside and start a fresh one instead.
+		movedTo, err := lexi.MoveAsideIfCorrupt(v4Path, db.log)
+		if err != nil {
+			return nil, err
+		}
+		if movedTo != "" {
+			db.log.Warnf("The transaction history DB is a cache. Wallet keys and funds are not stored in "+
+				"it, and the history will be rebuilt from the wallet's transactions. The old DB was kept "+
+				"at %s. Do not delete it if a private (MuSig2) swap was in progress, since it holds "+
+				"that swap's secret nonces.", movedTo)
+		}
+	}
 	opts := badger.DefaultOptions(v4Path).WithLogger(&badgerLoggerWrapper{db.log})
 	if needs {
 		db.DB, err = lexi.BadgerV1Update(db.filePath, v4Path, db.log, opts)
