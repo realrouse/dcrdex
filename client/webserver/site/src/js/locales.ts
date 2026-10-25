@@ -482,9 +482,9 @@ let locale: Locale
 const fallbackEnglish: Locale = {
   MM_BOOK_PROTECTION: 'Book Protection',
   MM_DO_NOT_CROSS: 'Do Not Cross the Book',
-  MM_DO_NOT_CROSS_TOOLTIP: 'Never sell into a live bid or buy into a live ask. Stops the bot from restocking at the MEXC price and taking a leftover aggressive bid. Asks lift; bids stay on the MEXC book so you do not buy the pump.',
-  MM_BID_ANCHOR_FADE_HOURS: 'Hours to Fade Back to MEXC',
-  MM_BID_ANCHOR_FADE_HOURS_TOOLTIP: 'After an aggressive bid or ask that ran the book is gone, walk quotes linearly back to the MEXC (oracle) book over this many hours. 4 = slow return. 0 = snap back as soon as it cancels. Only the lifted side moves; the other side stays at MEXC.',
+  MM_DO_NOT_CROSS_TOOLTIP: 'Never sell into a live bid or buy into a live ask. Stops the bot from restocking at the oracle market price and taking a leftover aggressive bid. Asks lift; bids stay at the oracle market price so you do not buy the pump.',
+  MM_BID_ANCHOR_FADE_HOURS: 'Hours to Fade Back to Oracle Market Price',
+  MM_BID_ANCHOR_FADE_HOURS_TOOLTIP: 'After an aggressive bid or ask that ran the book is gone, walk quotes linearly back to the oracle market price over this many hours. 4 = slow return. 0 = snap back as soon as it cancels. Only the lifted side moves; the other side stays at the oracle market price.',
   MM_INVENTORY_SKEW: 'Inventory Skew',
   MM_INVENTORY_SKEW_TOOLTIP: 'Slide both bids and asks when your base inventory is above or below target. Strength is measured against the lots you are quoting, not the whole wallet. Does not follow last trade. 1 = full (up to the cap). 0 = off.',
   MM_INVENTORY_SKEW_CAP: 'Inventory Skew Cap',

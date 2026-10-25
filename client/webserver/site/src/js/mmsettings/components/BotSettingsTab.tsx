@@ -405,7 +405,7 @@ const BotSettingsTab: React.FC = () => {
                     </div>
                     <div className="d-flex align-items-center">
                       <div className="fs16 me-3 flex-shrink-0">
-                        {prep(ID_MM_BID_ANCHOR_FADE_HOURS) || 'Hours to Fade Back to MEXC'}
+                        {prep(ID_MM_BID_ANCHOR_FADE_HOURS) || 'Hours to Fade Back to Oracle Market Price'}
                         <Tooltip content={prep(ID_MM_BID_ANCHOR_FADE_HOURS_TOOLTIP)}>
                           <span className="ico-info fs12 ms-1"></span>
                         </Tooltip>
