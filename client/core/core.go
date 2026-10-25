@@ -1754,6 +1754,11 @@ type Core struct {
 	meshMtx sync.RWMutex
 	mesh    *mesh.Mesh
 	meshCM  *dex.ConnectionMaster
+
+	// bondRefunds tracks broadcast bond refunds that are not yet confirmed,
+	// keyed by bondRefundKey.
+	bondRefundsMtx sync.Mutex
+	bondRefunds    map[string]*bondRefundState
 }
 
 // New is the constructor for a new Core.
@@ -9163,7 +9168,7 @@ func (c *Core) startDexConnection(acctInfo *db.AccountInfo, dc *dexConnection) e
 
 		for _, dbBond := range acctInfo.Bonds {
 			if dbBond.Refunded { // maybe don't even load these, but it may be of use for record keeping
-				continue
+				continue // see queueRefundedBondRechecks below
 			}
 
 			// IDEA: unspent bonds to register with wallet on first connect, if
@@ -9192,6 +9197,11 @@ func (c *Core) startDexConnection(acctInfo *db.AccountInfo, dc *dexConnection) e
 			// We need to start monitorBondConfs on login since postbond
 			// requires the account keys.
 		}
+
+		// Bonds marked refunded may not actually have been refunded, e.g. if
+		// the refund was rejected after the broadcast call returned. Queue
+		// recent ones to be checked on chain once their wallets are ready.
+		queueRefundedBondRechecks(dc.acct, acctInfo.Bonds, time.Now())
 
 		// Now in authDEX, we must reconcile the above categorized bonds
 		// according to ConnectResult.Bonds slice.

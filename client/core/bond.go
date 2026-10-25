@@ -463,6 +463,7 @@ type bondID struct {
 func (c *Core) refundExpiredBonds(ctx context.Context, acct *dexAccount, cfg *dexBondCfg, state *dexAcctBondState, now int64) (map[uint32]struct{}, int64, error) {
 	spentBonds := make([]*bondID, 0, len(state.ExpiredBonds))
 	assetIDs := make(map[uint32]struct{})
+	nowT := time.Unix(now, 0)
 
 	for _, bond := range state.ExpiredBonds {
 		bondIDStr := fmt.Sprintf("%v (%s)", coinIDString(bond.AssetID, bond.CoinID), unbip(bond.AssetID))
@@ -506,6 +507,52 @@ func (c *Core) refundExpiredBonds(ctx context.Context, acct *dexAccount, cfg *de
 			continue
 		}
 
+		markRefunded := func() {
+			err := c.db.BondRefunded(acct.host, assetID, bond.CoinID)
+			if err != nil { // next DB load we'll retry, hit bondAlreadySpent, and store here again
+				c.log.Errorf("Failed to mark bond as refunded: %v", err)
+			}
+			spentBonds = append(spentBonds, &bondID{assetID, bond.CoinID})
+			assetIDs[assetID] = struct{}{}
+		}
+
+		// If the wallet can verify refunds on chain, a broadcast refund is
+		// tracked until it confirms (or the bond output is otherwise spent)
+		// instead of assuming that a broadcast without error means the bond is
+		// refunded. Some wallets (e.g. SPV) only learn about a rejected
+		// transaction after the broadcast call has already returned.
+		checker, canCheck := wallet.Wallet.(asset.BondRefundChecker)
+		refundKey := bondRefundKey(acct.host, bond)
+		var refundSt *bondRefundState
+		if canCheck {
+			refundSt = c.bondRefundState(refundKey)
+			res, refundStr := c.checkPendingBondRefund(ctx, checker, refundSt, bond, bondIDStr, nowT)
+			switch res {
+			case refundWaiting:
+				continue
+			case refundConfirmed:
+				c.log.Infof("Refund %s of bond %v is confirmed. Marking the bond refunded.", refundStr, bondIDStr)
+				subject, details := c.formatDetails(TopicBondRefunded, makeCoinIDToken(bond.CoinID.String(), bond.AssetID), acct.host,
+					makeCoinIDToken(refundStr, bond.AssetID), wallet.amtString(refundSt.refundVal), wallet.amtString(bond.Amount))
+				c.notify(newBondRefundNote(TopicBondRefunded, subject, details, db.Success))
+				c.clearBondRefundState(refundKey)
+				markRefunded()
+				continue
+			case refundSpentElsewhere:
+				c.log.Warnf("Output of bond %v has been spent, but not by a confirmed refund that we are tracking (%v). "+
+					"Marking it refunded. Backup refund transaction: %x", bondIDStr, refundSt.refundStrs, bond.RefundTx)
+				c.clearBondRefundState(refundKey)
+				markRefunded()
+				continue
+			case refundRetry:
+				if len(refundSt.refundCoins) > 0 {
+					c.log.Warnf("Refund of bond %v not confirmed %v after broadcast (attempt %d, refund txns %v). "+
+						"The bond output is still unspent. Rebroadcasting the refund.", bondIDStr,
+						nowT.Sub(refundSt.lastSent).Round(time.Second), refundSt.attempts, refundSt.refundStrs)
+				}
+			}
+		}
+
 		// Here we may either refund or renew the bond depending on target
 		// tier and timing. Direct renewal (refund and post in one) is only
 		// useful if there is insufficient reserves or the client had been
@@ -521,17 +568,48 @@ func (c *Core) refundExpiredBonds(ctx context.Context, acct *dexAccount, cfg *de
 			continue
 		}
 
+		// refundFailed is called when a refund could not be generated or
+		// broadcast. If the wallet can tell, check (at most once per retry
+		// interval) whether the bond output is already spent, e.g. by a refund
+		// that was mined before a restart, so that we don't retry forever.
+		refundFailed := func() {
+			if !canCheck {
+				return
+			}
+			if refundSt == nil {
+				refundSt = &bondRefundState{}
+				c.setBondRefundState(refundKey, refundSt)
+			}
+			if nowT.Sub(refundSt.lastSpentCheck) < bondRefundRetryInterval {
+				return
+			}
+			refundSt.lastSpentCheck = nowT
+			spent, err := checker.BondSpent(ctx, bond.Version, bond.CoinID, bond.Data)
+			if err != nil {
+				c.log.Warnf("Unable to determine if bond %v is spent: %v", bondIDStr, err)
+				return
+			}
+			if spent {
+				c.log.Warnf("Output of bond %v is already spent. Marking it refunded. Backup refund transaction: %x",
+					bondIDStr, bond.RefundTx)
+				c.clearBondRefundState(refundKey)
+				markRefunded()
+			}
+		}
+
 		// Generate a refund tx paying to an address from the currently
 		// connected wallet, using bond.KeyIndex to create the signed
 		// transaction. The RefundTx is really a backup.
 		var refundCoinStr string
+		var refundCoinID []byte
 		var refundVal uint64
 		var bondAlreadySpent bool
 		if bond.KeyIndex == math.MaxUint32 { // invalid/unknown key index fallback (v0 db.Bond, which was never released, or unknown bond from server), also will skirt reserves :/
 			if len(bond.RefundTx) > 0 {
-				refundCoinID, err := wallet.SendTransaction(bond.RefundTx)
+				refundCoinID, err = wallet.SendTransaction(bond.RefundTx)
 				if err != nil {
 					c.log.Errorf("Failed to broadcast bond refund txn %x: %v", bond.RefundTx, err)
+					refundFailed()
 					continue
 				}
 				refundCoinStr, _ = asset.DecodeCoinID(bond.AssetID, refundCoinID)
@@ -550,41 +628,63 @@ func (c *Core) refundExpiredBonds(ctx context.Context, acct *dexAccount, cfg *de
 			if err != nil {
 				if errors.Is(err, asset.ErrIncorrectBondKey) { // imported account and app seed is different
 					c.log.Warnf("Private key to spend bond %v is not available. Broadcasting backup refund tx.", bondIDStr)
-					refundCoinID, err := wallet.SendTransaction(bond.RefundTx)
+					refundCoinID, err = wallet.SendTransaction(bond.RefundTx)
 					if err != nil {
 						c.log.Errorf("Failed to broadcast bond refund txn %x: %v", bond.RefundTx, err)
+						refundFailed()
 						continue
 					}
 					refundCoinStr, _ = asset.DecodeCoinID(bond.AssetID, refundCoinID)
 				} else if !bondAlreadySpent {
 					c.log.Errorf("Failed to generate bond refund tx: %v", err)
+					refundFailed()
 					continue
 				}
 			} else {
+				refundCoinID = refundCoin.ID()
 				refundCoinStr, refundVal = refundCoin.String(), refundCoin.Value()
 			}
 		}
 		// RefundBond increases reserves when it spends the bond, adding to
 		// the wallet's balance (available or immature).
 
-		// If the user hasn't already manually refunded the bond, broadcast
-		// the refund txn. Mark it refunded and stop tracking regardless.
 		if bondAlreadySpent {
 			c.log.Warnf("Bond output not found, possibly already spent or never mined! "+
 				"Marking refunded. Backup refund transaction: %x", bond.RefundTx)
-		} else {
-			subject, details := c.formatDetails(TopicBondRefunded, makeCoinIDToken(bond.CoinID.String(), bond.AssetID), acct.host,
-				makeCoinIDToken(refundCoinStr, bond.AssetID), wallet.amtString(refundVal), wallet.amtString(bond.Amount))
-			c.notify(newBondRefundNote(TopicBondRefunded, subject, details, db.Success))
+			c.clearBondRefundState(refundKey)
+			markRefunded()
+			continue
 		}
 
-		err = c.db.BondRefunded(acct.host, assetID, bond.CoinID)
-		if err != nil { // next DB load we'll retry, hit bondAlreadySpent, and store here again
-			c.log.Errorf("Failed to mark bond as refunded: %v", err)
+		if canCheck {
+			// Track the refund until it is confirmed. Do not mark the bond
+			// refunded yet.
+			if refundSt == nil {
+				refundSt = &bondRefundState{}
+			}
+			if refundSt.firstSent.IsZero() {
+				refundSt.firstSent = nowT
+			}
+			refundSt.lastSent = nowT
+			refundSt.attempts++
+			refundSt.addRefund(refundCoinID, refundCoinStr)
+			if refundVal > 0 {
+				refundSt.refundVal = refundVal
+			}
+			c.setBondRefundState(refundKey, refundSt)
+			assetIDs[assetID] = struct{}{} // balance may have changed
+			c.log.Infof("Broadcast refund %s for bond %v (attempt %d), reclaiming %s. "+
+				"Waiting for it to confirm before marking the bond refunded.", refundCoinStr, bondIDStr,
+				refundSt.attempts, wallet.amtString(refundVal))
+			continue
 		}
 
-		spentBonds = append(spentBonds, &bondID{assetID, bond.CoinID})
-		assetIDs[assetID] = struct{}{}
+		// The wallet cannot verify the refund on chain, so mark it refunded
+		// and stop tracking.
+		subject, details := c.formatDetails(TopicBondRefunded, makeCoinIDToken(bond.CoinID.String(), bond.AssetID), acct.host,
+			makeCoinIDToken(refundCoinStr, bond.AssetID), wallet.amtString(refundVal), wallet.amtString(bond.Amount))
+		c.notify(newBondRefundNote(TopicBondRefunded, subject, details, db.Success))
+		markRefunded()
 	}
 
 	// Remove spentbonds from the dexConnection's expiredBonds list.
@@ -722,6 +822,8 @@ func (c *Core) rotateBonds(ctx context.Context) {
 			}
 			continue
 		}
+		c.recheckRefundedBonds(dc)
+
 		acctBondState := c.bondStateOfDEX(dc, bondCfg)
 
 		refundedAssets, expiredStrength, err := c.refundExpiredBonds(ctx, dc.acct, bondCfg, acctBondState, now)

@@ -869,6 +869,11 @@ type dexAccount struct {
 	maxBondedAmt      uint64
 	penaltyComps      uint16 // max penalties to compensate for
 	bondAsset         uint32 // asset used for bond maintenance/rotation
+
+	// refundedBondChecks are bonds marked refunded in the DB that should be
+	// checked on chain to see if they are actually spent. Protected by
+	// authMtx.
+	refundedBondChecks []*refundedBondCheck
 }
 
 // newDEXAccount is a constructor for a new *dexAccount.
