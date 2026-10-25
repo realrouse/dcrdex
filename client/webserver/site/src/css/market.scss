@@ -113,7 +113,7 @@ div[data-handler=markets] {
 
     .ob-mexc-head {
       display: grid;
-      grid-template-columns: minmax(6.2em, 1.4fr) minmax(4.2em, 1fr) minmax(4.2em, 1fr);
+      grid-template-columns: minmax(6.8em, 1.4fr) minmax(4.2em, 1fr) minmax(4.2em, 1fr);
       gap: 0.25rem;
       padding: 0.3rem 8px 0.35rem;
       font-size: 11px;
@@ -150,11 +150,11 @@ div[data-handler=markets] {
     .ob-row {
       position: relative;
       display: grid;
-      grid-template-columns: minmax(6.2em, 1.4fr) minmax(4.2em, 1fr) minmax(4.2em, 1fr);
+      grid-template-columns: minmax(6.8em, 1.4fr) minmax(4.2em, 1fr) minmax(4.2em, 1fr);
       gap: 0.25rem;
       align-items: center;
       width: 100%;
-      min-height: 22px;
+      min-height: 24px;
       height: auto;
       padding: 3px 8px;
       cursor: pointer;
@@ -233,6 +233,7 @@ div[data-handler=markets] {
 
     .ob-rate-alt {
       display: block;
+      font-size: 11px;
       margin-left: 0;
       margin-top: 1px;
       line-height: 1.1;
@@ -249,6 +250,11 @@ div[data-handler=markets] {
       column-gap: 2px;
       min-width: 0;
       overflow: visible;
+    }
+
+    // Book row prices are one step larger than the amount and total columns.
+    .ob-row .ob-col-price {
+      font-size: 13px;
     }
 
     .ob-col-price [data-tmpl="rateAlt"] {
