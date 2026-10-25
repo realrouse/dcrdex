@@ -478,12 +478,19 @@ export class DepthChart extends Chart {
     this.conventionalRateStep = Doc.conventionalRateStep(rateStepEnc, baseUnitInfo, quoteUnitInfo)
     this.baseUnit = baseUnitInfo.conventional.unit
     this.quoteUnit = quoteUnitInfo.conventional.unit
+    const [midGap, gapWidth] = this.gap()
+    const spread = gapWidth / midGap
     if (!this.zoomLevel) {
-      const [midGap, gapWidth] = this.gap()
-      // Default to 5% zoom, but with a minimum of 5 * midGap, but still observing
-      // the hard cap of 200%.
-      const minZoom = Math.max(gapWidth / midGap * 5, 0.05)
+      // Default to 5% zoom, but with a minimum of 5 * spread, but still
+      // observing the hard cap of 200%.
+      const minZoom = Math.max(spread * 5, 0.05)
       this.zoomLevel = Math.min(minZoom, 2)
+    } else if (this.zoomLevel < spread * 2) {
+      // The saved zoom level is shared by all markets, so it may be too narrow
+      // to show anything but the gap on a market with a wider spread. Zoom out
+      // so that the best buy and sell are inside the middle half of the chart.
+      // This is not saved, so the user's zoom is kept for other markets.
+      this.zoomLevel = Math.min(spread * 2, 2)
     }
     this.draw()
   }
