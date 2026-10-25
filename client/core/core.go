@@ -5298,12 +5298,22 @@ func (c *Core) Orders(filter *OrderFilter) ([]*Order, error) {
 		return nil, fmt.Errorf("UserOrders error: %w", err)
 	}
 
-	cords := make([]*Order, 0, len(ords))
+	// Load the matches for all of the orders in one pass over the matches
+	// buckets rather than one full scan per order, which gets very slow
+	// with a long trading (e.g. market making) history.
+	oids := make([]order.OrderID, 0, len(ords))
 	for _, mOrd := range ords {
-		corder, err := c.coreOrderFromMetaOrder(mOrd)
-		if err != nil {
-			return nil, err
-		}
+		oids = append(oids, mOrd.Order.ID())
+	}
+	excludeCancels := false // maybe don't include cancel order matches?
+	matches, err := c.db.MatchesForOrders(oids, excludeCancels)
+	if err != nil {
+		return nil, fmt.Errorf("MatchesForOrders error: %w", err)
+	}
+
+	cords := make([]*Order, 0, len(ords))
+	for i, mOrd := range ords {
+		corder := coreOrderFromMetaOrderAndMatches(mOrd, matches[oids[i]])
 		baseWallet, baseOK := c.wallet(corder.BaseID)
 		quoteWallet, quoteOK := c.wallet(corder.QuoteID)
 		corder.ReadyToTick = baseOK && baseWallet.connected() && baseWallet.unlocked() &&
@@ -5319,18 +5329,24 @@ func (c *Core) Orders(filter *OrderFilter) ([]*Order, error) {
 // swap coin confirmations will not be set. For active orders, get the
 // *trackedTrade and use the coreOrder method.
 func (c *Core) coreOrderFromMetaOrder(mOrd *db.MetaOrder) (*Order, error) {
-	corder := coreOrderFromTrade(mOrd.Order, mOrd.MetaData)
 	oid := mOrd.Order.ID()
 	excludeCancels := false // maybe don't include cancel order matches?
 	matches, err := c.db.MatchesForOrder(oid, excludeCancels)
 	if err != nil {
 		return nil, fmt.Errorf("MatchesForOrder error loading matches for %s: %w", oid, err)
 	}
+	return coreOrderFromMetaOrderAndMatches(mOrd, matches), nil
+}
+
+// coreOrderFromMetaOrderAndMatches creates an *Order from a *db.MetaOrder and
+// its already-loaded matches.
+func coreOrderFromMetaOrderAndMatches(mOrd *db.MetaOrder, matches []*db.MetaMatch) *Order {
+	corder := coreOrderFromTrade(mOrd.Order, mOrd.MetaData)
 	corder.Matches = make([]*Match, 0, len(matches))
 	for _, match := range matches {
 		corder.Matches = append(corder.Matches, matchFromMetaMatch(mOrd.Order, match))
 	}
-	return corder, nil
+	return corder
 }
 
 // Order fetches a single user order.

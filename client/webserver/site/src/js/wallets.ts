@@ -486,10 +486,15 @@ export default class WalletsPage extends BasePage {
   }
 
   async start (firstTicker: string) {
-    await this.setSelectedTicker(firstTicker)
+    // setSelectedTicker fills in the balances and wallet details
+    // synchronously before it awaits the slower requests (staking, mixing and
+    // recent order activity), which show their own loading indicators. Reveal
+    // the page right away instead of waiting on those requests.
+    const selected = this.setSelectedTicker(firstTicker)
     this.page.walletDetailsBox.classList.remove('invisible')
     this.page.assetSelect.classList.remove('invisible')
     this.page.secondColumn.classList.remove('invisible')
+    await selected
   }
 
   async safePost (path: string, args: any): Promise<any> {

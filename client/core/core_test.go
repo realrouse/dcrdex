@@ -622,6 +622,20 @@ func (tdb *TDB) MatchesForOrder(oid order.OrderID, excludeCancels bool) ([]*db.M
 	return tdb.matchesForOID, tdb.matchesForOIDErr
 }
 
+func (tdb *TDB) MatchesForOrders(oids []order.OrderID, excludeCancels bool) (map[order.OrderID][]*db.MetaMatch, error) {
+	matches := make(map[order.OrderID][]*db.MetaMatch, len(oids))
+	for _, oid := range oids {
+		ms, err := tdb.MatchesForOrder(oid, excludeCancels)
+		if err != nil {
+			return nil, err
+		}
+		if len(ms) > 0 {
+			matches[oid] = ms
+		}
+	}
+	return matches, nil
+}
+
 func (tdb *TDB) DEXOrdersWithActiveMatches(dex string) ([]order.OrderID, error) {
 	return tdb.activeMatchOIDs, tdb.activeMatchOIDSErr
 }
