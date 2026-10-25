@@ -327,6 +327,17 @@ div[data-handler=markets] {
       .h21 {
         height: 21px;
       }
+
+      // Small, muted USD equivalent under an order form input.
+      .order-fiat {
+        height: 18px;
+        line-height: 18px;
+        font-size: 12px;
+        text-align: right;
+        padding-right: 5px;
+        color: var(--text-grey);
+        white-space: nowrap;
+      }
     }
 
     .ico-unlocked {

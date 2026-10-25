@@ -1610,6 +1610,7 @@ export default class MarketsPage extends BasePage {
       }]
     }
     this.drawChartLines()
+    this.updateOrderUsd()
     if (!show || !adjusted || !order.qty) {
       page.orderPreview.textContent = ''
       Doc.hide(page.orderPreviewFiat)
@@ -1621,7 +1622,10 @@ export default class MarketsPage extends BasePage {
     const total = Doc.formatCoinValue(quoteQty, this.market.quoteUnitInfo)
 
     page.orderPreview.textContent = intl.prep(intl.ID_ORDER_PREVIEW, { total, asset: unit })
-    this.showFiatValue(this.market.quote.id, quoteQty, page.orderPreviewFiatValue)
+    const quoteUSD = this.usdRate(this.market.quote.id)
+    const totalUSD = quoteQty / this.market.quoteUnitInfo.conventional.conversionFactor * quoteUSD
+    page.orderPreviewFiatValue.textContent = formatOrderUsd(totalUSD)
+    Doc.setVis(Boolean(page.orderPreviewFiatValue.textContent), page.orderPreviewFiat)
     if (this.isSell()) this.preSell()
     else this.preBuy()
   }
@@ -2414,6 +2418,7 @@ export default class MarketsPage extends BasePage {
     this.market.bookLoaded = true
     this.updateTitle()
     this.setMarketBuyOrderEstimate()
+    this.updateOrderUsd()
   }
 
   /* handleBookOrderRoute is the handler for 'book_order' notifications. */
@@ -2425,6 +2430,7 @@ export default class MarketsPage extends BasePage {
     this.addTableOrder(order)
     this.updateTitle()
     this.depthChart.draw()
+    this.updateOrderUsd()
   }
 
   /* handleUnbookOrderRoute is the handler for 'unbook_order' notifications. */
@@ -2436,6 +2442,7 @@ export default class MarketsPage extends BasePage {
     this.removeTableOrder(order)
     this.updateTitle()
     this.depthChart.draw()
+    this.updateOrderUsd()
   }
 
   /*
@@ -2734,11 +2741,58 @@ export default class MarketsPage extends BasePage {
   // showFiatValue displays the fiat equivalent for an order quantity.
   showFiatValue (assetID: number, qty: number, display: PageElement) {
     if (display) {
-      const rate = app().fiatRatesMap[assetID]
+      const rate = this.usdRate(assetID)
       display.textContent = Doc.formatFiatConversion(qty, rate, app().unitInfo(assetID))
       if (rate) Doc.show(display.parentElement as Element)
       else Doc.hide(display.parentElement as Element)
     }
+  }
+
+  /*
+   * usdRate returns the USD rate for an asset of the current market. If the
+   * fiat rate sources have no rate for one side of the market, the rate is
+   * derived from the other side's USD rate and the market's current mid-gap
+   * (or the server's spot) rate. Returns 0 if no rate can be determined.
+   */
+  usdRate (assetID: number): number {
+    const direct = app().fiatRatesMap[assetID]
+    if (direct > 0 && Number.isFinite(direct)) return direct
+    const mkt = this.market
+    if (!mkt || !mkt.base || !mkt.quote) return 0
+    const { base: { id: baseID }, quote: { id: quoteID } } = mkt
+    if (assetID !== baseID && assetID !== quoteID) return 0
+    let conventionalRate = mkt.bookLoaded ? this.midGapConventional() || 0 : 0
+    if (!conventionalRate && mkt.cfg.spot && mkt.cfg.spot.rate) conventionalRate = mkt.cfg.spot.rate / mkt.rateConversionFactor
+    if (!conventionalRate) return 0
+    if (assetID === baseID) {
+      const quoteUSD = app().fiatRatesMap[quoteID]
+      return quoteUSD > 0 ? conventionalRate * quoteUSD : 0
+    }
+    const baseUSD = app().fiatRatesMap[baseID]
+    return baseUSD > 0 ? baseUSD / conventionalRate : 0
+  }
+
+  /*
+   * updateOrderUsd updates the USD equivalents shown under the order form's
+   * price, quantity and market buy inputs. A USD line is hidden when there is
+   * no input or no USD rate is available.
+   */
+  updateOrderUsd () {
+    const { page, market: mkt } = this
+    if (!mkt || !mkt.base || !mkt.quote) return
+    const [baseUSD, quoteUSD] = [this.usdRate(mkt.base.id), this.usdRate(mkt.quote.id)]
+    const setUsd = (box: PageElement, valueEl: PageElement, inputValue: string | undefined, usdRate: number) => {
+      const v = parseFloat(inputValue || '')
+      const txt = v > 0 ? formatOrderUsd(v * usdRate) : ''
+      valueEl.textContent = txt
+      Doc.setVis(Boolean(txt), box)
+    }
+    setUsd(page.rateFiat, page.rateFiatValue, page.rateField.value, quoteUSD)
+    // Use the lot-adjusted quantity, which is what will actually be ordered.
+    const lots = parseInt(page.lotField.value || '0')
+    const qty = lots > 0 ? String(lots * mkt.cfg.lotsize / mkt.baseUnitInfo.conventional.conversionFactor) : ''
+    setUsd(page.qtyFiat, page.qtyFiatValue, qty, baseUSD)
+    setUsd(page.mktBuyFiat, page.mktBuyFiatValue, page.mktBuyField.value, quoteUSD)
   }
 
   /* showVerifyForm displays form to verify an order */
@@ -3066,6 +3120,7 @@ export default class MarketsPage extends BasePage {
     if (!this.market) return
     this.setCurrMarketPrice()
     this.marketList.refreshPrices()
+    this.updateOrderUsd()
   }
 
   /*
@@ -3439,6 +3494,7 @@ export default class MarketsPage extends BasePage {
     const page = this.page
     const qty = convertToAtoms(page.mktBuyField.value || '', this.market.quoteUnitInfo.conventional.conversionFactor)
     const gap = this.midGap()
+    this.updateOrderUsd()
     if (qty > 0) {
       const quoteWallet = app().assets[this.market.quote.id].wallet
       this.setOrderBttnEnabled(qty <= quoteWallet.balance.available, intl.prep(intl.ID_ORDER_BUTTON_BUY_BALANCE_ERROR))
@@ -4356,6 +4412,15 @@ function sortedMarkets (): ExchangeMarket[] {
 function formatUsd (n: number): string {
   if (!n || !Number.isFinite(n)) return ''
   return '$' + Doc.formatFourSigFigs(n)
+}
+
+/*
+ * formatOrderUsd formats a USD order value: cents for values of a dollar or
+ * more, four significant figures below that. Returns '' if there is no value.
+ */
+function formatOrderUsd (n: number): string {
+  if (!n || !Number.isFinite(n)) return ''
+  return '$' + (n >= 1 ? Doc.formatFiatValue(n) : Doc.formatFourSigFigs(n))
 }
 
 function pairToUsd (convPairRate: number, quoteID: number): number {
