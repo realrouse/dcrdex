@@ -1040,3 +1040,12 @@ div[data-handler=markets] {
   padding-left: 2px;
   border-radius: 5px;
 }
+
+// Secondary USD line under the pair price, in the market stats and in the
+// left market list.
+.mkt-price-usd {
+  line-height: 1.1;
+  margin-top: 2px;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}

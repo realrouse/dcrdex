@@ -565,6 +565,7 @@ export default class MarketsPage extends BasePage {
       balance: (note: BalanceNote) => { this.handleBalanceNote(note) },
       bondpost: (note: BondNote) => { this.handleBondUpdate(note) },
       spots: (note: SpotPriceNote) => { this.handlePriceUpdate(note) },
+      fiatrateupdate: () => { this.handleFiatRateUpdate() },
       walletstate: (note: WalletStateNote) => { this.handleWalletState(note) },
       reputation: () => { this.updateReputation() },
       feepayment: () => { this.updateReputation() },
@@ -701,7 +702,7 @@ export default class MarketsPage extends BasePage {
         s.tmpl.volume.textContent = Doc.formatFourSigFigs(mkt.spot.vol24 / cFactor)
         s.tmpl.volUnit.textContent = unit
       }
-      setPriceAndChange(s.tmpl, xc, mkt)
+      setPriceAndChange(s.tmpl, xc, mkt, true)
     }
 
     const convSpot = mkt.spot.rate / this.market.rateConversionFactor
@@ -3058,6 +3059,16 @@ export default class MarketsPage extends BasePage {
   }
 
   /*
+   * handleFiatRateUpdate is the handler for the 'fiatrateupdate' notification.
+   * It redraws the USD lines in the stats display and the market list.
+   */
+  handleFiatRateUpdate () {
+    if (!this.market) return
+    this.setCurrMarketPrice()
+    this.marketList.refreshPrices()
+  }
+
+  /*
    * handlePriceUpdate is the handler for the 'spots' notification.
    */
   handlePriceUpdate (note: SpotPriceNote) {
@@ -3775,6 +3786,16 @@ class MarketList {
     }
   }
 
+  /* refreshPrices redraws the pair and USD prices of every row, e.g. after a
+   * fiat rate update. */
+  refreshPrices () {
+    for (const row of this.markets) {
+      const xc = app().exchanges[row.mkt.xc.host]
+      const mkt = xc?.markets?.[row.mkt.name]
+      if (mkt) setPriceAndChange(row.tmpl, xc, mkt)
+    }
+  }
+
   reloadMarketsPane (): void {
     Doc.empty(this.div)
     this.markets = []
@@ -4343,18 +4364,23 @@ function pairToUsd (convPairRate: number, quoteID: number): number {
   return convPairRate * qf
 }
 
-function setPriceAndChange (tmpl: Record<string, PageElement>, xc: Exchange, mkt: Market) {
+function setPriceAndChange (tmpl: Record<string, PageElement>, xc: Exchange, mkt: Market, withQuoteUnit?: boolean) {
   if (!mkt.spot) return
   const pair = app().conventionalRate(mkt.baseid, mkt.quoteid, mkt.spot.rate, xc)
   const pairTxt = Doc.formatFourSigFigs(pair)
-  if (tmpl.priceUsd) {
+  // The pair price is the primary value. The USD equivalent, when a fiat rate
+  // is available, is shown as a smaller secondary line under it.
+  if (withQuoteUnit && pairTxt) {
     const qUnit = app().unitInfo(mkt.quoteid, xc).conventional.unit
-    tmpl.price.textContent = pairTxt ? `${pairTxt} ${qUnit}` : ''
+    tmpl.price.textContent = `${pairTxt} ${qUnit}`
   } else {
-    tmpl.price.textContent = pairTxt
+    tmpl.price.textContent = pairTxt || '-'
   }
-  const usd = pairToUsd(pair, mkt.quoteid)
-  if (tmpl.priceUsd) tmpl.priceUsd.textContent = usd ? formatUsd(usd) : ''
+  if (tmpl.priceUsd) {
+    const usdTxt = formatUsd(pairToUsd(pair, mkt.quoteid))
+    tmpl.priceUsd.textContent = usdTxt
+    Doc.setVis(Boolean(usdTxt), tmpl.priceUsd)
+  }
   const sign = mkt.spot.change24 > 0 ? '+' : ''
   tmpl.change.classList.remove('buycolor', 'sellcolor')
   tmpl.change.classList.add(mkt.spot.change24 >= 0 ? 'buycolor' : 'sellcolor')
