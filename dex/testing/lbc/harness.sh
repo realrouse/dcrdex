@@ -77,7 +77,11 @@ start_node() {
     tmux new-window -t "${SESSION}:${win}" -n "${name}-node" "${SHELL}"
   fi
   tmux send-keys -t "${SESSION}:${win}" "set +o history; cd ${dir}" C-m
-  tmux send-keys -t "${SESSION}:${win}" "lbcd --regtest --notls --txindex --addrindex \
+  # --nobanning: all harness nodes share 127.0.0.1, and lbcd bans peers for
+  # repeated "transaction not found" replies under heavy tx load, which
+  # partitions the harness for 24h (seen in P6; heal a running harness with
+  # rpc-relay.py).
+  tmux send-keys -t "${SESSION}:${win}" "lbcd --regtest --notls --txindex --addrindex --nobanning \
     --datadir=${dir}/data --logdir=${dir}/logs \
     --listen=127.0.0.1:${listen} --rpclisten=127.0.0.1:${rpc} \
     --rpcuser=${RPC_USER} --rpcpass=${RPC_PASS}" C-m
