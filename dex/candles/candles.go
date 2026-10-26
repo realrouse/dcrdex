@@ -24,6 +24,10 @@ const (
 	// MaxCacheSize is a sanity limit on the cache size a client will use for a
 	// server-advertised bin size.
 	MaxCacheSize = 10_000
+	// HistoryPageSize is the maximum number of candles a server will return
+	// for one request for older candle history (msgjson.CandlesRequest with
+	// Before set).
+	HistoryPageSize = 1000
 )
 
 var (

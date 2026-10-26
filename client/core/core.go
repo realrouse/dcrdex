@@ -588,6 +588,7 @@ func (c *Core) exchangeInfo(dc *dexConnection) *Exchange {
 		BondAssets:       bondAssets,
 		ConnectionStatus: dc.status(),
 		CandleDurs:       cfg.BinSizes,
+		CandlePageSize:   cfg.CandlePageSize,
 		ViewOnly:         dc.acct.isViewOnly(),
 		Auth:             acctBondState.ExchangeAuth,
 		MaxScore:         cfg.MaxScore,

@@ -751,11 +751,14 @@ type Exchange struct {
 	BondAssets       map[string]*BondAsset  `json:"bondAssets"`
 	ConnectionStatus comms.ConnectionStatus `json:"connectionStatus"`
 	CandleDurs       []string               `json:"candleDurs"`
-	ViewOnly         bool                   `json:"viewOnly"`
-	Auth             ExchangeAuth           `json:"auth"`
-	PenaltyThreshold uint32                 `json:"penaltyThreshold"`
-	MaxScore         uint32                 `json:"maxScore"`
-	Disabled         bool                   `json:"disabled"`
+	// CandlePageSize is the maximum number of candles per CandleHistory
+	// request. Zero means the server does not support candle history.
+	CandlePageSize   int          `json:"candlePageSize"`
+	ViewOnly         bool         `json:"viewOnly"`
+	Auth             ExchangeAuth `json:"auth"`
+	PenaltyThreshold uint32       `json:"penaltyThreshold"`
+	MaxScore         uint32       `json:"maxScore"`
+	Disabled         bool         `json:"disabled"`
 }
 
 // newDisplayIDFromSymbols creates a display-friendly market ID for a base/quote

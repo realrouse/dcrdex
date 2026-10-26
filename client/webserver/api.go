@@ -23,6 +23,7 @@ import (
 	"decred.org/dcrdex/dex"
 	"decred.org/dcrdex/dex/config"
 	"decred.org/dcrdex/dex/encode"
+	"decred.org/dcrdex/dex/msgjson"
 	dexbtc "decred.org/dcrdex/dex/networks/btc"
 	"decred.org/dcrdex/dex/order"
 	pi "decred.org/dcrdex/dex/politeia"
@@ -1691,6 +1692,46 @@ func (s *WebServer) apiDeleteArchivedRecords(w http.ResponseWriter, r *http.Requ
 		ArchivedRecordsPath:    archivedRecordsPath,
 	}
 	writeJSON(w, resp)
+}
+
+// apiCandleHistory is the handler for the '/candlehistory' API request. It
+// returns a page of older candles for a market, oldest first, for the chart to
+// show when the user scrolls back past the candles from the live feed. If the
+// server does not support candle history, supported is false and no error is
+// returned, so the chart can simply stop paging.
+func (s *WebServer) apiCandleHistory(w http.ResponseWriter, r *http.Request) {
+	form := &struct {
+		Host    string `json:"host"`
+		BaseID  uint32 `json:"baseID"`
+		QuoteID uint32 `json:"quoteID"`
+		BinSize string `json:"binSize"`
+		Before  uint64 `json:"before"`
+		N       int    `json:"n"`
+	}{}
+	if !readPost(w, r, form) {
+		return
+	}
+	cs, err := s.core.CandleHistory(form.Host, form.BaseID, form.QuoteID, form.BinSize, form.Before, form.N)
+	supported := true
+	if errors.Is(err, core.ErrCandleHistoryUnsupported) {
+		supported, err = false, nil
+	}
+	if err != nil {
+		s.writeAPIError(w, fmt.Errorf("error getting candle history: %w", err))
+		return
+	}
+	if cs == nil {
+		cs = []msgjson.Candle{}
+	}
+	writeJSON(w, &struct {
+		OK        bool             `json:"ok"`
+		Supported bool             `json:"supported"`
+		Candles   []msgjson.Candle `json:"candles"`
+	}{
+		OK:        true,
+		Supported: supported,
+		Candles:   cs,
+	})
 }
 
 func (s *WebServer) apiMarketReport(w http.ResponseWriter, r *http.Request) {

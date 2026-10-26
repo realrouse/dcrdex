@@ -93,6 +93,20 @@ const (
 	) AS newest
 	ORDER BY end_stamp;`
 
+	// SelectCandlesBefore selects up to $2 candles with end stamps before $1,
+	// sorted by ascending time.
+	SelectCandlesBefore = `SELECT end_stamp, match_volume, quote_volume,
+		high_rate, low_rate, start_rate, end_rate
+	FROM (
+		SELECT end_stamp, match_volume, quote_volume,
+			high_rate, low_rate, start_rate, end_rate
+		FROM %s
+		WHERE end_stamp < $1
+		ORDER BY end_stamp DESC
+		LIMIT $2
+	) AS page
+	ORDER BY end_stamp;`
+
 	SelectLastEndStamp = `SELECT (end_stamp)
 		FROM %s
 		ORDER BY end_stamp

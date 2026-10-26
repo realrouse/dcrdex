@@ -6,6 +6,7 @@ package apidata
 import (
 	"encoding/json"
 	"fmt"
+	"sync"
 	"testing"
 	"time"
 
@@ -25,8 +26,29 @@ func (m *TMarketSource) EpochDuration() uint64 { return 1000 }
 func (m *TMarketSource) Base() uint32          { return m.base }
 func (m *TMarketSource) Quote() uint32         { return m.quote }
 
+type historyCall struct {
+	dur, before uint64
+	n           int
+}
+
 type TDBSource struct {
 	loadEpochErr error
+	history      []candles.Candle
+	historyErr   error
+	historyCalls []historyCall
+	historyWait  chan struct{} // if set, CandlesBefore blocks until closed
+	historyMtx   sync.Mutex
+}
+
+func (db *TDBSource) CandlesBefore(base, quote uint32, dur, before uint64, n int) ([]candles.Candle, error) {
+	db.historyMtx.Lock()
+	db.historyCalls = append(db.historyCalls, historyCall{dur, before, n})
+	wait := db.historyWait
+	db.historyMtx.Unlock()
+	if wait != nil {
+		<-wait
+	}
+	return db.history, db.historyErr
 }
 
 func (db *TDBSource) LoadEpochStats(base, quote uint32, caches []*candles.Cache) error {
@@ -243,5 +265,126 @@ func TestCandleRequestLimits(t *testing.T) {
 		if (err != nil) != tt.wantErr {
 			t.Fatalf("%s x %d: wanted error = %t, got %v", tt.binSize, tt.n, tt.wantErr, err)
 		}
+	}
+}
+
+func TestCandleHistory(t *testing.T) {
+	rig := newTestRig()
+	if err := rig.api.AddMarketSource(&TMarketSource{42, 0}); err != nil {
+		t.Fatalf("AddMarketSource error: %v", err)
+	}
+	const fiveMins = uint64(5 * 60 * 1000)
+	rig.db.history = []candles.Candle{
+		{StartStamp: 0, EndStamp: fiveMins, MatchVolume: 1, HighRate: 3},
+		{StartStamp: fiveMins, EndStamp: 2 * fiveMins, MatchVolume: 2, HighRate: 4},
+	}
+
+	req := func(binSize string, n int, before uint64) (*msgjson.WireCandles, error) {
+		rig.db.historyCalls = nil
+		wcI, err := rig.api.handleCandles(&msgjson.CandlesRequest{
+			BaseID:     42,
+			QuoteID:    0,
+			BinSize:    binSize,
+			NumCandles: n,
+			Before:     before,
+		})
+		if err != nil {
+			return nil, err
+		}
+		return wcI.(*msgjson.WireCandles), nil
+	}
+
+	// Success.
+	wc, err := req("5m", 100, 1e12)
+	if err != nil {
+		t.Fatalf("history request error: %v", err)
+	}
+	if len(rig.db.historyCalls) != 1 || rig.db.historyCalls[0] != (historyCall{fiveMins, 1e12, 100}) {
+		t.Fatalf("wrong DB calls: %+v", rig.db.historyCalls)
+	}
+	cs := wc.Candles()
+	if len(cs) != 2 || cs[1].EndStamp != 2*fiveMins || cs[1].MatchVolume != 2 || cs[0].HighRate != 3 {
+		t.Fatalf("wrong candles: %+v", cs)
+	}
+
+	// Default page size.
+	if _, err = req("1h", 0, 1e12); err != nil {
+		t.Fatalf("history request error: %v", err)
+	}
+	if rig.db.historyCalls[0].n != candles.DefaultCandleRequest {
+		t.Fatalf("wrong default page size %d", rig.db.historyCalls[0].n)
+	}
+
+	// Max page size, and too big.
+	if _, err = req("24h", candles.HistoryPageSize, 1e12); err != nil {
+		t.Fatalf("max page size error: %v", err)
+	}
+	if _, err = req("24h", candles.HistoryPageSize+1, 1e12); err == nil {
+		t.Fatalf("no error for page too big")
+	}
+	// The page limit applies even if the bin's cache is bigger.
+	if _, err = req("5m", 3000, 1e12); err == nil {
+		t.Fatalf("no error for page bigger than the history page size")
+	}
+
+	// Epoch candles are not stored.
+	if _, err = req("1s", 10, 1e12); err == nil {
+		t.Fatalf("no error for epoch-size history")
+	}
+	// Unknown bin size.
+	if _, err = req("15m", 10, 1e12); err == nil {
+		t.Fatalf("no error for unknown bin size")
+	}
+	// Unknown market.
+	if _, err = rig.api.handleCandles(&msgjson.CandlesRequest{BaseID: 42, QuoteID: 60, BinSize: "5m", Before: 1}); err == nil {
+		t.Fatalf("no error for unknown market")
+	}
+	if len(rig.db.historyCalls) != 0 {
+		t.Fatalf("DB was queried for invalid requests")
+	}
+
+	// DB error.
+	rig.db.historyErr = dummyErr
+	if _, err = req("5m", 10, 1e12); err == nil {
+		t.Fatalf("no error for DB error")
+	}
+	rig.db.historyErr = nil
+
+	// Requests without Before must not touch the DB.
+	if _, err = req("5m", 10, 0); err != nil {
+		t.Fatalf("live candles error: %v", err)
+	}
+	if len(rig.db.historyCalls) != 0 {
+		t.Fatalf("DB queried for a request without before")
+	}
+
+	// Concurrency limit.
+	rig.db.historyWait = make(chan struct{})
+	errs := make(chan error, maxConcurrentHistoryRequests)
+	for i := 0; i < maxConcurrentHistoryRequests; i++ {
+		go func() {
+			_, err := rig.api.handleCandles(&msgjson.CandlesRequest{BaseID: 42, BinSize: "5m", NumCandles: 1, Before: 1})
+			errs <- err
+		}()
+	}
+	// Wait for all slots to fill.
+	for i := 0; len(rig.api.historySem) < maxConcurrentHistoryRequests; i++ {
+		if i > 500 {
+			t.Fatalf("history requests didn't start")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	if _, err := rig.api.handleCandles(&msgjson.CandlesRequest{BaseID: 42, BinSize: "5m", NumCandles: 1, Before: 1}); err == nil {
+		t.Fatalf("no error for too many concurrent history requests")
+	}
+	close(rig.db.historyWait)
+	for i := 0; i < maxConcurrentHistoryRequests; i++ {
+		if err := <-errs; err != nil {
+			t.Fatalf("concurrent request error: %v", err)
+		}
+	}
+	// Slots are released.
+	if _, err := rig.api.handleCandles(&msgjson.CandlesRequest{BaseID: 42, BinSize: "5m", NumCandles: 1, Before: 1}); err != nil {
+		t.Fatalf("error after concurrent requests finished: %v", err)
 	}
 }

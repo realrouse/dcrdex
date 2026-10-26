@@ -536,6 +536,10 @@ func (c *TCore) Network() dex.Network { return dex.Mainnet }
 
 func (c *TCore) Exchanges() map[string]*core.Exchange { return tExchanges }
 
+func (c *TCore) CandleHistory(host string, base, quote uint32, binSize string, before uint64, n int) ([]msgjson.Candle, error) {
+	return nil, core.ErrCandleHistoryUnsupported
+}
+
 func (c *TCore) Exchange(host string) (*core.Exchange, error) {
 	exchange, ok := tExchanges[host]
 	if !ok {

@@ -64,6 +64,7 @@ export interface Exchange {
   viewOnly: boolean
   bondAssets: Record<string, BondAsset>
   candleDurs: string[]
+  candlePageSize: number // 0 if the server has no candle history support
   maxScore: number
   penaltyThreshold: number
   disabled: boolean

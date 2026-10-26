@@ -31,7 +31,15 @@ type DBSource interface {
 	LoadEpochStats(base, quote uint32, caches []*candles.Cache) error
 	LastCandleEndStamp(base, quote uint32, candleDur uint64) (uint64, error)
 	InsertCandles(base, quote uint32, dur uint64, cs []*candles.Candle) error
+	// CandlesBefore loads up to n stored candles of the duration with end
+	// stamps before the stamp, oldest first.
+	CandlesBefore(base, quote uint32, dur, before uint64, n int) ([]candles.Candle, error)
 }
+
+// maxConcurrentHistoryRequests limits the number of candle history requests
+// that hit the database at the same time. Requests are also subject to the
+// rate limits of the candles route.
+const maxConcurrentHistoryRequests = 4
 
 // MarketSource is a source of market information. Markets are added after
 // construction but before use using the AddMarketSource method.
@@ -63,6 +71,9 @@ type DataAPI struct {
 
 	cacheMtx     sync.RWMutex
 	marketCaches map[string]map[uint64]*cacheWithStoredTime
+
+	// historySem limits concurrent candle history requests.
+	historySem chan struct{}
 }
 
 // NewDataAPI is the constructor for a new DataAPI.
@@ -72,6 +83,7 @@ func NewDataAPI(dbSrc DBSource, registerHTTP func(route string, handler comms.HT
 		epochDurations: make(map[string]uint64),
 		spots:          make(map[string]json.RawMessage),
 		marketCaches:   make(map[string]map[uint64]*cacheWithStoredTime),
+		historySem:     make(chan struct{}, maxConcurrentHistoryRequests),
 	}
 
 	if atomic.CompareAndSwapUint32(&started, 0, 1) {
@@ -227,6 +239,10 @@ func (s *DataAPI) handleCandles(thing any) (any, error) {
 		req.NumCandles = candles.DefaultCandleRequest
 	}
 
+	if req.Before > 0 {
+		return s.candleHistory(req)
+	}
+
 	mkt, err := dex.MarketName(req.BaseID, req.QuoteID)
 	if err != nil {
 		return nil, fmt.Errorf("error parsing market for %d - %d", req.BaseID, req.QuoteID)
@@ -256,6 +272,64 @@ func (s *DataAPI) handleCandles(thing any) (any, error) {
 	}
 
 	return cache.WireCandles(req.NumCandles), nil
+}
+
+// candleHistory handles a request for older candles, i.e. a CandlesRequest
+// with Before set. The candles are read from the database, since they may be
+// older than the in-memory cache.
+func (s *DataAPI) candleHistory(req *msgjson.CandlesRequest) (*msgjson.WireCandles, error) {
+	if req.NumCandles > candles.HistoryPageSize {
+		return nil, fmt.Errorf("requested numCandles %d exceeds maximum history page size %d", req.NumCandles, candles.HistoryPageSize)
+	}
+
+	mkt, err := dex.MarketName(req.BaseID, req.QuoteID)
+	if err != nil {
+		return nil, fmt.Errorf("error parsing market for %d - %d", req.BaseID, req.QuoteID)
+	}
+
+	binSizeDuration, err := time.ParseDuration(req.BinSize)
+	if err != nil {
+		return nil, fmt.Errorf("error parsing binSize")
+	}
+	binSize := uint64(binSizeDuration / time.Millisecond)
+	// Only the BinSizes are stored in the database. Epoch candles are not.
+	if _, found := binCacheSizes[binSize]; !found {
+		return nil, fmt.Errorf("no history available for binSize %s", req.BinSize)
+	}
+
+	s.cacheMtx.RLock()
+	_, found := s.marketCaches[mkt]
+	s.cacheMtx.RUnlock()
+	if !found {
+		return nil, fmt.Errorf("market %s not known", mkt)
+	}
+
+	select {
+	case s.historySem <- struct{}{}:
+		defer func() { <-s.historySem }()
+	default:
+		return nil, fmt.Errorf("too many candle history requests, try again later")
+	}
+
+	cs, err := s.db.CandlesBefore(req.BaseID, req.QuoteID, binSize, req.Before, req.NumCandles)
+	if err != nil {
+		// The DB logs the error. Don't send DB error details to clients.
+		return nil, fmt.Errorf("error loading candle history")
+	}
+
+	wc := msgjson.NewWireCandles(len(cs))
+	for i := range cs {
+		c := &cs[i]
+		wc.StartStamps = append(wc.StartStamps, c.StartStamp)
+		wc.EndStamps = append(wc.EndStamps, c.EndStamp)
+		wc.MatchVolumes = append(wc.MatchVolumes, c.MatchVolume)
+		wc.QuoteVolumes = append(wc.QuoteVolumes, c.QuoteVolume)
+		wc.HighRates = append(wc.HighRates, c.HighRate)
+		wc.LowRates = append(wc.LowRates, c.LowRate)
+		wc.StartRates = append(wc.StartRates, c.StartRate)
+		wc.EndRates = append(wc.EndRates, c.EndRate)
+	}
+	return wc, nil
 }
 
 // handleOrderBook implements comms.HTTPHandler for the /orderbook endpoints.

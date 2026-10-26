@@ -43,6 +43,7 @@ import (
 	"decred.org/dcrdex/dex/dexnet"
 	"decred.org/dcrdex/dex/encode"
 	"decred.org/dcrdex/dex/encrypt"
+	"decred.org/dcrdex/dex/msgjson"
 	pi "decred.org/dcrdex/dex/politeia"
 	"decred.org/dcrdex/dex/version"
 	"github.com/decred/dcrd/certgen"
@@ -108,6 +109,7 @@ type clientCore interface {
 	Network() dex.Network
 	Exchanges() map[string]*core.Exchange
 	Exchange(host string) (*core.Exchange, error)
+	CandleHistory(host string, base, quote uint32, binSize string, before uint64, n int) ([]msgjson.Candle, error)
 	PostBond(form *core.PostBondForm) (*core.PostBondResult, error)
 	RedeemPrepaidBond(appPW []byte, code []byte, host string, certI any) (tier uint64, err error)
 	UpdateBondOptions(form *core.BondOptionsForm) error
@@ -655,6 +657,7 @@ func New(cfg *Config) (*WebServer, error) {
 			apiAuth.Post("/removebotconfig", s.apiRemoveBotConfig)
 			apiAuth.Get("/marketmakingstatus", s.apiMarketMakingStatus)
 			apiAuth.Post("/marketreport", s.apiMarketReport)
+			apiAuth.Post("/candlehistory", s.apiCandleHistory)
 			apiAuth.Post("/cexbalance", s.apiCEXBalance)
 			apiAuth.Get("/archivedmmruns", s.apiArchivedRuns)
 			apiAuth.Post("/mmrunlogs", s.apiRunLogs)

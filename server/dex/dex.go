@@ -497,6 +497,7 @@ func newConfigResponse(cfg *DexConf, bondAssets map[string]*msgjson.BondAsset,
 		BondExpiry:       uint64(dex.BondExpiry(cfg.Network)), // temporary while we figure it out
 		BinSizes:         candles.BinSizes,
 		CandleCacheSizes: candles.CacheSizes,
+		CandlePageSize:   candles.HistoryPageSize,
 		PenaltyThreshold: cfg.PenaltyThreshold,
 		MaxScore:         auth.ScoringMatchLimit,
 	}
@@ -1592,11 +1593,22 @@ func candleParamsParser(next http.Handler) http.Handler {
 				return
 			}
 		}
+		// The optional before query parameter requests a page of older
+		// candles with end stamps before the unix ms stamp.
+		var before uint64
+		if beforeStr := r.URL.Query().Get("before"); beforeStr != "" {
+			before, err = strconv.ParseUint(beforeStr, 10, 64)
+			if err != nil {
+				http.Error(w, "before unparseable", http.StatusBadRequest)
+				return
+			}
+		}
 		ctx := context.WithValue(r.Context(), comms.CtxThing, &msgjson.CandlesRequest{
 			BaseID:     baseID,
 			QuoteID:    quoteID,
 			BinSize:    binSize,
 			NumCandles: count,
+			Before:     before,
 		})
 		next.ServeHTTP(w, r.WithContext(ctx))
 	})
