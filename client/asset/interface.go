@@ -1816,6 +1816,12 @@ type Swaps struct {
 	LockChange bool
 	// Options are OrderOptions set or selected by the user at order time.
 	Options map[string]string
+	// BeforeBroadcast, if set, is called with the receipts (coin IDs and
+	// contracts) of the signed swap transaction before it is broadcast. The
+	// caller can persist them so a crash during or right after the broadcast
+	// can't lose track of the contract. Returning an error aborts the swap
+	// without broadcasting. Supported by the btc (and clones) and dcr wallets.
+	BeforeBroadcast func(receipts []Receipt) error
 }
 
 // PrivateContract defines the parameters of a private swap.

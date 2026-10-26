@@ -52,7 +52,15 @@ type SwapContract struct {
 	Value      uint64
 	SecretHash []byte
 	LockTime   int64 // unix seconds
+	// Inputs, if set, are the funding coin IDs to spend. A retry after a
+	// crash must reuse the original inputs, so that a copy of the original
+	// transaction that may still exist can't also be mined (double spend).
+	Inputs [][]byte
 }
+
+// PreparedFunc is called by Initiate with the signed (not yet broadcast)
+// contract and its funding coin IDs. Returning an error aborts the broadcast.
+type PreparedFunc func(coin *SwapCoin, funding [][]byte) error
 
 // SwapCoin is an on-chain swap output or transaction.
 type SwapCoin struct {
@@ -72,7 +80,9 @@ type SwapAudit struct {
 // SwapWallet is the per-asset wallet functionality a swap needs. Core
 // implements it on top of asset.Wallet.
 type SwapWallet interface {
-	Initiate(ctx context.Context, c *SwapContract) (*SwapCoin, error)
+	// Initiate funds, signs and broadcasts a contract. prepared is called
+	// after signing and before broadcasting.
+	Initiate(ctx context.Context, c *SwapContract, prepared PreparedFunc) (*SwapCoin, error)
 	Audit(ctx context.Context, coinID, contract []byte) (*SwapAudit, error)
 	Confirmations(ctx context.Context, coinID, contract []byte) (confs uint32, spent bool, err error)
 	Redeem(ctx context.Context, coinID, contract, secret []byte) (*SwapCoin, error)
@@ -84,10 +94,12 @@ type SwapWallet interface {
 // Swap status values.
 const (
 	SwapNew         = "new"          // both: agreed, nothing on chain yet
+	SwapInitPending = "init_pending" // maker: own contract signed and saved, broadcast not confirmed
 	SwapInitSent    = "init_sent"    // maker: own contract broadcast
 	SwapPartAudited = "part_audited" // maker: taker contract audited
 	SwapRedeemed    = "redeemed"     // maker: taker contract redeemed
 	SwapInitAudited = "init_audited" // taker: maker contract audited
+	SwapPartPending = "part_pending" // taker: own contract signed and saved, broadcast not confirmed
 	SwapPartSent    = "part_sent"    // taker: own contract broadcast
 	SwapComplete    = "complete"     // both: done
 	SwapRefunded    = "refunded"     // own contract refunded
@@ -105,7 +117,17 @@ const (
 	HaltInit        = "init"        // maker never initiates
 	HaltParticipate = "participate" // taker never participates
 	HaltRedeem      = "redeem"      // maker never redeems (and stops talking)
+	HaltTakerRedeem = "taker_redeem" // taker never redeems
+	// HaltPreBroadcast saves the signed contract and then aborts before
+	// broadcasting, freezing the swap there (simulates a crash mid-initiate).
+	HaltPreBroadcast = "prebroadcast"
 )
+
+var errHalted = errors.New("halted before broadcast (debug)")
+
+// ErrFundingSpent is returned (wrapped) by SwapWallet.Initiate when a retry
+// with the saved funding coins is impossible because they have been spent.
+var ErrFundingSpent = errors.New("original funding coins unavailable")
 
 // SwapEvent is a timestamped log line kept in the swap record.
 type SwapEvent struct {
@@ -121,7 +143,8 @@ type SwapRecord struct {
 	Status      string      `json:"status"`
 	Reason      string      `json:"reason,omitempty"`
 	Updated     int64       `json:"updated"`
-	Secret      []byte      `json:"secret,omitempty"` // maker until revealed; SIMNET: stored in the clear
+	Secret      []byte      `json:"-"`                   // in memory only; on disk as EncSecret
+	EncSecret   []byte      `json:"encSecret,omitempty"` // AES-256-GCM(store key, secret, aad=match ID)
 	SecretHash  []byte      `json:"secretHash,omitempty"`
 	MakerSwap   *SwapCoin   `json:"makerSwap,omitempty"`
 	TakerSwap   *SwapCoin   `json:"takerSwap,omitempty"`
@@ -129,6 +152,9 @@ type SwapRecord struct {
 	TakerRedeem *SwapCoin   `json:"takerRedeem,omitempty"`
 	MakerRefund *SwapCoin   `json:"makerRefund,omitempty"`
 	TakerRefund *SwapCoin   `json:"takerRefund,omitempty"`
+	// Funding are the coin IDs funding our own contract, saved before the
+	// broadcast so a retry can reuse them.
+	Funding [][]byte    `json:"funding,omitempty"`
 	Events      []SwapEvent `json:"events"`
 }
 
@@ -196,33 +222,71 @@ type SwapConfig struct {
 // DefaultSwapConfig is for simnet.
 var DefaultSwapConfig = SwapConfig{SwapConfs: 1, SafetyMargin: 20 * time.Second, ResendInterval: 5 * time.Second}
 
-// SwapStore persists swap records, one JSON file per match.
-type SwapStore struct{ dir string }
+// SwapStore persists swap records, one JSON file per match. Swap secrets are
+// encrypted with a 32-byte store key (Core keeps that key encrypted with the
+// app crypter); everything else is public on-chain data.
+type SwapStore struct {
+	dir string
+	key []byte
+}
 
 // NewSwapStore creates the directory if needed.
-func NewSwapStore(dir string) (*SwapStore, error) {
+func NewSwapStore(dir string, key []byte) (*SwapStore, error) {
+	if len(key) != 32 {
+		return nil, errors.New("swap store key must be 32 bytes")
+	}
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return nil, err
 	}
-	return &SwapStore{dir: dir}, nil
+	return &SwapStore{dir: dir, key: key}, nil
+}
+
+// Active is true until the swap is complete, refunded or abandoned.
+func (r *SwapRecord) Active() bool {
+	switch r.Status {
+	case SwapComplete, SwapRefunded, SwapAbandoned:
+		return false
+	}
+	return true
 }
 
 func (s *SwapStore) path(id MatchID) string { return filepath.Join(s.dir, id.String()+".json") }
 
-// Save atomically writes a record.
+// Save atomically and durably writes a record.
 func (s *SwapStore) Save(r *SwapRecord) error {
-	b, err := json.MarshalIndent(r, "", "  ")
+	rec := *r
+	rec.EncSecret = nil
+	if len(r.Secret) > 0 {
+		enc, err := sealAES(s.key, r.Secret, r.Match.ID[:])
+		if err != nil {
+			return err
+		}
+		rec.EncSecret = enc
+	}
+	b, err := json.MarshalIndent(&rec, "", "  ")
 	if err != nil {
 		return err
 	}
 	tmp := s.path(r.Match.ID) + ".tmp"
-	if err := os.WriteFile(tmp, b, 0o600); err != nil {
+	f, err := os.OpenFile(tmp, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
+	if err != nil {
+		return err
+	}
+	if _, err := f.Write(b); err != nil {
+		f.Close()
+		return err
+	}
+	if err := f.Sync(); err != nil {
+		f.Close()
+		return err
+	}
+	if err := f.Close(); err != nil {
 		return err
 	}
 	return os.Rename(tmp, s.path(r.Match.ID))
 }
 
-// Load reads all records.
+// Load reads and decrypts all records.
 func (s *SwapStore) Load() ([]*SwapRecord, error) {
 	files, err := filepath.Glob(filepath.Join(s.dir, "*.json"))
 	if err != nil {
@@ -237,6 +301,13 @@ func (s *SwapStore) Load() ([]*SwapRecord, error) {
 		var r SwapRecord
 		if err := json.Unmarshal(b, &r); err != nil {
 			return nil, fmt.Errorf("%s: %w", f, err)
+		}
+		if len(r.EncSecret) > 0 {
+			secret, err := openAES(s.key, r.EncSecret, r.Match.ID[:])
+			if err != nil {
+				return nil, fmt.Errorf("%s: secret decryption failed: %w", f, err)
+			}
+			r.Secret, r.EncSecret = secret, nil
 		}
 		recs = append(recs, &r)
 	}
@@ -283,7 +354,7 @@ func (ob *OrderBooks) EnableSwaps(cfg SwapConfig, wallets func(assetID uint32) (
 // SetSwapHalt sets a debug halt point (simnet tests).
 func (ob *OrderBooks) SetSwapHalt(stage string) error {
 	switch stage {
-	case HaltNone, HaltInit, HaltParticipate, HaltRedeem:
+	case HaltNone, HaltInit, HaltParticipate, HaltRedeem, HaltTakerRedeem, HaltPreBroadcast:
 	default:
 		return fmt.Errorf("unknown halt stage %q", stage)
 	}
@@ -292,18 +363,6 @@ func (ob *OrderBooks) SetSwapHalt(stage string) error {
 		return errors.New("swaps not enabled")
 	}
 	sw.halt.Store(stage)
-	return nil
-}
-
-// SetLockTimes changes the swap lock durations (simnet tests). Both sides
-// must use the same values, since proposals are checked against policy.
-func (ob *OrderBooks) SetLockTimes(maker, taker time.Duration) error {
-	if taker <= 0 || maker <= taker {
-		return errors.New("need 0 < taker lock < maker lock")
-	}
-	ob.mtx.Lock()
-	ob.cfg.MakerLockTime, ob.cfg.TakerLockTime = maker, taker
-	ob.mtx.Unlock()
 	return nil
 }
 
@@ -565,14 +624,19 @@ func (ob *OrderBooks) stepMaker(ctx context.Context, sw *swapper, s *swapState, 
 			r.Secret, r.SecretHash = secret, h[:]
 			ob.persist(sw, s) // secret is saved before it is used on chain
 		}
-		coin, err := sendW.Initiate(ctx, &SwapContract{Address: m.TakerAddr, Value: m.MakerSends(), SecretHash: r.SecretHash, LockTime: m.MakerLockTime})
-		if err != nil {
-			ob.swapWarn(sw, s, "initiate error (will retry): %v", err)
+		fallthrough
+	case SwapInitPending:
+		if r.Status == SwapInitPending && ob.lockExpired(ctx, sendW, m.MakerLockTime) {
+			// Only possible if the contract was broadcast after all and is
+			// just not visible; try to refund it.
+			ob.makerRefund(ctx, sw, s, sendW)
 			return
 		}
-		r.MakerSwap = coin
-		ob.setSwapStatus(sw, s, SwapInitSent, "initiated %d atoms of asset %d to %s, lock %d, tx %s",
-			m.MakerSends(), m.TakerReceives(), m.TakerAddr, m.MakerLockTime, coin.TxID)
+		sc := &SwapContract{Address: m.TakerAddr, Value: m.MakerSends(), SecretHash: r.SecretHash, LockTime: m.MakerLockTime}
+		if !ob.sendContract(ctx, sw, s, sendW, sc, &r.MakerSwap, SwapInitPending, SwapInitSent, halt,
+			fmt.Sprintf("initiated %d atoms of asset %d to %s, lock %d", m.MakerSends(), m.TakerReceives(), m.TakerAddr, m.MakerLockTime), m.TakerLockTime) {
+			return
+		}
 		s.lastSend = time.Time{}
 		fallthrough
 	case SwapInitSent:
@@ -656,6 +720,69 @@ func (ob *OrderBooks) makerRefund(ctx context.Context, sw *swapper, s *swapState
 	ob.setSwapStatus(sw, s, SwapRefunded, "maker lock time expired, refunded own contract, tx %s", coin.TxID)
 }
 
+func (ob *OrderBooks) takerRefund(ctx context.Context, sw *swapper, s *swapState, w SwapWallet) {
+	r := s.rec
+	coin, err := w.Refund(ctx, r.TakerSwap.CoinID, r.TakerSwap.Contract)
+	if err != nil {
+		ob.swapWarn(sw, s, "refund error (will retry): %v", err)
+		return
+	}
+	r.TakerRefund = coin
+	ob.setSwapStatus(sw, s, SwapRefunded, "taker lock time expired, refunded own contract, tx %s", coin.TxID)
+}
+
+// sendContract creates our own contract (maker initiation or taker
+// participation) without a crash gap: the signed contract and its funding
+// coins are persisted (pendingStatus) before broadcast. In pendingStatus
+// (restart, or a failed broadcast) it first looks for the saved contract on
+// chain; if it isn't there, it re-initiates with the same funding coins, which
+// fails safely if they were already spent. Returns true once sentStatus is set.
+func (ob *OrderBooks) sendContract(ctx context.Context, sw *swapper, s *swapState, w SwapWallet, sc *SwapContract,
+	own **SwapCoin, pendingStatus, sentStatus, halt, desc string, deadline int64) bool {
+	r := s.rec
+	if r.Status == pendingStatus {
+		// Only a mined tx is proof here: SPV wallets report an unknown
+		// output as 0 confirmations without error ("maybe in mempool").
+		if *own != nil {
+			if confs, _, err := w.Confirmations(ctx, (*own).CoinID, (*own).Contract); err == nil && confs > 0 {
+				ob.setSwapStatus(sw, s, sentStatus, "%s; saved contract tx %s found on chain (recovered)", desc, (*own).TxID)
+				return true
+			}
+		}
+		if halt == HaltPreBroadcast {
+			return false // frozen until restart
+		}
+		if ob.now().Add(sw.cfg.SafetyMargin).Unix() >= deadline {
+			ob.swapWarn(sw, s, "saved contract not found on chain and too late to retry")
+			return false
+		}
+		sc.Inputs = r.Funding
+	}
+	coin, err := w.Initiate(ctx, sc, func(prep *SwapCoin, funding [][]byte) error {
+		*own, r.Funding = prep, funding
+		r.Status, r.Reason = pendingStatus, ""
+		ob.swapEvent(s, "%s: signed contract tx %s saved before broadcast (funding %d coins)", pendingStatus, prep.TxID, len(funding))
+		ob.persist(sw, s)
+		if halt == HaltPreBroadcast {
+			return errHalted
+		}
+		return nil
+	})
+	if err != nil {
+		if r.Status == pendingStatus && *own != nil && errors.Is(err, ErrFundingSpent) {
+			// Our funding coins are gone, so the saved contract tx (the only
+			// tx we signed with them) was broadcast and is in the mempool.
+			ob.setSwapStatus(sw, s, sentStatus, "%s; funding coins already spent by saved contract tx %s (recovered)", desc, (*own).TxID)
+			return true
+		}
+		ob.swapWarn(sw, s, "contract error (will retry): %v", err)
+		return false
+	}
+	*own = coin
+	ob.setSwapStatus(sw, s, sentStatus, "%s, tx %s", desc, coin.TxID)
+	return true
+}
+
 func (ob *OrderBooks) stepTaker(ctx context.Context, sw *swapper, s *swapState, halt string, init *SwapInitMsg, redeem *SwapRedeemMsg) {
 	r := s.rec
 	m := &r.Match
@@ -705,14 +832,17 @@ func (ob *OrderBooks) stepTaker(ctx context.Context, sw *swapper, s *swapState, 
 		if err != nil || confs < sw.cfg.SwapConfs {
 			return
 		}
-		coin, err := sendW.Initiate(ctx, &SwapContract{Address: m.MakerAddr, Value: m.TakerSends(), SecretHash: r.SecretHash, LockTime: m.TakerLockTime})
-		if err != nil {
-			ob.swapWarn(sw, s, "participate error (will retry): %v", err)
+		fallthrough
+	case SwapPartPending:
+		if r.Status == SwapPartPending && ob.lockExpired(ctx, sendW, m.TakerLockTime) {
+			ob.takerRefund(ctx, sw, s, sendW)
 			return
 		}
-		r.TakerSwap = coin
-		ob.setSwapStatus(sw, s, SwapPartSent, "participated %d atoms of asset %d to %s, lock %d, tx %s",
-			m.TakerSends(), m.MakerReceives(), m.MakerAddr, m.TakerLockTime, coin.TxID)
+		sc := &SwapContract{Address: m.MakerAddr, Value: m.TakerSends(), SecretHash: r.SecretHash, LockTime: m.TakerLockTime}
+		if !ob.sendContract(ctx, sw, s, sendW, sc, &r.TakerSwap, SwapPartPending, SwapPartSent, halt,
+			fmt.Sprintf("participated %d atoms of asset %d to %s, lock %d", m.TakerSends(), m.MakerReceives(), m.MakerAddr, m.TakerLockTime), m.TakerLockTime) {
+			return
+		}
 		s.lastSend = time.Time{}
 		fallthrough
 	case SwapPartSent:
@@ -737,13 +867,7 @@ func (ob *OrderBooks) stepTaker(ctx context.Context, sw *swapper, s *swapState, 
 		}
 		if secret == nil {
 			if ob.lockExpired(ctx, sendW, m.TakerLockTime) {
-				coin, err := sendW.Refund(ctx, r.TakerSwap.CoinID, r.TakerSwap.Contract)
-				if err != nil {
-					ob.swapWarn(sw, s, "refund error (will retry): %v", err)
-					return
-				}
-				r.TakerRefund = coin
-				ob.setSwapStatus(sw, s, SwapRefunded, "taker lock time expired, refunded own contract, tx %s", coin.TxID)
+				ob.takerRefund(ctx, sw, s, sendW)
 				return
 			}
 			if ob.resendDue(sw, s) {
@@ -752,6 +876,9 @@ func (ob *OrderBooks) stepTaker(ctx context.Context, sw *swapper, s *swapState, 
 			return
 		}
 		r.Secret = secret
+		if halt == HaltTakerRedeem {
+			return
+		}
 		coin, err := recvW.Redeem(ctx, r.MakerSwap.CoinID, r.MakerSwap.Contract, secret)
 		if err != nil {
 			ob.swapWarn(sw, s, "redeem error (will retry): %v", err)
@@ -873,7 +1000,8 @@ func (ob *OrderBooks) handleSwapMsg(from peer.ID, typ string, payload []byte) {
 	if stored {
 		ob.log.Infof("Swap %s: received %s from %s", id, typ, from)
 		sw.poke()
-	} else if typ == swapMsgRedeem {
+	}
+	if typ == swapMsgRedeem {
 		// Duplicate secret after we finished: re-ack.
 		if s.mtx.TryLock() { // don't block the inbox on a running step
 			if s.rec.Status == SwapComplete && s.rec.TakerRedeem != nil {

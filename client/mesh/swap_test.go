@@ -28,6 +28,16 @@ type fakeChain struct {
 	offset    time.Duration
 	// tamper, if set, changes the value of contracts created by owner.
 	tamper string
+	// crash simulates a process crash inside Initiate (once per owner).
+	crash        map[string]string
+	onCrash      func()
+	spentFunding map[string]bool
+	// spv makes Confirmations behave like an SPV wallet: 0 confirmations
+	// and no error, whether or not the output exists.
+	spv bool
+	// dead owners' wallets fail every Initiate: a crashed process does
+	// nothing more, even if test goroutines are still winding down.
+	dead map[string]bool
 }
 
 type fakeContract struct {
@@ -42,8 +52,15 @@ type fakeContract struct {
 	secret     []byte
 }
 
+func (c *fakeChain) setSPV(spv bool) {
+	c.mtx.Lock()
+	c.spv = spv
+	c.mtx.Unlock()
+}
+
 func newFakeChain() *fakeChain {
-	return &fakeChain{contracts: make(map[string]*fakeContract), balances: make(map[string]int64)}
+	return &fakeChain{contracts: make(map[string]*fakeContract), balances: make(map[string]int64),
+		crash: make(map[string]string), spentFunding: make(map[string]bool), dead: make(map[string]bool)}
 }
 
 func (c *fakeChain) advance(d time.Duration) {
@@ -66,9 +83,24 @@ type fakeSwapWallet struct {
 
 func (w *fakeSwapWallet) key(who string) string { return fmt.Sprintf("%d/%s", w.asset, who) }
 
-func (w *fakeSwapWallet) Initiate(_ context.Context, sc *SwapContract) (*SwapCoin, error) {
+func (w *fakeSwapWallet) Initiate(_ context.Context, sc *SwapContract, prepared PreparedFunc) (*SwapCoin, error) {
 	w.c.mtx.Lock()
-	defer w.c.mtx.Unlock()
+	if w.c.dead[w.owner] {
+		w.c.mtx.Unlock()
+		return nil, errors.New("process is dead")
+	}
+	funding := sc.Inputs
+	if len(funding) == 0 {
+		w.c.n++
+		f := sha256.Sum256(append([]byte("fund"), binary.BigEndian.AppendUint32(nil, w.c.n)...))
+		funding = [][]byte{append(f[:], 0, 0, 0, 0)}
+	}
+	for _, f := range funding {
+		if w.c.spentFunding[string(f)] {
+			w.c.mtx.Unlock()
+			return nil, fmt.Errorf("%w: funding coin spent", ErrFundingSpent)
+		}
+	}
 	w.c.n++
 	coinID := make([]byte, 36)
 	h := sha256.Sum256(binary.BigEndian.AppendUint32(nil, w.c.n))
@@ -78,10 +110,50 @@ func (w *fakeSwapWallet) Initiate(_ context.Context, sc *SwapContract) (*SwapCoi
 	if w.c.tamper == w.owner {
 		value--
 	}
+	crash := w.c.crash[w.owner]
+	delete(w.c.crash, w.owner)
+	w.c.mtx.Unlock()
+
+	coin := &SwapCoin{CoinID: coinID, Contract: contract, TxID: coinTxID(coinID)}
+	if err := prepared(coin, funding); err != nil {
+		return nil, err
+	}
+	if crash == crashBeforeBroadcast {
+		return nil, errors.New("crashed before broadcast")
+	}
+
+	w.c.mtx.Lock()
+	defer w.c.mtx.Unlock()
+	for _, f := range funding {
+		w.c.spentFunding[string(f)] = true
+	}
 	w.c.contracts[string(coinID)] = &fakeContract{asset: w.asset, contract: contract, addr: sc.Address, owner: w.owner,
 		value: value, secretHash: sc.SecretHash, lockTime: sc.LockTime}
 	w.c.balances[w.key(w.owner)] -= int64(value)
-	return &SwapCoin{CoinID: coinID, Contract: contract, TxID: coinTxID(coinID)}, nil
+	if crash == crashAfterBroadcast {
+		if w.c.onCrash != nil {
+			w.c.onCrash()
+		}
+		return nil, errors.New("crashed after broadcast")
+	}
+	return coin, nil
+}
+
+const (
+	crashBeforeBroadcast = "before"
+	crashAfterBroadcast  = "after"
+)
+
+func (c *fakeChain) contractsBy(owner string) int {
+	c.mtx.Lock()
+	defer c.mtx.Unlock()
+	var n int
+	for _, fc := range c.contracts {
+		if fc.owner == owner {
+			n++
+		}
+	}
+	return n
 }
 
 func (w *fakeSwapWallet) lookup(coinID, contract []byte) (*fakeContract, error) {
@@ -105,9 +177,18 @@ func (w *fakeSwapWallet) Audit(_ context.Context, coinID, contract []byte) (*Swa
 func (w *fakeSwapWallet) Confirmations(_ context.Context, coinID, contract []byte) (uint32, bool, error) {
 	w.c.mtx.Lock()
 	defer w.c.mtx.Unlock()
+	if w.c.dead[w.owner] {
+		return 0, false, errors.New("process is dead")
+	}
 	fc, err := w.lookup(coinID, contract)
 	if err != nil {
+		if w.c.spv {
+			return 0, false, nil
+		}
 		return 0, false, err
+	}
+	if w.c.spv {
+		return 0, fc.spent != "", nil
 	}
 	return 1, fc.spent != "", nil
 }
@@ -173,6 +254,8 @@ func (w *fakeSwapWallet) LockTimeExpired(_ context.Context, lockTime int64) (boo
 var fastSwapCfg = SwapConfig{SwapConfs: 1, SafetyMargin: time.Second, ResendInterval: 30 * time.Millisecond}
 
 func walletOwner(ob *OrderBooks) string { return ob.self.String()[len(ob.self.String())-6:] }
+
+var testStoreKey = bytes.Repeat([]byte{7}, 32)
 
 func enableFakeSwaps(t *testing.T, ob *OrderBooks, chain *fakeChain, store *SwapStore) context.CancelFunc {
 	t.Helper()
@@ -366,7 +449,7 @@ func TestSwapResume(t *testing.T) {
 	m, obs := newNegotiators(t, 2)
 	maker, taker := obs[0], obs[1]
 	chain := newFakeChain()
-	store, err := NewSwapStore(t.TempDir())
+	store, err := NewSwapStore(t.TempDir(), testStoreKey)
 	if err != nil {
 		t.Fatal(err)
 	}

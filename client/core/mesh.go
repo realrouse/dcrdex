@@ -2,12 +2,16 @@ package core
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"time"
 
 	meshpkg "decred.org/dcrdex/client/mesh"
 	"decred.org/dcrdex/dex"
+	"decred.org/dcrdex/dex/encode"
+	"decred.org/dcrdex/dex/encrypt"
 )
 
 func (c *Core) coreMesh() *Mesh {
@@ -21,7 +25,33 @@ func (c *Core) coreMesh() *Mesh {
 
 }
 
-func (c *Core) connectMesh(ctx context.Context) {
+// meshSwapStoreKey loads (or creates) the 32-byte swap store key, kept on disk
+// encrypted with the app crypter.
+func meshSwapStoreKey(path string, crypter encrypt.Crypter) ([]byte, error) {
+	if enc, err := os.ReadFile(path); err == nil {
+		key, err := crypter.Decrypt(enc)
+		if err != nil {
+			return nil, fmt.Errorf("decrypting swap store key: %w", err)
+		}
+		return key, nil
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return nil, err
+	}
+	key := encode.RandomBytes(32)
+	enc, err := crypter.Encrypt(key)
+	if err != nil {
+		return nil, err
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return nil, err
+	}
+	if err := os.WriteFile(path, enc, 0o600); err != nil {
+		return nil, err
+	}
+	return key, nil
+}
+
+func (c *Core) connectMesh(ctx context.Context, crypter encrypt.Crypter) {
 	if c.net != dex.Simnet || !c.cfg.Mesh {
 		return
 	}
@@ -62,10 +92,18 @@ func (c *Core) connectMesh(ctx context.Context) {
 	})
 
 	// Atomic swaps for agreed matches (P3), persisted next to the DB.
-	store, serr := meshpkg.NewSwapStore(filepath.Join(filepath.Dir(c.cfg.DBPath), "mesh", "swaps"))
+	// The secrets in it are encrypted with a key that is itself encrypted
+	// with the app crypter, so they are only readable after login.
+	meshDir := filepath.Join(filepath.Dir(c.cfg.DBPath), "mesh")
+	var store *meshpkg.SwapStore
+	key, serr := meshSwapStoreKey(filepath.Join(meshDir, "swapstore.key"), crypter)
+	if serr == nil {
+		store, serr = meshpkg.NewSwapStore(filepath.Join(meshDir, "swaps"), key)
+	}
 	if serr != nil {
-		c.log.Errorf("Mesh swap store error (swaps not persisted): %v", serr)
-		store = nil
+		// Never run swaps without persistence.
+		c.log.Errorf("Mesh swap store error, swaps disabled: %v", serr)
+		return
 	}
 	mesh.EnableSwaps(meshpkg.DefaultSwapConfig, func(assetID uint32) (meshpkg.SwapWallet, error) {
 		return &meshSwapWallet{c: c, assetID: assetID}, nil
@@ -75,6 +113,9 @@ func (c *Core) connectMesh(ctx context.Context) {
 	} else if n > 0 {
 		c.log.Infof("Resuming %d mesh swaps", n)
 	}
+	// Login only unlocks wallets with active DEX trades. Resumed mesh swaps
+	// need theirs unlocked too, while the crypter is still open.
+	c.unlockMeshSwapWallets(crypter, mesh.Swaps())
 	go mesh.RunSwaps(ctx, 3*time.Second)
 
 	// SIMNET-ONLY debug API for driving mesh order books from test scripts.
@@ -106,5 +147,27 @@ func (c *Core) handleMeshUpdate(u any) {
 		c.log.Debugf("Mesh fee rate update: asset %d = %d", u.NetAssetID, u.FeeRate)
 	default:
 		c.log.Warnf("Unknown mesh update type %T", u)
+	}
+}
+
+// unlockMeshSwapWallets connects and unlocks the wallets of both assets of
+// every unfinished mesh swap.
+func (c *Core) unlockMeshSwapWallets(crypter encrypt.Crypter, recs []*meshpkg.SwapRecord) {
+	need := make(map[uint32]bool)
+	for _, r := range recs {
+		if r.Active() {
+			need[r.Match.Market.Base] = true
+			need[r.Match.Market.Quote] = true
+		}
+	}
+	for assetID := range need {
+		w, found := c.wallet(assetID)
+		if !found {
+			c.log.Errorf("No %s wallet for a resumed mesh swap", dex.BipIDSymbol(assetID))
+			continue
+		}
+		if err := c.connectAndUnlock(crypter, w); err != nil {
+			c.log.Errorf("Error unlocking %s wallet for resumed mesh swaps: %v", dex.BipIDSymbol(assetID), err)
+		}
 	}
 }

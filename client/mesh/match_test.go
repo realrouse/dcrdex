@@ -240,8 +240,6 @@ var fastCfg = NegotiationConfig{
 	RetryInterval:      30 * time.Millisecond,
 	ProposalTimeout:    400 * time.Millisecond,
 	ReservationTimeout: 400 * time.Millisecond,
-	MakerLockTime:      2 * time.Hour,
-	TakerLockTime:      time.Hour,
 	Fees:               DefaultNegotiationConfig.Fees,
 }
 

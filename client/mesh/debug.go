@@ -27,7 +27,8 @@ import (
 //	GET  /mesh/matches                -> {"matches":[...]}
 //	GET  /mesh/swaps                  -> {"swaps":[...]} (secrets omitted)
 //	POST /mesh/swap/halt {"stage":"redeem"}  ("" clears; init|participate|redeem)
-//	POST /mesh/config {"makerLockSec":240,"takerLockSec":120}
+//	POST /mesh/config {"market":"dcr_btc","makerLockSec":240,"takerLockSec":120}  (lock policy override)
+//	GET  /mesh/policy?market=dcr_btc  -> {"makerLockSec":...,"takerLockSec":...}
 type DebugServer struct {
 	ob     *OrderBooks
 	peerID func() string
@@ -237,18 +238,37 @@ func (s *DebugServer) Handler(ctx context.Context) http.Handler {
 	})
 	mux.HandleFunc("POST /mesh/config", func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
-			MakerLockSec int64 `json:"makerLockSec"`
-			TakerLockSec int64 `json:"takerLockSec"`
+			Market       string `json:"market"`
+			MakerLockSec int64  `json:"makerLockSec"`
+			TakerLockSec int64  `json:"takerLockSec"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			writeErr(w, http.StatusBadRequest, err)
 			return
 		}
-		if err := s.ob.SetLockTimes(time.Duration(req.MakerLockSec)*time.Second, time.Duration(req.TakerLockSec)*time.Second); err != nil {
+		if req.Market == "" {
+			req.Market = "dcr_btc"
+		}
+		m, err := ParseMarket(req.Market)
+		if err != nil {
+			writeErr(w, http.StatusBadRequest, err)
+			return
+		}
+		p := LockPolicy{Maker: time.Duration(req.MakerLockSec) * time.Second, Taker: time.Duration(req.TakerLockSec) * time.Second}
+		if err := s.ob.SetLockPolicy(m, p); err != nil {
 			writeErr(w, http.StatusBadRequest, err)
 			return
 		}
 		writeJSON(w, http.StatusOK, req)
+	})
+	mux.HandleFunc("GET /mesh/policy", func(w http.ResponseWriter, r *http.Request) {
+		m, err := ParseMarket(r.URL.Query().Get("market"))
+		if err != nil {
+			writeErr(w, http.StatusBadRequest, err)
+			return
+		}
+		p := s.ob.LockPolicy(m)
+		writeJSON(w, http.StatusOK, map[string]int64{"makerLockSec": int64(p.Maker / time.Second), "takerLockSec": int64(p.Taker / time.Second)})
 	})
 	mux.HandleFunc("GET /mesh/matches", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]any{"matches": s.ob.Matches()})

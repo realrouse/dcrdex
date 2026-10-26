@@ -3968,6 +3968,12 @@ func (btc *baseWallet) Swap(ctx context.Context, swaps *asset.Swaps) ([]asset.Re
 		}
 	}
 
+	if swaps.BeforeBroadcast != nil {
+		if err := swaps.BeforeBroadcast(receipts); err != nil {
+			return nil, nil, 0, fmt.Errorf("swap aborted before broadcast: %w", err)
+		}
+	}
+
 	// Save to cache before broadcast for recovery on timeout/retry.
 	btc.swapCache.Put(cacheKey, &swapCacheEntry{
 		signedTx:   msgTx,

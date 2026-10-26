@@ -115,10 +115,6 @@ func (ob *OrderBooks) MatchRecord(id MatchID) (*MatchRecord, bool) {
 	return st.record(), true
 }
 
-func (ob *OrderBooks) lockTimes(stamp int64) (maker, taker int64) {
-	s := stamp / 1000
-	return s + int64(ob.cfg.MakerLockTime/time.Second), s + int64(ob.cfg.TakerLockTime/time.Second)
-}
 
 func (ob *OrderBooks) receiveAddr(assetID uint32) string {
 	ob.mtx.RLock()
@@ -216,7 +212,11 @@ func (ob *OrderBooks) Propose(ctx context.Context, bo *BookOrder, qty, rate uint
 	}
 	stamp := ob.now().UnixMilli()
 	nonce := binary.BigEndian.Uint64(encode.RandomBytes(8))
-	mlt, tlt := ob.lockTimes(stamp)
+	policy := ob.LockPolicy(bo.Market)
+	if err := policy.Validate(); err != nil {
+		return MatchID{}, nil, fmt.Errorf("lock policy for market %d-%d: %w", bo.Market.Base, bo.Market.Quote, err)
+	}
+	mlt, tlt := policy.lockTimes(stamp)
 	p := &MatchProposal{
 		MatchID:        computeMatchID(bo.ID(), ob.self.String(), nonce, stamp),
 		MakerOrderID:   bo.ID(),
@@ -325,8 +325,8 @@ func (ob *OrderBooks) checkProposal(p *MatchProposal, oo *ownOrder) string {
 	case p.Stamp > now.Add(MaxClockSkew).UnixMilli() || p.Stamp < now.Add(-MaxInboxMsgAge).UnixMilli():
 		return "proposal stamp out of range"
 	}
-	if mlt, tlt := ob.lockTimes(p.Stamp); p.MakerLockTime != mlt || p.TakerLockTime != tlt {
-		return "lock times do not match policy"
+	if mlt, tlt := ob.policyLocked(oo.ord.Market).lockTimes(p.Stamp); p.MakerLockTime != mlt || p.TakerLockTime != tlt {
+		return "lock times do not match the market lock policy"
 	}
 	if oo.available() < oo.ord.LotSize {
 		return "insufficient remaining quantity"

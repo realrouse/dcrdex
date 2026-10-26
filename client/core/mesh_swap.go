@@ -6,10 +6,12 @@ package core
 import (
 	"context"
 	"errors"
+	"fmt"
 	"time"
 
 	"decred.org/dcrdex/client/asset"
 	meshpkg "decred.org/dcrdex/client/mesh"
+	"decred.org/dcrdex/dex"
 )
 
 // meshSwapWallet adapts a core wallet to the mesh swap engine
@@ -50,20 +52,37 @@ func (w *meshSwapWallet) coin(coinID []byte) *meshpkg.SwapCoin {
 	return &meshpkg.SwapCoin{CoinID: coinID, TxID: txid}
 }
 
-func (w *meshSwapWallet) Initiate(ctx context.Context, sc *meshpkg.SwapContract) (*meshpkg.SwapCoin, error) {
+func (w *meshSwapWallet) Initiate(ctx context.Context, sc *meshpkg.SwapContract, prepared meshpkg.PreparedFunc) (*meshpkg.SwapCoin, error) {
 	xw, err := w.wallet()
 	if err != nil {
 		return nil, err
 	}
 	feeRate := w.feeRate()
-	coins, _, _, err := xw.FundOrder(&asset.Order{
-		Value:         sc.Value,
-		MaxSwapCount:  1,
-		MaxFeeRate:    feeRate,
-		FeeSuggestion: feeRate,
-	})
-	if err != nil {
-		return nil, err
+	var coins asset.Coins
+	if len(sc.Inputs) > 0 {
+		// Retry after a crash: the same inputs or nothing. FundingCoins fails
+		// if any of them has been spent (e.g. by the original swap tx).
+		ids := make([]dex.Bytes, len(sc.Inputs))
+		for i, id := range sc.Inputs {
+			ids[i] = id
+		}
+		if coins, err = xw.FundingCoins(ids); err != nil {
+			return nil, fmt.Errorf("%w: %v", meshpkg.ErrFundingSpent, err)
+		}
+	} else {
+		coins, _, _, err = xw.FundOrder(&asset.Order{
+			Value:         sc.Value,
+			MaxSwapCount:  1,
+			MaxFeeRate:    feeRate,
+			FeeSuggestion: feeRate,
+		})
+		if err != nil {
+			return nil, err
+		}
+	}
+	funding := make([][]byte, len(coins))
+	for i, c := range coins {
+		funding[i] = c.ID()
 	}
 	receipts, _, fees, err := xw.Swap(ctx, &asset.Swaps{
 		Inputs: coins,
@@ -74,6 +93,14 @@ func (w *meshSwapWallet) Initiate(ctx context.Context, sc *meshpkg.SwapContract)
 			LockTime:   uint64(sc.LockTime),
 		}},
 		FeeRate: feeRate,
+		BeforeBroadcast: func(receipts []asset.Receipt) error {
+			if len(receipts) != 1 {
+				return errors.New("expected 1 swap receipt")
+			}
+			c := w.coin(receipts[0].Coin().ID())
+			c.Contract = receipts[0].Contract()
+			return prepared(c, funding)
+		},
 	})
 	if err != nil {
 		if rerr := xw.ReturnCoins(coins); rerr != nil {

@@ -4886,7 +4886,7 @@ func (c *Core) Login(pw []byte) error {
 		c.connectWallets(crypter) // initialize reserves
 		c.notify(newLoginNote("Resuming active trades..."))
 		c.resolveActiveTrades(crypter)
-		c.connectMesh(c.ctx)
+		c.connectMesh(c.ctx, crypter)
 		c.notify(newLoginNote("Connecting to DEX servers..."))
 		c.initializeDEXConnections(crypter)
 	}

@@ -48,11 +48,7 @@ type NegotiationConfig struct {
 	// ReservationTimeout is how long a maker holds quantity for an accepted
 	// match while waiting for the taker's confirm.
 	ReservationTimeout time.Duration
-	// MakerLockTime and TakerLockTime are the swap contract lock durations
-	// (from the proposal stamp) that both sides record for P3.
-	MakerLockTime time.Duration
-	TakerLockTime time.Duration
-	Fees          FeeParameters
+	Fees               FeeParameters
 }
 
 // DefaultNegotiationConfig is for simnet.
@@ -60,8 +56,6 @@ var DefaultNegotiationConfig = NegotiationConfig{
 	RetryInterval:      2 * time.Second,
 	ProposalTimeout:    20 * time.Second,
 	ReservationTimeout: 20 * time.Second,
-	MakerLockTime:      2 * time.Hour,
-	TakerLockTime:      time.Hour,
 	Fees:               FeeParameters{MaxFeeExposure: 1, BaseFeesPerMatch: 1, QuoteFeesPerMatch: 1},
 }
 
@@ -85,23 +79,26 @@ type OrderBooks struct {
 	own     map[OrderID]*ownOrder
 	matches map[MatchID]*matchState
 	swapper *swapper // nil until EnableSwaps
+	// policies are lock policy overrides (simnet debug API).
+	policies map[Market]LockPolicy
 }
 
 // NewOrderBooks constructs an OrderBooks.
 func NewOrderBooks(ps pubSub, priv libp2pcrypto.PrivKey, encPriv *secp256k1.PrivateKey, log dex.Logger) *OrderBooks {
 	self, _ := peer.IDFromPrivateKey(priv)
 	return &OrderBooks{
-		ps:      ps,
-		priv:    priv,
-		encPriv: encPriv,
-		self:    self,
-		log:     log,
-		now:     time.Now,
-		cfg:     DefaultNegotiationConfig,
-		addr:    func(uint32) (string, error) { return "", errors.New("no address source") },
-		books:   make(map[Market]*Book),
-		own:     make(map[OrderID]*ownOrder),
-		matches: make(map[MatchID]*matchState),
+		ps:       ps,
+		priv:     priv,
+		encPriv:  encPriv,
+		self:     self,
+		log:      log,
+		now:      time.Now,
+		cfg:      DefaultNegotiationConfig,
+		addr:     func(uint32) (string, error) { return "", errors.New("no address source") },
+		books:    make(map[Market]*Book),
+		own:      make(map[OrderID]*ownOrder),
+		matches:  make(map[MatchID]*matchState),
+		policies: make(map[Market]LockPolicy),
 	}
 }
 
