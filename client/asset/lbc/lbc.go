@@ -344,6 +344,12 @@ func newRPCWallet(cfg *asset.WalletConfig, logger dex.Logger, network dex.Networ
 	cloneCFG.SingularWallet = true
 	cloneCFG.OptionalWalletInfo = true
 	cloneCFG.UnlockSpends = true
+	// lbcd's getblockheader result has no "mediantime" field (btcd
+	// heritage), so the RPC wallet would read a median time of 0 (1970) and
+	// LockTimeExpired would never return true, blocking every refund. Compute
+	// the median time past from the last 11 block headers instead. The Native
+	// SPV wallet already computes it from its own headers.
+	cloneCFG.ManualMedianTime = true
 
 	w, err = btc.BTCCloneWallet(cloneCFG)
 	return w, err
