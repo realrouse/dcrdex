@@ -28,6 +28,8 @@ import (
 //	GET  /mesh/swaps                  -> {"swaps":[...]} (secrets omitted)
 //	POST /mesh/swap/halt {"stage":"redeem"}  ("" clears; init|participate|redeem)
 //	POST /mesh/config {"market":"dcr_btc","makerLockSec":240,"takerLockSec":120}  (lock policy override)
+//	POST /mesh/swap/tamper {"mode":"value"}  (adversary: value|secrethash|locktime|recipient, "" clears)
+//	GET  /mesh/inbox/dropped          -> {"dropped": n}  (rate-limited or replayed inbox messages)
 //	GET  /mesh/policy?market=dcr_btc  -> {"makerLockSec":...,"takerLockSec":...}
 type DebugServer struct {
 	ob     *OrderBooks
