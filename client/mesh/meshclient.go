@@ -6,9 +6,8 @@ package mesh
 import (
 	"bytes"
 	"context"
-	"encoding/binary"
+	"errors"
 	"fmt"
-	"math"
 	"math/big"
 	"strings"
 	"sync"
@@ -19,7 +18,6 @@ import (
 	"decred.org/dcrdex/dex/encode"
 	"github.com/bisoncraft/mesh/bond"
 	mc "github.com/bisoncraft/mesh/client"
-	"github.com/bisoncraft/mesh/protocols"
 	"github.com/decred/dcrd/crypto/blake256"
 	"github.com/decred/dcrd/hdkeychain/v3"
 	libp2pcrypto "github.com/libp2p/go-libp2p/core/crypto"
@@ -32,6 +30,7 @@ type Client struct {
 	log          dex.Logger
 	ch           chan any
 	netTickerMap map[string]uint32
+	bonds        []*bond.BondParams
 }
 
 type ClientConfig struct {
@@ -51,7 +50,6 @@ func NewClient(cfg *ClientConfig) (*Client, error) {
 	cl, err := mc.NewClient(&mc.Config{
 		PrivateKey:      meshPriv,
 		RemotePeerAddrs: []string{cfg.BootstrapPeer},
-		Bonds:           cfg.Bonds,
 		Logger:          cfg.Log.SubLogger("mc"),
 	})
 	if err != nil {
@@ -60,6 +58,7 @@ func NewClient(cfg *ClientConfig) (*Client, error) {
 
 	return &Client{
 		Client:       cl,
+		bonds:        cfg.Bonds,
 		log:          cfg.Log,
 		ch:           make(chan interface{}, 128),
 		netTickerMap: asset.NetworkTickers(),
@@ -70,7 +69,9 @@ func (c *Client) Connect(ctx context.Context) (*sync.WaitGroup, error) {
 	var wg sync.WaitGroup
 	wg.Add(1)
 	go func() {
-		c.Client.Run(ctx)
+		if err := c.Client.Run(ctx, c.bonds); err != nil {
+			c.log.Errorf("mesh client Run error: %v", err)
+		}
 		wg.Done()
 	}()
 	return &wg, nil
@@ -82,22 +83,16 @@ type TickerPriceUpdate struct {
 }
 
 func (c *Client) SubscribeToTickerPrices(ctx context.Context) error {
-	tickers := asset.Tickers()
-	topics := make([]string, len(tickers))
-	for i, ticker := range tickers {
-		topics[i] = protocols.PriceTopicPrefix + ":" + ticker
-	}
-	return c.Client.Subscribe(ctx, topics, func(topic string, ev mc.TopicEvent) {
-		ticker, ok := extractSubtopic(topic, protocols.PriceTopicPrefix)
-		if !ok {
-			c.log.Warnf("Invalid price topic format: %s", topic)
-			return
-		}
-		c.emit(ctx, &TickerPriceUpdate{
-			Ticker: ticker,
-			Price:  decodeFloat64(ev.Data),
+	for _, ticker := range asset.Tickers() {
+		ticker := ticker
+		err := c.Client.SubscribeToPriceOracle(ctx, ticker, func(price float64) {
+			c.emit(ctx, &TickerPriceUpdate{Ticker: ticker, Price: price})
 		})
-	})
+		if err != nil && !errors.Is(err, mc.ErrRedundantSubscription) {
+			return fmt.Errorf("error subscribing to %s price: %w", ticker, err)
+		}
+	}
+	return nil
 }
 
 type FeeRateUpdate struct {
@@ -114,26 +109,25 @@ func (c *Client) SubscribeToFeeRateEstimates(ctx context.Context) error {
 		}
 		netTickers = append(netTickers, a.Info.UnitInfo.Conventional.Unit)
 	}
-	topics := make([]string, len(netTickers))
-	for i, net := range netTickers {
-		topics[i] = protocols.FeeRateTopicPrefix + ":" + net
-	}
-	return c.Client.Subscribe(ctx, topics, func(topic string, ev mc.TopicEvent) {
-		netTicker, ok := extractSubtopic(topic, protocols.FeeRateTopicPrefix)
-		if !ok {
-			c.log.Warnf("Invalid price topic format: %s", topic)
-			return
-		}
+	for _, netTicker := range netTickers {
 		netAssetID, ok := c.netTickerMap[netTicker]
 		if !ok {
 			c.log.Warnf("Unknown network identifier %q", netTicker)
-			return
+			continue
 		}
-		c.emit(ctx, &FeeRateUpdate{
-			NetAssetID: netAssetID,
-			FeeRate:    bytesToBigInt(ev.Data).Uint64(),
+		err := c.Client.SubscribeToFeeRateOracle(ctx, netTicker, func(feeRate *big.Int) {
+			c.emit(ctx, &FeeRateUpdate{NetAssetID: netAssetID, FeeRate: feeRate.Uint64()})
 		})
-	})
+		if err != nil && !errors.Is(err, mc.ErrRedundantSubscription) {
+			return fmt.Errorf("error subscribing to %s fee rate: %w", netTicker, err)
+		}
+	}
+	return nil
+}
+
+// Next returns a channel of mesh updates (*TickerPriceUpdate, *FeeRateUpdate).
+func (c *Client) Next() <-chan any {
+	return c.ch
 }
 
 func (c *Client) emit(ctx context.Context, thing any) {
@@ -143,23 +137,6 @@ func (c *Client) emit(ctx context.Context, thing any) {
 		c.log.Errorf("Mesh event channel blocking for > 10 seconds: %v", thing)
 	case <-ctx.Done():
 	}
-}
-
-func extractSubtopic(topic, namespace string) (subtopic string, ok bool) {
-	parts := strings.SplitN(topic, ":", 2)
-	if len(parts) != 2 || parts[0] != namespace {
-		return "", false
-	}
-	return parts[1], true
-}
-
-func decodeFloat64(buf []byte) float64 {
-	bits := binary.BigEndian.Uint64(buf)
-	return math.Float64frombits(bits)
-}
-
-func bytesToBigInt(b []byte) *big.Int {
-	return new(big.Int).SetBytes(b)
 }
 
 func deriveMeshPriv(seed []byte) (libp2pcrypto.PrivKey, error) {

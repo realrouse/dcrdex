@@ -4847,7 +4847,10 @@ func (c *Core) Login(pw []byte) error {
 			}
 
 			if c.cfg.Mesh && c.net == dex.Simnet {
-				const simnetMeshAddr = "/ip4/127.0.0.1/tcp/12347"
+				simnetMeshAddr := "/ip4/127.0.0.1/tcp/12347"
+				if a := os.Getenv("TATANKA_SIMNET_ADDR"); a != "" {
+					simnetMeshAddr = a
+				}
 				todoBonds := []*bond.BondParams{}
 				mesh, err := mesh.NewClient(&mesh.ClientConfig{
 					Seed:          seed,
@@ -4862,9 +4865,7 @@ func (c *Core) Login(pw []byte) error {
 				c.mesh = mesh
 				c.meshCM = dex.NewConnectionMaster(c.mesh)
 				c.meshMtx.Unlock()
-				if err := c.meshCM.Connect(c.ctx); err != nil {
-					c.log.Errorf("Error establishing connection with Mesh. Will continue trying: %v", err)
-				}
+				// The connection is started by connectMesh after login.
 			}
 
 			c.loggedIn = true
