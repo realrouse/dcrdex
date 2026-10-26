@@ -116,6 +116,9 @@ func (c *Core) connectMesh(ctx context.Context, crypter encrypt.Crypter) {
 	// Login only unlocks wallets with active DEX trades. Resumed mesh swaps
 	// need theirs unlocked too, while the crypter is still open.
 	c.unlockMeshSwapWallets(crypter, mesh.Swaps())
+	// Mesh orders and matches arrive without a password prompt, so unlock
+	// the other wallets now too (simnet prototype; see PLAN.md P5 notes).
+	c.unlockMeshWallets(crypter)
 	go mesh.RunSwaps(ctx, 3*time.Second)
 
 	// SIMNET-ONLY debug API for driving mesh order books from test scripts.
@@ -168,6 +171,19 @@ func (c *Core) unlockMeshSwapWallets(crypter encrypt.Crypter, recs []*meshpkg.Sw
 		}
 		if err := c.connectAndUnlock(crypter, w); err != nil {
 			c.log.Errorf("Error unlocking %s wallet for resumed mesh swaps: %v", dex.BipIDSymbol(assetID), err)
+		}
+	}
+}
+
+// unlockMeshWallets connects and unlocks every configured wallet so mesh
+// swaps on any market can proceed after login.
+func (c *Core) unlockMeshWallets(crypter encrypt.Crypter) {
+	for _, w := range c.xcWallets() {
+		if w.unlocked() {
+			continue
+		}
+		if err := c.connectAndUnlock(crypter, w); err != nil {
+			c.log.Errorf("Error unlocking %s wallet for mesh swaps: %v", w.Symbol, err)
 		}
 	}
 }
