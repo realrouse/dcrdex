@@ -5,10 +5,10 @@ package mesh
 
 import (
 	"bytes"
-	"fmt"
 	"context"
 	"encoding/base64"
 	"encoding/hex"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -318,7 +318,7 @@ func TestSwapOrderCancelAndExpiry(t *testing.T) {
 
 func TestLockPolicy(t *testing.T) {
 	for _, bad := range []LockPolicy{
-		{Maker: time.Minute, Taker: 10 * time.Second},     // taker too short
+		{Maker: time.Minute, Taker: 10 * time.Second},      // taker too short
 		{Maker: 90 * time.Second, Taker: 80 * time.Second}, // gap too small
 		{Maker: time.Hour, Taker: 50 * time.Minute},        // < 1.5x
 		{Maker: 72 * time.Hour, Taker: time.Hour},          // too long

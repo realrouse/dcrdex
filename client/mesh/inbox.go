@@ -48,6 +48,11 @@ const (
 	MaxInboxMsgAge = 5 * time.Minute
 )
 
+var (
+	errRateLimited = errors.New("inbox rate limit exceeded")
+	errReplayed    = errors.New("replayed inbox message")
+)
+
 // InboxTopic is the inbox topic for a peer.
 func InboxTopic(pid peer.ID) string { return InboxTopicPrefix + pid.String() }
 
@@ -237,7 +242,7 @@ func (ob *OrderBooks) SubscribeInbox(ctx context.Context) error {
 		if ev.Type != mc.TopicEventData {
 			return
 		}
-		msg, err := ob.openInbox(ev.Data, ev.Peer)
+		msg, err := ob.receiveInbox(ev.Data, ev.Peer)
 		if err != nil {
 			ob.log.Debugf("Dropped inbox message from %s: %v", ev.Peer, err)
 			return

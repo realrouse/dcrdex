@@ -114,9 +114,9 @@ const (
 // Debug halt points to simulate a silent counterparty (simnet tests).
 const (
 	HaltNone        = ""
-	HaltInit        = "init"        // maker never initiates
-	HaltParticipate = "participate" // taker never participates
-	HaltRedeem      = "redeem"      // maker never redeems (and stops talking)
+	HaltInit        = "init"         // maker never initiates
+	HaltParticipate = "participate"  // taker never participates
+	HaltRedeem      = "redeem"       // maker never redeems (and stops talking)
 	HaltTakerRedeem = "taker_redeem" // taker never redeems
 	// HaltPreBroadcast saves the signed contract and then aborts before
 	// broadcasting, freezing the swap there (simulates a crash mid-initiate).
@@ -137,25 +137,25 @@ type SwapEvent struct {
 
 // SwapRecord is the persisted swap state.
 type SwapRecord struct {
-	Match       Match       `json:"match"`
-	Side        string      `json:"side"`
-	PeerEnc     []byte      `json:"peerEnc"`
-	Status      string      `json:"status"`
-	Reason      string      `json:"reason,omitempty"`
-	Updated     int64       `json:"updated"`
-	Secret      []byte      `json:"-"`                   // in memory only; on disk as EncSecret
-	EncSecret   []byte      `json:"encSecret,omitempty"` // AES-256-GCM(store key, secret, aad=match ID)
-	SecretHash  []byte      `json:"secretHash,omitempty"`
-	MakerSwap   *SwapCoin   `json:"makerSwap,omitempty"`
-	TakerSwap   *SwapCoin   `json:"takerSwap,omitempty"`
-	MakerRedeem *SwapCoin   `json:"makerRedeem,omitempty"`
-	TakerRedeem *SwapCoin   `json:"takerRedeem,omitempty"`
-	MakerRefund *SwapCoin   `json:"makerRefund,omitempty"`
-	TakerRefund *SwapCoin   `json:"takerRefund,omitempty"`
+	Match       Match     `json:"match"`
+	Side        string    `json:"side"`
+	PeerEnc     []byte    `json:"peerEnc"`
+	Status      string    `json:"status"`
+	Reason      string    `json:"reason,omitempty"`
+	Updated     int64     `json:"updated"`
+	Secret      []byte    `json:"-"`                   // in memory only; on disk as EncSecret
+	EncSecret   []byte    `json:"encSecret,omitempty"` // AES-256-GCM(store key, secret, aad=match ID)
+	SecretHash  []byte    `json:"secretHash,omitempty"`
+	MakerSwap   *SwapCoin `json:"makerSwap,omitempty"`
+	TakerSwap   *SwapCoin `json:"takerSwap,omitempty"`
+	MakerRedeem *SwapCoin `json:"makerRedeem,omitempty"`
+	TakerRedeem *SwapCoin `json:"takerRedeem,omitempty"`
+	MakerRefund *SwapCoin `json:"makerRefund,omitempty"`
+	TakerRefund *SwapCoin `json:"takerRefund,omitempty"`
 	// Funding are the coin IDs funding our own contract, saved before the
 	// broadcast so a retry can reuse them.
 	Funding [][]byte    `json:"funding,omitempty"`
-	Events      []SwapEvent `json:"events"`
+	Events  []SwapEvent `json:"events"`
 }
 
 // Final is true when no more actions are needed.
@@ -323,13 +323,25 @@ type swapState struct {
 	peerEnc  *secp256k1.PublicKey
 	lastSend time.Time
 
+	// badInit is set once a maker contract failed the taker's audit.
+	badInit bool
+
 	inMtx sync.Mutex // inbound peer data, set by message handlers
-	in    struct {
-		init   *SwapInitMsg
-		part   *SwapPartMsg
-		redeem *SwapRedeemMsg
-		done   *SwapDoneMsg
-	}
+	in    swapInbound
+}
+
+type swapInbound struct {
+	init   *SwapInitMsg
+	part   *SwapPartMsg
+	redeem *SwapRedeemMsg
+	done   *SwapDoneMsg
+}
+
+// dropIn clears rejected inbound data so a later message can replace it.
+func (s *swapState) dropIn(f func(in *swapInbound)) {
+	s.inMtx.Lock()
+	f(&s.in)
+	s.inMtx.Unlock()
 }
 
 type swapper struct {
@@ -337,6 +349,7 @@ type swapper struct {
 	wallets func(assetID uint32) (SwapWallet, error)
 	store   *SwapStore
 	halt    atomic.Value // string
+	tamper  atomic.Value // string, simnet debug (adversary.go)
 	kick    chan struct{}
 	swaps   map[MatchID]*swapState // guarded by ob.mtx
 }
@@ -633,6 +646,7 @@ func (ob *OrderBooks) stepMaker(ctx context.Context, sw *swapper, s *swapState, 
 			return
 		}
 		sc := &SwapContract{Address: m.TakerAddr, Value: m.MakerSends(), SecretHash: r.SecretHash, LockTime: m.MakerLockTime}
+		ob.tamperContract(sw, sc, m.TakerReceives())
 		if !ob.sendContract(ctx, sw, s, sendW, sc, &r.MakerSwap, SwapInitPending, SwapInitSent, halt,
 			fmt.Sprintf("initiated %d atoms of asset %d to %s, lock %d", m.MakerSends(), m.TakerReceives(), m.TakerAddr, m.MakerLockTime), m.TakerLockTime) {
 			return
@@ -646,6 +660,7 @@ func (ob *OrderBooks) stepMaker(ctx context.Context, sw *swapper, s *swapState, 
 				ob.log.Debugf("Swap %s: audit of taker contract not ready: %v", m.ID, err)
 			} else if reason := checkAudit(a, m.MakerAddr, m.TakerSends(), r.SecretHash, m.TakerLockTime); reason != "" {
 				ob.swapWarn(sw, s, "taker contract rejected: %s", reason)
+				s.dropIn(func(in *swapInbound) { in.part = nil })
 			} else {
 				r.TakerSwap = &SwapCoin{CoinID: part.CoinID, Contract: part.Contract, TxID: coinTxID(part.CoinID)}
 				ob.setSwapStatus(sw, s, SwapPartAudited, "audited taker contract %s: %d atoms to %s, lock %d",
@@ -800,10 +815,18 @@ func (ob *OrderBooks) stepTaker(ctx context.Context, sw *swapper, s *swapState, 
 
 	switch r.Status {
 	case SwapNew:
-		if init == nil {
-			if now.Unix() > m.TakerLockTime {
-				ob.setSwapStatus(sw, s, SwapAbandoned, "maker never initiated")
+		// Nothing of ours is at stake yet. Give up once it is too late to
+		// participate safely, whether the maker sent nothing, a contract we
+		// can never find, or a bad one.
+		if now.Add(sw.cfg.SafetyMargin).Unix() >= m.TakerLockTime {
+			why := "maker never initiated"
+			if init != nil || s.badInit {
+				why = "no valid maker contract before the taker lock time"
 			}
+			ob.setSwapStatus(sw, s, SwapAbandoned, "%s", why)
+			return
+		}
+		if init == nil {
 			return
 		}
 		a, err := recvW.Audit(ctx, init.CoinID, init.Contract)
@@ -813,6 +836,8 @@ func (ob *OrderBooks) stepTaker(ctx context.Context, sw *swapper, s *swapState, 
 		}
 		if reason := checkAudit(a, m.TakerAddr, m.MakerSends(), init.SecretHash, m.MakerLockTime); reason != "" {
 			ob.swapWarn(sw, s, "maker contract rejected: %s", reason)
+			s.badInit = true
+			s.dropIn(func(in *swapInbound) { in.init = nil }) // a corrected one may follow
 			return
 		}
 		r.SecretHash = init.SecretHash
@@ -839,6 +864,7 @@ func (ob *OrderBooks) stepTaker(ctx context.Context, sw *swapper, s *swapState, 
 			return
 		}
 		sc := &SwapContract{Address: m.MakerAddr, Value: m.TakerSends(), SecretHash: r.SecretHash, LockTime: m.TakerLockTime}
+		ob.tamperContract(sw, sc, m.MakerReceives())
 		if !ob.sendContract(ctx, sw, s, sendW, sc, &r.TakerSwap, SwapPartPending, SwapPartSent, halt,
 			fmt.Sprintf("participated %d atoms of asset %d to %s, lock %d", m.TakerSends(), m.MakerReceives(), m.MakerAddr, m.TakerLockTime), m.TakerLockTime) {
 			return

@@ -200,7 +200,7 @@ func TestBook(t *testing.T) {
 
 	// Sorting and expiry.
 	mk := func(sell bool, rate uint64, life time.Duration) *MeshOrder {
-		o := &MeshOrder{Market: dcrBTC, Sell: sell, Qty: 1, LotSize: 1, EncPubKey: tEncPub, Rate: rate, Stamp: tNow.UnixMilli(),
+		o := &MeshOrder{Market: dcrBTC, Sell: sell, Qty: 1e8, LotSize: 1e8, EncPubKey: tEncPub, Rate: rate * 1e5, Stamp: tNow.UnixMilli(),
 			Expiry: tNow.Add(life).UnixMilli(), Nonce: rate}
 		_ = o.Sign(bob)
 		if _, err := book.AddOrder(o, "", tNow); err != nil {
@@ -215,7 +215,7 @@ func TestBook(t *testing.T) {
 	ords := book.Orders(tNow)
 	got := []uint64{}
 	for _, o := range ords {
-		got = append(got, o.Rate)
+		got = append(got, o.Rate/1e5)
 	}
 	if want := []uint64{8, 9, 7, 5}; !equalU64(got, want) {
 		t.Fatalf("wrong order %v, want %v", got, want)

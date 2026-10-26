@@ -236,6 +236,23 @@ func (s *DebugServer) Handler(ctx context.Context) http.Handler {
 		}
 		writeJSON(w, http.StatusOK, map[string]string{"halt": req.Stage})
 	})
+	mux.HandleFunc("POST /mesh/swap/tamper", func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			Mode string `json:"mode"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			writeErr(w, http.StatusBadRequest, err)
+			return
+		}
+		if err := s.ob.SetSwapTamper(req.Mode); err != nil {
+			writeErr(w, http.StatusBadRequest, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]string{"tamper": req.Mode})
+	})
+	mux.HandleFunc("GET /mesh/inbox/dropped", func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, http.StatusOK, map[string]uint64{"dropped": s.ob.InboxDropped()})
+	})
 	mux.HandleFunc("POST /mesh/config", func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
 			Market       string `json:"market"`

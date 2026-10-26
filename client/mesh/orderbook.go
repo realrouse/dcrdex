@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"decred.org/dcrdex/dex"
+	"decred.org/dcrdex/dex/calc"
 	"github.com/decred/dcrd/crypto/blake256"
 	libp2pcrypto "github.com/libp2p/go-libp2p/core/crypto"
 	"github.com/libp2p/go-libp2p/core/peer"
@@ -31,6 +32,15 @@ const (
 	MaxOrderLifetime = time.Hour
 	// MaxClockSkew is how far into the future an order or cancel stamp may be.
 	MaxClockSkew = time.Minute
+	// MinSwapValue is the smallest amount of either asset a single lot may
+	// move. It is a conservative dust floor for the supported UTXO assets
+	// (DCR, BTC, LBC) at default relay fees, so an agreed match can always
+	// be funded with non-dust contract outputs.
+	MinSwapValue = 10_000
+	// MaxOrdersPerOwner caps one owner's live orders on a book.
+	MaxOrdersPerOwner = 100
+	// maxTombstones caps cancels remembered for orders we never saw.
+	maxTombstones = 10_000
 
 	orderSigDomain  = "tatanka-mesh-order-v2"
 	cancelSigDomain = "tatanka-mesh-cancel-v1"
@@ -187,6 +197,9 @@ func (o *MeshOrder) Validate(now time.Time) error {
 	}
 	if o.Qty%o.LotSize != 0 {
 		return errors.New("qty is not a multiple of the lot size")
+	}
+	if o.LotSize < MinSwapValue || calc.BaseToQuote(o.Rate, o.LotSize) < MinSwapValue {
+		return fmt.Errorf("lot is dust: base or quote value per lot is below %d atoms", MinSwapValue)
 	}
 	if len(o.EncPubKey) != 33 {
 		return errors.New("bad encryption pubkey length")
@@ -403,6 +416,17 @@ func (b *Book) AddOrder(o *MeshOrder, sender peer.ID, now time.Time) (bool, erro
 	if _, found := b.orders[id]; found {
 		return false, nil
 	}
+	if sender != "" {
+		n := 0
+		for _, e := range b.orders {
+			if e.ord.Owner == o.Owner && e.ord.Expiry > now.UnixMilli() {
+				n++
+			}
+		}
+		if n >= MaxOrdersPerOwner {
+			return false, fmt.Errorf("owner %s already has %d live orders", o.Owner, n)
+		}
+	}
 	b.orders[id] = &bookEntry{ord: o, remaining: o.Qty}
 	return true, nil
 }
@@ -426,6 +450,16 @@ func (b *Book) Cancel(c *MeshCancel, sender peer.ID, now time.Time) (bool, error
 		}
 		expiry = e.ord.Expiry
 		delete(b.orders, c.OrderID)
+	} else if len(b.cancelled) >= maxTombstones {
+		nowMs := now.UnixMilli()
+		for id, ts := range b.cancelled {
+			if ts.expiry <= nowMs {
+				delete(b.cancelled, id)
+			}
+		}
+		if len(b.cancelled) >= maxTombstones {
+			return false, errors.New("too many cancels for unknown orders")
+		}
 	}
 	b.cancelled[c.OrderID] = &tombstone{owner: c.Owner, expiry: expiry}
 	return found, nil

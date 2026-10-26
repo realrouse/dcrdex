@@ -81,6 +81,8 @@ type OrderBooks struct {
 	swapper *swapper // nil until EnableSwaps
 	// policies are lock policy overrides (simnet debug API).
 	policies map[Market]LockPolicy
+	// guard is the inbox replay cache and rate limit.
+	guard *inboxGuard
 }
 
 // NewOrderBooks constructs an OrderBooks.
@@ -99,6 +101,7 @@ func NewOrderBooks(ps pubSub, priv libp2pcrypto.PrivKey, encPriv *secp256k1.Priv
 		own:      make(map[OrderID]*ownOrder),
 		matches:  make(map[MatchID]*matchState),
 		policies: make(map[Market]LockPolicy),
+		guard:    newInboxGuard(),
 	}
 }
 

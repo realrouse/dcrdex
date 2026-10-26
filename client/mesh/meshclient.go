@@ -161,7 +161,7 @@ func deriveInboxPriv(seed []byte) *secp256k1.PrivateKey {
 }
 
 func deriveMeshPriv(seed []byte) (libp2pcrypto.PrivKey, error) {
-	entropy := blake256.Sum256(append(seed, encode.Uint32Bytes(hdKeyPurposeMesh)...))
+	entropy := blake256.Sum256(append(append([]byte{}, seed...), encode.Uint32Bytes(hdKeyPurposeMesh)...)) // copy: never write into the caller's seed buffer
 	priv, _, err := libp2pcrypto.GenerateEd25519Key(bytes.NewReader(entropy[:]))
 	return priv, err
 }

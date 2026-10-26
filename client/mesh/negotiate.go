@@ -115,7 +115,6 @@ func (ob *OrderBooks) MatchRecord(id MatchID) (*MatchRecord, bool) {
 	return st.record(), true
 }
 
-
 func (ob *OrderBooks) receiveAddr(assetID uint32) string {
 	ob.mtx.RLock()
 	f := ob.addr
@@ -335,6 +334,10 @@ func (ob *OrderBooks) checkProposal(p *MatchProposal, oo *ownOrder) string {
 }
 
 func (ob *OrderBooks) handlePropose(ctx context.Context, from peer.ID, p *MatchProposal) {
+	if from == ob.self {
+		ob.log.Warnf("Dropping proposal %s from our own peer ID (self-match)", p.MatchID)
+		return
+	}
 	if p.Taker != from.String() || computeMatchID(p.MakerOrderID, p.Taker, p.Nonce, p.Stamp) != p.MatchID {
 		ob.log.Debugf("Dropping inconsistent proposal from %s", from)
 		return
