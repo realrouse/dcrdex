@@ -155,7 +155,9 @@ assert qa-fee < d[q+"_A"] <= qa+1e-9, ("A quote", d)
 assert ba-fee < d["lbc_B"] <= ba+1e-9, ("B lbc", d)
 assert -qa-fee < d[q+"_B"] <= -qa+1e-9, ("B quote", d)'
 }
-settle() { "$DCRCTL/mine-alpha" 2 >/dev/null 2>&1; "$BTCCTL/mine-alpha" 2 >/dev/null 2>&1; "$LBCCTL/mine-alpha" 2 >/dev/null 2>&1; sleep 4; }
+# lbcd relays txs with an inventory trickle, so a tx sent through beta/gamma
+# can take several seconds to reach alpha (the miner): retry a few rounds.
+settle() { sleep 6; "$DCRCTL/mine-alpha" 2 >/dev/null 2>&1; "$BTCCTL/mine-alpha" 2 >/dev/null 2>&1; "$LBCCTL/mine-alpha" 2 >/dev/null 2>&1; sleep 4; }
 start_miner() {
   ( while true; do "$DCRCTL/mine-alpha" 1 >/dev/null 2>&1; "$BTCCTL/mine-alpha" 1 >/dev/null 2>&1; "$LBCCTL/mine-alpha" 1 >/dev/null 2>&1; sleep 3; done ) > "$RUN/miner.log" 2>&1 &
   PID[miner]=$!
@@ -189,9 +191,13 @@ for MK in $MARKETS; do
   log "$MK redeem: match $M agreed (3 LBC for 0.03 ${Q^^}; locks 1200s/600s)"
   wait_swap a "$M" complete 240 || fail "$MK redeem: A not complete"
   wait_swap b "$M" complete 60 || fail "$MK redeem: B not complete"
-  settle; B1=$(balances after "$Q"); log "$B1"; D=$(delta "$B0" "$B1"); log "$D"
+  for try in 1 2 3 4; do
+    settle; B1=$(balances after "$Q"); D=$(delta "$B0" "$B1")
+    check_delta "$D" 3 0.03 2>/dev/null && break
+    [ "$try" = 4 ] && { log "$B1"; fail "$MK redeem balances wrong: $D"; }
+  done
+  log "$B1"; log "$D"
   record "$M" "$MK-redeem"
-  check_delta "$D" 3 0.03 || fail "$MK redeem balances wrong: $D"
   log "PASS $MK redeem: A paid 3 LBC and got 0.03 ${Q^^}, B the reverse (less fees)"
 
   # -- restart mid-swap --
@@ -232,9 +238,13 @@ for MK in $MARKETS; do
   log "B refunded after its lock time"
   wait_swap a "$M" refunded 300 || fail "$MK refund: A did not refund"
   halt a ""
-  settle; B3=$(balances after "$Q"); log "$B3"; D=$(delta "$B2" "$B3"); log "$D (fees only)"
+  for try in 1 2 3 4; do
+    settle; B3=$(balances after "$Q"); D=$(delta "$B2" "$B3")
+    check_delta "$D" 0 0 2>/dev/null && break
+    [ "$try" = 4 ] && { log "$B3"; fail "$MK refund balances wrong: $D"; }
+  done
+  log "$B3"; log "$D (fees only)"
   record "$M" "$MK-refund"
-  check_delta "$D" 0 0 || fail "$MK refund balances wrong: $D"
   log "PASS $MK refund: both sides refunded"
 done
 for n in a b; do curl -sf "http://$(dbg_of $n)/mesh/swaps" | python3 -m json.tool > "$RUN/swaps-$n.json"; done
