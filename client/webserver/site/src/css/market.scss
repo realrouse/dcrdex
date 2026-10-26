@@ -726,6 +726,10 @@ div[data-handler=markets] {
         color: var(--text-color);
       }
 
+      &.pc-na {
+        opacity: 0.45;
+      }
+
       &.on[data-pc-ma="7"] {
         color: #f0b90b;
       }

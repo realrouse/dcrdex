@@ -9,6 +9,7 @@ import {
   chartTFs,
   normalizeCandles,
   aggregateCandles,
+  fillGaps,
   DepthChart,
   DepthLine,
   MouseReport,
@@ -3811,6 +3812,7 @@ export default class MarketsPage extends BasePage {
     const { ms } = chartTFs[this.chartTF]
     let cs = normalizeCandles(raw, cache.ms)
     if (ms !== cache.ms) cs = aggregateCandles(cs, ms)
+    cs = fillGaps(cs, ms)
     this.candleChart.setData(cs, ms, mkt.rateConversionFactor, mkt.baseUnitInfo.conventional.conversionFactor, keepView)
   }
 
@@ -3944,6 +3946,8 @@ export default class MarketsPage extends BasePage {
     on(page.pcVol, s.vol)
     on(page.pcAuto, s.auto)
     on(page.pcSkip, s.skip)
+    // No gaps only applies to 1D and longer timeframes.
+    page.pcSkip.classList.toggle('pc-na', chartTFs[this.chartTF]?.ms < 864e5)
   }
 
   /* requestCandles sends the loadcandles request. It accepts an optional candle

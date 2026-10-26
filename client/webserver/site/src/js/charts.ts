@@ -925,12 +925,17 @@ const FONT = '11px sans-serif'
  * normalizeCandles converts server candles to chart candles keyed by bin
  * start. Bins without trades get the previous close. Duplicate bins (e.g. the
  * overlap of older history and the live feed) keep the later one.
+ *
+ * The server assigns each epoch to the bin its END stamp falls in, and a
+ * candle's startStamp is the start of its first epoch, which is a few seconds
+ * BEFORE the bin boundary (e.g. 10:59:55 for the 11:00 1h bin). So the bin is
+ * taken from endStamp; using startStamp put every candle one bin too early.
  */
 export function normalizeCandles (cs: Candle[], ms: number): PCandle[] {
   const out: PCandle[] = []
   let pc = 0
   for (const c of cs) {
-    const k: PCandle = { t: Math.floor(c.startStamp / ms) * ms, o: c.startRate, h: c.highRate, l: c.lowRate, c: c.endRate, v: c.matchVolume, tr: c.matchVolume > 0 }
+    const k: PCandle = { t: Math.floor((c.endStamp || c.startStamp) / ms) * ms, o: c.startRate, h: c.highRate, l: c.lowRate, c: c.endRate, v: c.matchVolume, tr: c.matchVolume > 0 }
     if (!k.h) k.o = k.h = k.l = k.c = pc
     else if (!k.o) k.o = pc || k.l
     if (!k.c) continue
@@ -941,6 +946,30 @@ export function normalizeCandles (cs: Candle[], ms: number): PCandle[] {
     }
     pc = k.c
     out.push(k)
+  }
+  return out
+}
+
+/*
+ * fillGaps adds flat, trade-less candles for bins missing from the data (e.g.
+ * while the server was down), so the time axis of fixed-size timeframes is
+ * continuous. Calendar months are left as they are. Very long gaps are not
+ * filled, and the total number of added candles is capped.
+ */
+export function fillGaps (cs: PCandle[], ms: number): PCandle[] {
+  if (ms === MONTH || cs.length < 2) return cs
+  const out: PCandle[] = []
+  let added = 0
+  for (const c of cs) {
+    const prev = out[out.length - 1]
+    if (prev) {
+      const missing = Math.round((c.t - prev.t) / ms) - 1
+      if (missing > 0 && missing <= 5000 && added + missing <= 20000) {
+        for (let i = 1; i <= missing; i++) out.push({ t: prev.t + i * ms, o: prev.c, h: prev.c, l: prev.c, c: prev.c, v: 0, tr: false })
+        added += missing
+      }
+    }
+    out.push(c)
   }
   return out
 }
@@ -1144,7 +1173,7 @@ export class PriceChart {
 
   filter () {
     const all = this.all
-    const v = this.view = this.s.skip ? all.filter((c, i) => c.tr || i === all.length - 1) : all
+    const v = this.view = this.skipping() ? all.filter((c, i) => c.tr || i === all.length - 1) : all
     this.ind = []
     for (const [p, col] of MAS) {
       if (!this.s.ma[p]) continue
@@ -1168,6 +1197,14 @@ export class PriceChart {
       this.ind.push(['EMA' + EMA_N, EMA_COLOR, a])
     }
   }
+
+  /*
+   * skipping is whether periods without trades are collapsed. That is only
+   * done for 1D and longer timeframes. On a thin market most intraday bins
+   * have no trades, so collapsing them would put candles that are hours or
+   * days apart next to each other, and a 5m chart would span weeks.
+   */
+  skipping (): boolean { return this.s.skip && this.ms >= DAY }
 
   clampN (n: number) { return Math.min(Math.max(n, 8), Math.max(this.view.length * 1.2, 8), 4000) }
   clampOff (v: number) { return Math.min(Math.max(v, -this.n * 0.5), Math.max(this.view.length - this.n * 0.2, 0)) }

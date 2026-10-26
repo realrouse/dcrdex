@@ -814,6 +814,6 @@ var EnUS = map[string]*intl.Translation{
 	"chart_fit":                   {T: "Fit all candles"},
 	"chart_reset":                 {T: "Reset view"},
 	"chart_no_gaps":               {T: "no gaps"},
-	"chart_no_gaps_tip":           {T: "Hide periods with no trades"},
+	"chart_no_gaps_tip":           {T: "Hide periods with no trades (1D and longer timeframes)"},
 	"chart_auto_tip":              {T: "Fit the price axis to the visible candles. Drag the price axis to scale it, double-click it to reset."},
 }
