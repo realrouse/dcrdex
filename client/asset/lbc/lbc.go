@@ -170,7 +170,11 @@ func NewWallet(cfg *asset.WalletConfig, logger dex.Logger, network dex.Network) 
 		OptionalWalletInfo:       true, // lbcwallet has no getwalletinfo
 		UnlockSpends:             true, // lbcwallet may not auto-unlock spent coins
 		BlockDeserializer:        dexlbc.DeserializeBlock,
-		AssetID:                  BipID,
+		// lbcd's getblockheader has no "mediantime" (btcd heritage), so
+		// compute the median time past from the last 11 headers. Without
+		// this LockTimeExpired never fires and refunds never happen.
+		ManualMedianTime: true,
+		AssetID:          BipID,
 		FeeEstimator: func(ctx context.Context, cl btc.RawRequester, confTarget uint64) (uint64, error) {
 			// Prefer estimatesmartfee if lbcd provides it via passthrough.
 			// Fall back to DefaultFee.
