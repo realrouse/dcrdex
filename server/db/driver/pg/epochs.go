@@ -119,7 +119,7 @@ func (a *Archiver) LoadEpochStats(base, quote uint32, caches []*candles.Cache) e
 	sinceCaches := make(map[uint64]*candles.Cache, 0) // maps oldest end stamp
 	now := uint64(time.Now().UnixMilli())
 	for _, cache := range caches {
-		if err = a.loadCandles(base, quote, cache, candles.CacheSize); err != nil {
+		if err = a.loadCandles(base, quote, cache, uint64(cache.Cap())); err != nil {
 			return fmt.Errorf("loadCandles: %w", err)
 		}
 
@@ -130,7 +130,7 @@ func (a *Archiver) LoadEpochStats(base, quote uint32, caches []*candles.Cache) e
 			idx := cache.Last().EndStamp / cache.BinSize
 			since = (idx + 1) * cache.BinSize
 		} else {
-			since = now - (cache.BinSize * candles.CacheSize)
+			since = now - (cache.BinSize * uint64(cache.Cap()))
 			since = since - since%cache.BinSize // truncate to first end stamp of the epoch
 		}
 		if since < oldestNeeded {

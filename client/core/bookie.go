@@ -130,7 +130,7 @@ func defaultUnitInfo(symbol string) dex.UnitInfo {
 // newBookie is a constructor for a bookie. The caller should provide a callback
 // function to be called when there are no subscribers and the close timer has
 // expired.
-func newBookie(dc *dexConnection, base, quote uint32, binSizes []string, logger dex.Logger) *bookie {
+func newBookie(dc *dexConnection, base, quote uint32, binSizes []string, cacheSizes map[string]int, logger dex.Logger) *bookie {
 	candleCaches := make(map[string]*candleCache, len(binSizes))
 	for _, durStr := range binSizes {
 		dur, err := time.ParseDuration(durStr)
@@ -139,7 +139,7 @@ func newBookie(dc *dexConnection, base, quote uint32, binSizes []string, logger 
 			continue
 		}
 		candleCaches[durStr] = &candleCache{
-			Cache: candles.NewCache(candles.CacheSize, uint64(dur.Milliseconds())),
+			Cache: candles.NewCache(clientCacheSize(cacheSizes, durStr), uint64(dur.Milliseconds())),
 		}
 	}
 
@@ -173,6 +173,22 @@ func newBookie(dc *dexConnection, base, quote uint32, binSizes []string, logger 
 		baseUnits:    parseUnitInfo(base),
 		quoteUnits:   parseUnitInfo(quote),
 	}
+}
+
+// clientCacheSize is the candle cache size to use for the bin size. If the
+// server advertised a cache size for the bin size in its config response, that
+// size is used, up to candles.MaxCacheSize. Otherwise candles.CacheSize is
+// used, which is the request limit of servers that don't advertise sizes. The
+// cache size is also the number of candles requested from the server.
+func clientCacheSize(serverSizes map[string]int, binSize string) int {
+	sz, found := serverSizes[binSize]
+	switch {
+	case !found || sz <= 0:
+		return candles.CacheSize
+	case sz > candles.MaxCacheSize:
+		return candles.MaxCacheSize
+	}
+	return sz
 }
 
 // logEpochReport handles the epoch candle in the epoch_report message.
@@ -300,7 +316,7 @@ func (b *bookie) candles(durStr string, feedID uint32) error {
 		BaseID:     b.base,
 		QuoteID:    b.quote,
 		BinSize:    durStr,
-		NumCandles: candles.CacheSize,
+		NumCandles: cache.Cap(),
 	}
 	wireCandles := new(msgjson.WireCandles)
 	err = sendRequest(b.dc.WsConn, msgjson.CandlesRoute, payload, wireCandles, DefaultResponseTimeout)
@@ -425,7 +441,7 @@ func (dc *dexConnection) syncBook(base, quote uint32) (*orderbook.OrderBook, Boo
 			return nil, nil, err
 		}
 
-		booky = newBookie(dc, base, quote, cfg.BinSizes, dc.log.SubLogger(mktID))
+		booky = newBookie(dc, base, quote, cfg.BinSizes, cfg.CandleCacheSizes, dc.log.SubLogger(mktID))
 		err = booky.Sync(obRes)
 		if err != nil {
 			return nil, nil, err
@@ -579,7 +595,7 @@ func (c *Core) Book(dex string, base, quote uint32) (*OrderBook, error) {
 		cfg := dc.cfg
 		dc.cfgMtx.RUnlock()
 
-		book = newBookie(dc, base, quote, cfg.BinSizes, dc.log.SubLogger(mkt))
+		book = newBookie(dc, base, quote, cfg.BinSizes, cfg.CandleCacheSizes, dc.log.SubLogger(mkt))
 		if err = book.Sync(snap); err != nil {
 			return nil, fmt.Errorf("unable to sync book: %w", err)
 		}

@@ -3025,7 +3025,7 @@ func trade(t *testing.T, async bool) {
 	tBtcWallet.fundingCoins = asset.Coins{btcCoin}
 	tBtcWallet.fundRedeemScripts = []dex.Bytes{nil}
 
-	book := newBookie(rig.dc, tUTXOAssetA.ID, tUTXOAssetB.ID, nil, tLogger)
+	book := newBookie(rig.dc, tUTXOAssetA.ID, tUTXOAssetB.ID, nil, nil, tLogger)
 	rig.dc.books[tDcrBtcMktName] = book
 
 	msgOrderNote := &msgjson.BookOrderNote{
@@ -6734,7 +6734,7 @@ func TestHandleEpochOrderMsg(t *testing.T) {
 		t.Fatal("[handleEpochOrderMsg] expected a non-existent orderbook error")
 	}
 
-	rig.dc.books[tDcrBtcMktName] = newBookie(rig.dc, tUTXOAssetA.ID, tUTXOAssetB.ID, nil, tLogger)
+	rig.dc.books[tDcrBtcMktName] = newBookie(rig.dc, tUTXOAssetA.ID, tUTXOAssetB.ID, nil, nil, tLogger)
 
 	err = handleEpochOrderMsg(rig.core, rig.dc, req)
 	if err != nil {
@@ -6796,7 +6796,7 @@ func TestHandleMatchProofMsg(t *testing.T) {
 		t.Fatal("[handleMatchProofMsg] expected a non-existent orderbook error")
 	}
 
-	rig.dc.books[tDcrBtcMktName] = newBookie(rig.dc, tUTXOAssetA.ID, tUTXOAssetB.ID, nil, tLogger)
+	rig.dc.books[tDcrBtcMktName] = newBookie(rig.dc, tUTXOAssetA.ID, tUTXOAssetB.ID, nil, nil, tLogger)
 
 	err = rig.dc.books[tDcrBtcMktName].Enqueue(eo)
 	if err != nil {
@@ -6926,7 +6926,7 @@ func TestSetEpoch(t *testing.T) {
 	rig := newTestRig()
 	defer rig.shutdown()
 	dc := rig.dc
-	dc.books[tDcrBtcMktName] = newBookie(rig.dc, tUTXOAssetA.ID, tUTXOAssetB.ID, nil, tLogger)
+	dc.books[tDcrBtcMktName] = newBookie(rig.dc, tUTXOAssetA.ID, tUTXOAssetB.ID, nil, nil, tLogger)
 
 	mktEpoch := func() uint64 {
 		dc.epochMtx.RLock()
@@ -7138,7 +7138,7 @@ func TestHandleTradeSuspensionMsg(t *testing.T) {
 
 	walletSet, _, _, _ := tCore.walletSet(dc, tUTXOAssetA.ID, tUTXOAssetB.ID, true)
 
-	rig.dc.books[tDcrBtcMktName] = newBookie(rig.dc, tUTXOAssetA.ID, tUTXOAssetB.ID, nil, tLogger)
+	rig.dc.books[tDcrBtcMktName] = newBookie(rig.dc, tUTXOAssetA.ID, tUTXOAssetB.ID, nil, nil, tLogger)
 
 	addTracker := func(coins asset.Coins) *trackedTrade {
 		lo, dbOrder, preImg, _ := makeLimitOrder(dc, true, 0, 0)
@@ -10262,7 +10262,7 @@ func TestPreOrder(t *testing.T) {
 	var rate uint64 = 1e8
 	quoteConvertedLotSize := calc.BaseToQuote(rate, dcrBtcLotSize)
 
-	book := newBookie(rig.dc, tUTXOAssetA.ID, tUTXOAssetB.ID, nil, tLogger)
+	book := newBookie(rig.dc, tUTXOAssetA.ID, tUTXOAssetB.ID, nil, nil, tLogger)
 	dc.books[tDcrBtcMktName] = book
 
 	sellNote := &msgjson.BookOrderNote{
@@ -11292,7 +11292,7 @@ func TestDynamicSwapperGasFeeLimit(t *testing.T) {
 	tEthWallet.fundingCoins = asset.Coins{ethCoin}
 	tEthWallet.fundRedeemScripts = []dex.Bytes{nil}
 
-	book := newBookie(rig.dc, tUTXOAssetB.ID, tACCTAsset.ID, nil, tLogger)
+	book := newBookie(rig.dc, tUTXOAssetB.ID, tACCTAsset.ID, nil, nil, tLogger)
 	rig.dc.books[tBtcEthMktName] = book
 
 	msgOrderNote := &msgjson.BookOrderNote{
@@ -11740,7 +11740,7 @@ func TestNetworkFeeRate(t *testing.T) {
 	wallet.Wallet = dumbWallet
 
 	const bookFeedFeeRate = 60
-	book := newBookie(rig.dc, assetID, tUTXOAssetB.ID, nil, tLogger)
+	book := newBookie(rig.dc, assetID, tUTXOAssetB.ID, nil, nil, tLogger)
 	rig.dc.books[tDcrBtcMktName] = book
 	book.logEpochReport(&msgjson.EpochReportNote{BaseFeeRate: bookFeedFeeRate})
 	if r := rig.core.NetworkFeeRate(assetID); r != bookFeedFeeRate {
@@ -11946,7 +11946,7 @@ func TestTradingLimits(t *testing.T) {
 	}
 
 	rig.dc.acct.rep.BondedTier = 10
-	book := newBookie(rig.dc, tUTXOAssetA.ID, tUTXOAssetB.ID, nil, tLogger)
+	book := newBookie(rig.dc, tUTXOAssetA.ID, tUTXOAssetB.ID, nil, nil, tLogger)
 	rig.dc.books[tDcrBtcMktName] = book
 	checkTradingLimits(0, 20)
 

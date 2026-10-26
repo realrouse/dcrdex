@@ -195,3 +195,53 @@ func TestOrderBook(t *testing.T) {
 		t.Fatalf("where did this book come from?")
 	}
 }
+
+func TestCandleRequestLimits(t *testing.T) {
+	rig := newTestRig()
+	if err := rig.api.AddMarketSource(&TMarketSource{42, 0}); err != nil {
+		t.Fatalf("AddMarketSource error: %v", err)
+	}
+
+	// Each bin size's cache should have its configured size, and the epoch
+	// duration cache the default size.
+	caches := rig.api.marketCaches["dcr_btc"]
+	for binStr, wantCap := range map[string]int{"5m": 3000, "1h": 3000, "24h": 1000, "1s": candles.CacheSize} {
+		dur, _ := time.ParseDuration(binStr)
+		cache := caches[uint64(dur.Milliseconds())]
+		if cache == nil {
+			t.Fatalf("no %s cache", binStr)
+		}
+		if cache.Cap() != wantCap {
+			t.Fatalf("wrong %s cache size. wanted %d, got %d", binStr, wantCap, cache.Cap())
+		}
+	}
+
+	for _, tt := range []struct {
+		binSize string
+		n       int
+		wantErr bool
+	}{
+		{"5m", 0, false},
+		{"5m", candles.CacheSize, false}, // what old clients request
+		{"5m", 3000, false},
+		{"5m", 3001, true},
+		{"1h", 3000, false},
+		{"1h", 3001, true},
+		{"24h", 1000, false},
+		{"24h", 1001, true},
+		{"1s", 1000, false},
+		{"1s", 1001, true},
+		{"5m", -1, true},
+		{"15m", 10, true}, // no such bin size
+	} {
+		_, err := rig.api.handleCandles(&msgjson.CandlesRequest{
+			BaseID:     42,
+			QuoteID:    0,
+			BinSize:    tt.binSize,
+			NumCandles: tt.n,
+		})
+		if (err != nil) != tt.wantErr {
+			t.Fatalf("%s x %d: wanted error = %t, got %v", tt.binSize, tt.n, tt.wantErr, err)
+		}
+	}
+}

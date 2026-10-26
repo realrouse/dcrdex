@@ -20,7 +20,9 @@ import (
 var (
 	// Our internal millisecond representation of the bin sizes.
 	binSizes []uint64
-	started  uint32
+	// binCacheSizes maps the millisecond bin sizes to their cache sizes.
+	binCacheSizes = make(map[uint64]int)
+	started       uint32
 )
 
 // DBSource is a source of persistent data. DBSource is used to prime the
@@ -91,7 +93,11 @@ func (s *DataAPI) AddMarketSource(mkt MarketSource) error {
 	binCaches := make(map[uint64]*cacheWithStoredTime, len(binSizes)+1)
 	cacheList := make([]*candles.Cache, 0, len(binSizes)+1)
 	for _, binSize := range append([]uint64{epochDur}, binSizes...) {
-		cache := candles.NewCache(candles.CacheSize, binSize)
+		cacheSize, found := binCacheSizes[binSize]
+		if !found { // e.g. the epoch duration cache
+			cacheSize = candles.CacheSize
+		}
+		cache := candles.NewCache(cacheSize, binSize)
 		lastCandleEndStamp, err := s.db.LastCandleEndStamp(mkt.Base(), mkt.Quote(), cache.BinSize)
 		if err != nil {
 			return fmt.Errorf("LastCandleEndStamp: %w", err)
@@ -215,10 +221,10 @@ func (s *DataAPI) handleCandles(thing any) (any, error) {
 		return nil, fmt.Errorf("candles request unparseable")
 	}
 
-	if req.NumCandles == 0 {
+	if req.NumCandles < 0 {
+		return nil, fmt.Errorf("invalid numCandles %d", req.NumCandles)
+	} else if req.NumCandles == 0 {
 		req.NumCandles = candles.DefaultCandleRequest
-	} else if req.NumCandles > candles.CacheSize {
-		return nil, fmt.Errorf("requested numCandles %d exceeds maximum request size %d", req.NumCandles, candles.CacheSize)
 	}
 
 	mkt, err := dex.MarketName(req.BaseID, req.QuoteID)
@@ -244,6 +250,11 @@ func (s *DataAPI) handleCandles(thing any) (any, error) {
 		return nil, fmt.Errorf("no data available for binSize %s", req.BinSize)
 	}
 
+	// The maximum request size is the cache size for the bin size.
+	if req.NumCandles > cache.Cap() {
+		return nil, fmt.Errorf("requested numCandles %d exceeds maximum request size %d", req.NumCandles, cache.Cap())
+	}
+
 	return cache.WireCandles(req.NumCandles), nil
 }
 
@@ -267,6 +278,8 @@ func init() {
 		if err != nil {
 			panic("error parsing bin size '" + s + "': " + err.Error())
 		}
-		binSizes = append(binSizes, uint64(dur/time.Millisecond))
+		binSize := uint64(dur / time.Millisecond)
+		binSizes = append(binSizes, binSize)
+		binCacheSizes[binSize] = candles.CacheSizeFor(s)
 	}
 }

@@ -314,3 +314,32 @@ func TestCandlesCopy(t *testing.T) {
 		}
 	}
 }
+
+func TestCacheSizes(t *testing.T) {
+	for _, binSize := range BinSizes {
+		sz := CacheSizeFor(binSize)
+		if sz < CacheSize {
+			t.Fatalf("%s cache size %d is smaller than the legacy request size %d", binSize, sz, CacheSize)
+		}
+		if sz > MaxCacheSize {
+			t.Fatalf("%s cache size %d exceeds the client limit %d", binSize, sz, MaxCacheSize)
+		}
+	}
+	if sz := CacheSizeFor("1s"); sz != CacheSize {
+		t.Fatalf("wrong default cache size %d", sz)
+	}
+
+	// The cache should hold exactly Cap candles.
+	const binSize = 10
+	c := NewCache(5, binSize)
+	if c.Cap() != 5 {
+		t.Fatalf("wrong Cap %d", c.Cap())
+	}
+	for i := uint64(1); i <= 8; i++ {
+		c.Add(&Candle{StartStamp: (i - 1) * binSize, EndStamp: i * binSize})
+	}
+	cs := c.CandlesCopy()
+	if len(cs) != 5 || cs[0].EndStamp != 4*binSize || cs[4].EndStamp != 8*binSize {
+		t.Fatalf("wrong candles after wrapping: %+v", cs)
+	}
+}

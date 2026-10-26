@@ -1315,6 +1315,11 @@ type ConfigResult struct {
 	Assets           []*Asset  `json:"assets"`
 	Markets          []*Market `json:"markets"`
 	BinSizes         []string  `json:"binSizes"` // Just apidata.BinSizes for now.
+	// CandleCacheSizes maps the BinSizes to the number of candles the server
+	// keeps in memory, which is also the maximum NumCandles for a
+	// CandlesRequest for that bin size. Servers that don't set this field
+	// serve at most 1000 candles per request.
+	CandleCacheSizes map[string]int `json:"candleCacheSizes,omitempty"`
 
 	BondAssets map[string]*BondAsset `json:"bondAssets"`
 	// BondExpiry defines the duration of time remaining until lockTime below

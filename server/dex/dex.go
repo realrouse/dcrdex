@@ -496,6 +496,7 @@ func newConfigResponse(cfg *DexConf, bondAssets map[string]*msgjson.BondAsset,
 		BondAssets:       bondAssets,
 		BondExpiry:       uint64(dex.BondExpiry(cfg.Network)), // temporary while we figure it out
 		BinSizes:         candles.BinSizes,
+		CandleCacheSizes: candles.CacheSizes,
 		PenaltyThreshold: cfg.PenaltyThreshold,
 		MaxScore:         auth.ScoringMatchLimit,
 	}
