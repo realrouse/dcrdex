@@ -84,6 +84,7 @@ type OrderBooks struct {
 	books   map[Market]*Book
 	own     map[OrderID]*ownOrder
 	matches map[MatchID]*matchState
+	swapper *swapper // nil until EnableSwaps
 }
 
 // NewOrderBooks constructs an OrderBooks.

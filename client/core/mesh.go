@@ -3,6 +3,8 @@ package core
 import (
 	"context"
 	"os"
+	"path/filepath"
+	"time"
 
 	meshpkg "decred.org/dcrdex/client/mesh"
 	"decred.org/dcrdex/dex"
@@ -58,6 +60,22 @@ func (c *Core) connectMesh(ctx context.Context) {
 		}
 		return c.NewDepositAddress(assetID)
 	})
+
+	// Atomic swaps for agreed matches (P3), persisted next to the DB.
+	store, serr := meshpkg.NewSwapStore(filepath.Join(filepath.Dir(c.cfg.DBPath), "mesh", "swaps"))
+	if serr != nil {
+		c.log.Errorf("Mesh swap store error (swaps not persisted): %v", serr)
+		store = nil
+	}
+	mesh.EnableSwaps(meshpkg.DefaultSwapConfig, func(assetID uint32) (meshpkg.SwapWallet, error) {
+		return &meshSwapWallet{c: c, assetID: assetID}, nil
+	}, store)
+	if n, err := mesh.LoadSwaps(); err != nil {
+		c.log.Errorf("Error loading mesh swaps: %v", err)
+	} else if n > 0 {
+		c.log.Infof("Resuming %d mesh swaps", n)
+	}
+	go mesh.RunSwaps(ctx, 3*time.Second)
 
 	// SIMNET-ONLY debug API for driving mesh order books from test scripts.
 	if addr := os.Getenv("TATANKA_MESH_DEBUG_ADDR"); addr != "" {

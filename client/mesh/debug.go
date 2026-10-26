@@ -25,6 +25,9 @@ import (
 //	POST /mesh/take {"market":"dcr_btc","sell":false,"qty":1,"rate":1,"lotSize":0,"standing":false,"lifetimeSec":60}
 //	POST /mesh/propose {"market":"dcr_btc","orderID":"...","qty":1,"rate":0}  (raw, no compat checks; rate 0 = order rate)
 //	GET  /mesh/matches                -> {"matches":[...]}
+//	GET  /mesh/swaps                  -> {"swaps":[...]} (secrets omitted)
+//	POST /mesh/swap/halt {"stage":"redeem"}  ("" clears; init|participate|redeem)
+//	POST /mesh/config {"makerLockSec":240,"takerLockSec":120}
 type DebugServer struct {
 	ob     *OrderBooks
 	peerID func() string
@@ -214,6 +217,38 @@ func (s *DebugServer) Handler(ctx context.Context) http.Handler {
 			return
 		}
 		writeJSON(w, http.StatusOK, map[string]string{"matchID": mid.String()})
+	})
+	mux.HandleFunc("GET /mesh/swaps", func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, http.StatusOK, map[string]any{"swaps": s.ob.Swaps()})
+	})
+	mux.HandleFunc("POST /mesh/swap/halt", func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			Stage string `json:"stage"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			writeErr(w, http.StatusBadRequest, err)
+			return
+		}
+		if err := s.ob.SetSwapHalt(req.Stage); err != nil {
+			writeErr(w, http.StatusBadRequest, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]string{"halt": req.Stage})
+	})
+	mux.HandleFunc("POST /mesh/config", func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			MakerLockSec int64 `json:"makerLockSec"`
+			TakerLockSec int64 `json:"takerLockSec"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			writeErr(w, http.StatusBadRequest, err)
+			return
+		}
+		if err := s.ob.SetLockTimes(time.Duration(req.MakerLockSec)*time.Second, time.Duration(req.TakerLockSec)*time.Second); err != nil {
+			writeErr(w, http.StatusBadRequest, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, req)
 	})
 	mux.HandleFunc("GET /mesh/matches", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]any{"matches": s.ob.Matches()})

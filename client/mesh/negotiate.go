@@ -85,6 +85,9 @@ func (ob *OrderBooks) setStatus(st *matchState, status, reason string) {
 	st.status, st.reason, st.updated = status, reason, ob.now().UnixMilli()
 	if st.final() && !wasFinal {
 		close(st.done)
+		if status == MatchAgreed {
+			ob.startSwapLocked(st)
+		}
 	}
 	ob.log.Infof("Match %s (%s): %s %s", st.match.ID, st.side, status, reason)
 }
@@ -300,6 +303,8 @@ func (ob *OrderBooks) handleInboxMsg(ctx context.Context, msg *inboxMsg) {
 			return
 		}
 		ob.handleReject(ctx, from, &r)
+	case swapMsgInit, swapMsgPart, swapMsgRedeem, swapMsgDone:
+		ob.handleSwapMsg(from, msg.Type, msg.Payload)
 	default:
 		ob.log.Debugf("Unknown inbox message type %q from %s", msg.Type, from)
 	}
@@ -508,6 +513,9 @@ func (ob *OrderBooks) handleReject(_ context.Context, from peer.ID, r *MatchReje
 	}
 	switch {
 	case st.side == sideTaker && (st.status == MatchProposed || st.status == MatchAgreed):
+		if st.status == MatchAgreed {
+			ob.abortSwapLocked(st.match.ID, r.Reason)
+		}
 		ob.setStatus(st, MatchRejected, "maker: "+r.Reason)
 	case st.side == sideMaker && st.status == MatchAccepted:
 		ob.releaseLocked(st)

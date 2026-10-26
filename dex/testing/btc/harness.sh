@@ -21,6 +21,11 @@ export GAMMA_ADDRESS="bcrt1q2zv5qg4j2khhmz2v0hqxduyw547a39w40jvg4h"
 export DELTA_ADDRESS="bcrt1qp04ul2s506fjcq5p2wf0lkq5qln85clryxks2l"
 export EXTRA_ARGS="--blockfilterindex --peerblockfilters --rpcbind=0.0.0.0 --rpcallowip=0.0.0.0/0"
 export CREATE_DEFAULT_WALLET="1"
+# Bitcoin Core v30+ refuses to create a wallet with an empty name.
+BTC_MAJOR=$(bitcoind -version | head -1 | sed -E 's/.* v([0-9]+)\..*/\1/')
+if [ "${BTC_MAJOR:-0}" -ge 30 ] 2>/dev/null; then
+  export DEFAULT_WALLET_NAME="default"
+fi
 
 # The new-wallet script creates a new wallet with keys (not blank), and no
 # passphrase. $1 is the node to create the wallet on, $2 is the wallet

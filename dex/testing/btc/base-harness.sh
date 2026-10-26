@@ -20,9 +20,13 @@ WALLET_PASSWORD="abc"
 [ -z "${ALPHA_WALLET_SEED}" ] && ALPHA_DESCRIPTOR_WALLET="true" || ALPHA_DESCRIPTOR_WALLET="false"
 [ -z "${BETA_WALLET_SEED}"  ] && BETA_DESCRIPTOR_WALLET="true" || BETA_DESCRIPTOR_WALLET="false"
 
-ALPHA_CLI_CFG="-rpcwallet= -rpcport=${ALPHA_RPC_PORT} -regtest=1 -rpcuser=user -rpcpassword=pass"
+# Bitcoin Core v30+ removed the unnamed ("") default wallet. Clones may set
+# DEFAULT_WALLET_NAME to give alpha's and beta's primary wallets a name.
+DEFAULT_WALLET_NAME="${DEFAULT_WALLET_NAME-}"
 
-BETA_CLI_CFG="-rpcwallet= -rpcport=${BETA_RPC_PORT} -regtest=1 -rpcuser=user -rpcpassword=pass"
+ALPHA_CLI_CFG="-rpcwallet=${DEFAULT_WALLET_NAME} -rpcport=${ALPHA_RPC_PORT} -regtest=1 -rpcuser=user -rpcpassword=pass"
+
+BETA_CLI_CFG="-rpcwallet=${DEFAULT_WALLET_NAME} -rpcport=${BETA_RPC_PORT} -regtest=1 -rpcuser=user -rpcpassword=pass"
 
 GAMMA_CLI_CFG="-rpcwallet=gamma -rpcport=${ALPHA_RPC_PORT} -regtest=1 -rpcuser=user -rpcpassword=pass"
 
@@ -243,8 +247,8 @@ else
     # Note that assets requiring CREATE_DEFAULT_WALLET also support named args.
     # Create these as "blank" wallets since sethdseed or importdescriptors
     # will follow.
-    tmux send-keys -t $SESSION:2 "./alpha -named createwallet wallet_name= blank=true passphrase=\"${WALLET_PASSWORD}\" descriptors=${ALPHA_DESCRIPTOR_WALLET}${DONE}" C-m\; ${WAIT}
-    tmux send-keys -t $SESSION:2 "./beta -named createwallet wallet_name= blank=true passphrase=\"${WALLET_PASSWORD}\" descriptors=${BETA_DESCRIPTOR_WALLET}${DONE}" C-m\; ${WAIT}
+    tmux send-keys -t $SESSION:2 "./alpha -named createwallet wallet_name=${DEFAULT_WALLET_NAME} blank=true passphrase=\"${WALLET_PASSWORD}\" descriptors=${ALPHA_DESCRIPTOR_WALLET}${DONE}" C-m\; ${WAIT}
+    tmux send-keys -t $SESSION:2 "./beta -named createwallet wallet_name=${DEFAULT_WALLET_NAME} blank=true passphrase=\"${WALLET_PASSWORD}\" descriptors=${BETA_DESCRIPTOR_WALLET}${DONE}" C-m\; ${WAIT}
   else
     echo "Encrypting the alpha wallet (may take a minute)"
     tmux send-keys -t $SESSION:2 "./alpha encryptwallet ${WALLET_PASSWORD}${DONE}" C-m\; ${WAIT}
