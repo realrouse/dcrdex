@@ -312,7 +312,7 @@ for f in glob.glob('$RUN/a/simnet/mesh/swaps/*.json'):
 print('ok')" >/dev/null || fail "plaintext secret on disk"
   KEYLEN=$(stat -c %s "$RUN/a/simnet/mesh/swapstore.key")
   [ "$KEYLEN" -gt 32 ] || fail "store key not encrypted"
-  log "PASS secrets: $(ls "$RUN"/a/simnet/mesh/swaps/*.json | wc -l) maker records have encSecret only; swapstore.key is crypter-encrypted ($KEYLEN bytes)"
+  log "PASS secrets: $(ls "$RUN"/a/simnet/mesh/swaps/*.json | wc -l) swap records, maker secrets stored only as encSecret; swapstore.key is crypter-encrypted ($KEYLEN bytes)"
   ;;
 esac
 done
