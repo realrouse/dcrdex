@@ -31,6 +31,7 @@ type Client struct {
 	ch           chan any
 	netTickerMap map[string]uint32
 	bonds        []*bond.BondParams
+	*OrderBooks
 }
 
 type ClientConfig struct {
@@ -56,18 +57,24 @@ func NewClient(cfg *ClientConfig) (*Client, error) {
 		return nil, err
 	}
 
-	return &Client{
+	c := &Client{
 		Client:       cl,
 		bonds:        cfg.Bonds,
 		log:          cfg.Log,
 		ch:           make(chan interface{}, 128),
 		netTickerMap: asset.NetworkTickers(),
-	}, nil
+	}
+	c.OrderBooks = NewOrderBooks(cl, meshPriv, cfg.Log.SubLogger("BOOK"))
+	return c, nil
 }
 
 func (c *Client) Connect(ctx context.Context) (*sync.WaitGroup, error) {
 	var wg sync.WaitGroup
-	wg.Add(1)
+	wg.Add(2)
+	go func() {
+		c.OrderBooks.RunMaintenance(ctx, DefaultRebroadcastInterval)
+		wg.Done()
+	}()
 	go func() {
 		if err := c.Client.Run(ctx, c.bonds); err != nil {
 			c.log.Errorf("mesh client Run error: %v", err)

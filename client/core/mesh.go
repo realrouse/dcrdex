@@ -2,8 +2,9 @@ package core
 
 import (
 	"context"
+	"os"
 
-	"decred.org/dcrdex/client/mesh"
+	meshpkg "decred.org/dcrdex/client/mesh"
 	"decred.org/dcrdex/dex"
 )
 
@@ -50,6 +51,17 @@ func (c *Core) connectMesh(ctx context.Context) {
 		}
 	}()
 
+	// SIMNET-ONLY debug API for driving mesh order books from test scripts.
+	if addr := os.Getenv("TATANKA_MESH_DEBUG_ADDR"); addr != "" {
+		srv := meshpkg.NewDebugServer(mesh.OrderBooks, func() string { return mesh.PeerID().String() })
+		go func() {
+			c.log.Infof("Mesh debug API listening on %s", addr)
+			if err := srv.ListenAndServe(ctx, addr); err != nil {
+				c.log.Errorf("Mesh debug API error: %v", err)
+			}
+		}()
+	}
+
 	if err = mesh.SubscribeToFeeRateEstimates(ctx); err != nil {
 		c.log.Errorf("error subscribing to mesh fee rate estimates: %v", err)
 		return
@@ -62,9 +74,9 @@ func (c *Core) connectMesh(ctx context.Context) {
 
 func (c *Core) handleMeshUpdate(u any) {
 	switch u := u.(type) {
-	case *mesh.TickerPriceUpdate:
+	case *meshpkg.TickerPriceUpdate:
 		c.log.Debugf("Mesh price update: %s = %f", u.Ticker, u.Price)
-	case *mesh.FeeRateUpdate:
+	case *meshpkg.FeeRateUpdate:
 		c.log.Debugf("Mesh fee rate update: asset %d = %d", u.NetAssetID, u.FeeRate)
 	default:
 		c.log.Warnf("Unknown mesh update type %T", u)
