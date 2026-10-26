@@ -27,4 +27,13 @@ func TestMeshSwapStoreKey(t *testing.T) {
 	if _, err := meshSwapStoreKey(path, encrypt.NewCrypter([]byte("other"))); err == nil {
 		t.Fatal("wrong crypter decrypted the key")
 	}
+	if _, err := os.Stat(path + ".tmp"); !os.IsNotExist(err) {
+		t.Fatalf("temp key file left behind: %v", err)
+	}
+	if fi, _ := os.Stat(path); fi.Mode().Perm() != 0o600 {
+		t.Fatalf("key file mode %v", fi.Mode().Perm())
+	}
+	if fi, _ := os.Stat(filepath.Dir(path)); fi.Mode().Perm() != 0o700 {
+		t.Fatalf("mesh dir mode %v", fi.Mode().Perm())
+	}
 }

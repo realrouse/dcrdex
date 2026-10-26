@@ -45,7 +45,17 @@ func meshSwapStoreKey(path string, crypter encrypt.Crypter) ([]byte, error) {
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return nil, err
 	}
-	if err := os.WriteFile(path, enc, 0o600); err != nil {
+	// Write atomically: a crash mid-write must not leave a truncated key
+	// file that would make every stored secret unreadable.
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, enc, 0o600); err != nil {
+		return nil, err
+	}
+	if f, err := os.Open(tmp); err == nil {
+		_ = f.Sync()
+		f.Close()
+	}
+	if err := os.Rename(tmp, path); err != nil {
 		return nil, err
 	}
 	return key, nil
