@@ -121,6 +121,15 @@ func (w *fakeSwapWallet) Initiate(_ context.Context, sc *SwapContract, prepared 
 	if crash == crashBeforeBroadcast {
 		return nil, errors.New("crashed before broadcast")
 	}
+	if crash == fundingStolen {
+		// Another tx spent the funding coins first; ours is rejected.
+		w.c.mtx.Lock()
+		for _, f := range funding {
+			w.c.spentFunding[string(f)] = true
+		}
+		w.c.mtx.Unlock()
+		return nil, errors.New("sendrawtx error: TX rejected: output already spent")
+	}
 
 	w.c.mtx.Lock()
 	defer w.c.mtx.Unlock()
@@ -142,6 +151,7 @@ func (w *fakeSwapWallet) Initiate(_ context.Context, sc *SwapContract, prepared 
 const (
 	crashBeforeBroadcast = "before"
 	crashAfterBroadcast  = "after"
+	fundingStolen        = "stolen"
 )
 
 func (c *fakeChain) contractsBy(owner string) int {
@@ -251,7 +261,8 @@ func (w *fakeSwapWallet) LockTimeExpired(_ context.Context, lockTime int64) (boo
 	return time.Now().Add(w.c.offset).Unix() >= lockTime, nil
 }
 
-var fastSwapCfg = SwapConfig{SwapConfs: 1, SafetyMargin: time.Second, ResendInterval: 30 * time.Millisecond}
+var fastSwapCfg = SwapConfig{SwapConfs: 1, SafetyMargin: time.Second, ResendInterval: 30 * time.Millisecond,
+	MissingContractTimeout: 200 * time.Millisecond}
 
 func walletOwner(ob *OrderBooks) string { return ob.self.String()[len(ob.self.String())-6:] }
 

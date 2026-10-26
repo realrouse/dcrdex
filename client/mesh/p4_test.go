@@ -151,7 +151,7 @@ func TestSwapCrashAfterBroadcast(t *testing.T) {
 	t.Run("rpc", func(t *testing.T) { testSwapCrashAfterBroadcast(t, false, "found on chain (recovered)") })
 	// An SPV wallet can't tell a mempool tx from a missing one; the spent
 	// funding coins prove the broadcast.
-	t.Run("spv", func(t *testing.T) { testSwapCrashAfterBroadcast(t, true, "funding coins already spent") })
+	t.Run("spv", func(t *testing.T) { testSwapCrashAfterBroadcast(t, true, "funding coins spent by saved contract") })
 }
 
 func testSwapCrashAfterBroadcast(t *testing.T, spv bool, wantEvent string) {

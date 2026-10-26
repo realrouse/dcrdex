@@ -217,6 +217,17 @@ type SwapConfig struct {
 	SafetyMargin time.Duration
 	// ResendInterval is how often the latest swap message is re-sent.
 	ResendInterval time.Duration
+	// MissingContractTimeout is how long our own contract must stay unknown
+	// to the wallet (not on chain, not in the mempool), after its lock time,
+	// before the swap is abandoned as never broadcast. Zero means 10 minutes.
+	MissingContractTimeout time.Duration
+}
+
+func (c *SwapConfig) missingTimeout() time.Duration {
+	if c.MissingContractTimeout > 0 {
+		return c.MissingContractTimeout
+	}
+	return 10 * time.Minute
 }
 
 // DefaultSwapConfig is for simnet.
@@ -325,6 +336,9 @@ type swapState struct {
 
 	// badInit is set once a maker contract failed the taker's audit.
 	badInit bool
+	// missingSince is when our own contract was first seen missing after its
+	// lock time (refund impossible: the tx doesn't exist).
+	missingSince time.Time
 
 	inMtx sync.Mutex // inbound peer data, set by message handlers
 	in    swapInbound
@@ -724,13 +738,43 @@ func (ob *OrderBooks) stepMaker(ctx context.Context, sw *swapper, s *swapState, 
 	}
 }
 
+// ownContractMissing handles a refund (or recovery) that fails because our
+// own contract tx does not exist: the wallet doesn't know the output at all
+// (not merely spent). That happens when the funding coins were spent by a
+// different tx before our contract was broadcast. After MissingContractTimeout
+// the swap is abandoned: there is nothing on chain to refund. The record keeps
+// the contract, so it can still be refunded by hand should it ever appear.
+func (ob *OrderBooks) ownContractMissing(ctx context.Context, sw *swapper, s *swapState, w SwapWallet, own *SwapCoin) bool {
+	if own == nil {
+		return false
+	}
+	if _, _, err := w.Confirmations(ctx, own.CoinID, own.Contract); err == nil {
+		s.missingSince = time.Time{}
+		return false
+	}
+	now := ob.now()
+	if s.missingSince.IsZero() {
+		s.missingSince = now
+	}
+	if now.Sub(s.missingSince) < sw.cfg.missingTimeout() {
+		ob.swapWarn(sw, s, "own contract tx %s not found by the wallet (will retry)", own.TxID)
+		return true
+	}
+	ob.setSwapStatus(sw, s, SwapAbandoned, "own contract tx %s never found on chain or in the mempool past its lock time; nothing to refund", own.TxID)
+	return true
+}
+
 func (ob *OrderBooks) makerRefund(ctx context.Context, sw *swapper, s *swapState, w SwapWallet) {
 	r := s.rec
 	coin, err := w.Refund(ctx, r.MakerSwap.CoinID, r.MakerSwap.Contract)
 	if err != nil {
+		if ob.ownContractMissing(ctx, sw, s, w, r.MakerSwap) {
+			return
+		}
 		ob.swapWarn(sw, s, "refund error (will retry): %v", err)
 		return
 	}
+	s.missingSince = time.Time{}
 	r.MakerRefund = coin
 	ob.setSwapStatus(sw, s, SwapRefunded, "maker lock time expired, refunded own contract, tx %s", coin.TxID)
 }
@@ -739,9 +783,13 @@ func (ob *OrderBooks) takerRefund(ctx context.Context, sw *swapper, s *swapState
 	r := s.rec
 	coin, err := w.Refund(ctx, r.TakerSwap.CoinID, r.TakerSwap.Contract)
 	if err != nil {
+		if ob.ownContractMissing(ctx, sw, s, w, r.TakerSwap) {
+			return
+		}
 		ob.swapWarn(sw, s, "refund error (will retry): %v", err)
 		return
 	}
+	s.missingSince = time.Time{}
 	r.TakerRefund = coin
 	ob.setSwapStatus(sw, s, SwapRefunded, "taker lock time expired, refunded own contract, tx %s", coin.TxID)
 }
@@ -768,7 +816,13 @@ func (ob *OrderBooks) sendContract(ctx context.Context, sw *swapper, s *swapStat
 			return false // frozen until restart
 		}
 		if ob.now().Add(sw.cfg.SafetyMargin).Unix() >= deadline {
-			ob.swapWarn(sw, s, "saved contract not found on chain and too late to retry")
+			// Too late to (re)broadcast. Once our own lock time has passed,
+			// a saved contract the wallet doesn't know was never broadcast.
+			if expired, err := w.LockTimeExpired(ctx, sc.LockTime); err == nil && expired {
+				ob.ownContractMissing(ctx, sw, s, w, *own)
+			} else {
+				ob.swapWarn(sw, s, "saved contract not found on chain and too late to retry")
+			}
 			return false
 		}
 		sc.Inputs = r.Funding
@@ -785,10 +839,16 @@ func (ob *OrderBooks) sendContract(ctx context.Context, sw *swapper, s *swapStat
 	})
 	if err != nil {
 		if r.Status == pendingStatus && *own != nil && errors.Is(err, ErrFundingSpent) {
-			// Our funding coins are gone, so the saved contract tx (the only
-			// tx we signed with them) was broadcast and is in the mempool.
-			ob.setSwapStatus(sw, s, sentStatus, "%s; funding coins already spent by saved contract tx %s (recovered)", desc, (*own).TxID)
-			return true
+			// Our funding coins are gone. That proves nothing by itself: a
+			// different tx may have spent them (P6: a failed first broadcast
+			// whose inputs another tx had spent). Only the wallet seeing the
+			// saved contract tx counts; until then stay pending.
+			if _, _, cerr := w.Confirmations(ctx, (*own).CoinID, (*own).Contract); cerr == nil {
+				ob.setSwapStatus(sw, s, sentStatus, "%s; funding coins spent by saved contract tx %s (recovered)", desc, (*own).TxID)
+				return true
+			}
+			ob.swapWarn(sw, s, "funding coins spent, but saved contract tx %s is unknown to the wallet (waiting)", (*own).TxID)
+			return false
 		}
 		ob.swapWarn(sw, s, "contract error (will retry): %v", err)
 		return false

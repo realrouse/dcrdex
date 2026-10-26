@@ -529,3 +529,60 @@ func TestP6FloodInjection(t *testing.T) {
 		t.Fatalf("only %d replays dropped", d)
 	}
 }
+
+// P6 campaign bug: a contract broadcast failed because another tx had spent
+// its funding coins. The retry saw "funding spent" and wrongly assumed our
+// saved contract had been broadcast, so the swap sat in init_sent forever
+// with "refund error: coin not found". Now it stays pending, sends nothing,
+// and ends abandoned once its own lock time has passed.
+func TestP6FundingSpentElsewhere(t *testing.T) {
+	_, obs, offs := newNegotiatorsClock(t, 2)
+	maker, taker := obs[0], obs[1]
+	chain := newFakeChain()
+	chain.mtx.Lock()
+	if chain.crash == nil {
+		chain.crash = map[string]string{}
+	}
+	chain.crash[walletOwner(maker)] = fundingStolen
+	chain.mtx.Unlock()
+	enableFakeSwaps(t, maker, chain, nil)
+	enableFakeSwaps(t, taker, chain, nil)
+	id := agree(t, maker, taker)
+	waitReason(t, maker, id, "unknown to the wallet")
+	if r, _ := maker.SwapRecord(id); r.Status != SwapInitPending {
+		t.Fatalf("maker claims a contract it never broadcast: %s", r.Status)
+	}
+	if r, _ := taker.SwapRecord(id); r.Status != SwapNew {
+		t.Fatalf("taker %s", r.Status)
+	}
+	// Past the taker lock time: the taker abandons; past the maker lock time
+	// the maker gives up on the missing contract.
+	offs[0].Store(int64(time.Hour + time.Minute))
+	offs[1].Store(int64(time.Hour + time.Minute))
+	waitSwap(t, taker, id, SwapAbandoned, 5*time.Second)
+	chain.advance(2*time.Hour + time.Minute)
+	r := waitSwap(t, maker, id, SwapAbandoned, 5*time.Second)
+	if ev := lastEvent(r); !strings.Contains(ev, "never found on chain") {
+		t.Fatalf("event %q", ev)
+	}
+	zeroBalances(t, chain, maker, taker)
+}
+
+// A record already in init_sent whose contract doesn't exist (written by the
+// old code) is abandoned after the lock time instead of retrying forever.
+func TestP6MissingContractAfterLock(t *testing.T) {
+	_, obs := newNegotiators(t, 2)
+	maker, taker := obs[0], obs[1]
+	chain := newFakeChain()
+	enableFakeSwaps(t, maker, chain, nil)
+	enableFakeSwaps(t, taker, chain, nil)
+	_ = taker.SetSwapHalt(HaltParticipate)
+	id := agree(t, maker, taker)
+	r := waitSwap(t, maker, id, SwapInitSent, 5*time.Second)
+	chain.mtx.Lock()
+	delete(chain.contracts, string(r.MakerSwap.CoinID)) // the tx vanished
+	chain.mtx.Unlock()
+	chain.advance(2*time.Hour + time.Minute)
+	waitReason(t, maker, id, "not found by the wallet")
+	waitSwap(t, maker, id, SwapAbandoned, 5*time.Second)
+}
