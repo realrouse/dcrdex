@@ -16,9 +16,15 @@ import (
 
 	"decred.org/dcrdex/dex"
 	mc "github.com/bisoncraft/mesh/client"
+	"github.com/decred/dcrd/dcrec/secp256k1/v4"
 	libp2pcrypto "github.com/libp2p/go-libp2p/core/crypto"
 	"github.com/libp2p/go-libp2p/core/peer"
 )
+
+var tEncPub = func() []byte {
+	k, _ := secp256k1.GeneratePrivateKey()
+	return k.PubKey().SerializeCompressed()
+}()
 
 var (
 	tLogger  = dex.StdOutLogger("TEST", dex.LevelInfo)
@@ -48,13 +54,15 @@ func pid(t *testing.T, priv libp2pcrypto.PrivKey) peer.ID {
 func signedOrder(t *testing.T, priv libp2pcrypto.PrivKey, now time.Time) *MeshOrder {
 	t.Helper()
 	o := &MeshOrder{
-		Market: dcrBTC,
-		Sell:   true,
-		Qty:    1e8,
-		Rate:   2e5,
-		Stamp:  now.UnixMilli(),
-		Expiry: now.Add(lifetime).UnixMilli(),
-		Nonce:  7,
+		Market:    dcrBTC,
+		Sell:      true,
+		Qty:       1e8,
+		LotSize:   1e8,
+		Rate:      2e5,
+		Stamp:     now.UnixMilli(),
+		Expiry:    now.Add(lifetime).UnixMilli(),
+		Nonce:     7,
+		EncPubKey: tEncPub,
 	}
 	if err := o.Sign(priv); err != nil {
 		t.Fatal(err)
@@ -119,6 +127,8 @@ func TestOrderSignValidate(t *testing.T) {
 		"wrong owner":   mutate(func(o *MeshOrder) { o.Owner = pid(t, other).String() }),
 		"wrong pubkey":  mutate(func(o *MeshOrder) { o.PubKey = otherPub }),
 		"zero qty":      mutate(func(o *MeshOrder) { o.Qty = 0 }),
+		"partial lot":   mutate(func(o *MeshOrder) { o.Qty = o.LotSize * 3 / 2 }),
+		"no enc key":    mutate(func(o *MeshOrder) { o.EncPubKey = nil }),
 		"same assets":   mutate(func(o *MeshOrder) { o.Quote = o.Base }),
 	}
 	for name, o := range bad {
@@ -133,7 +143,7 @@ func TestOrderSignValidate(t *testing.T) {
 	if err := future.Validate(tNow); err == nil {
 		t.Fatal("future order validated")
 	}
-	long := &MeshOrder{Market: dcrBTC, Qty: 1, Rate: 1, Stamp: tNow.UnixMilli(),
+	long := &MeshOrder{Market: dcrBTC, Qty: 1, LotSize: 1, Rate: 1, EncPubKey: tEncPub, Stamp: tNow.UnixMilli(),
 		Expiry: tNow.Add(MaxOrderLifetime + time.Second).UnixMilli()}
 	_ = long.Sign(priv)
 	if err := long.Validate(tNow); err == nil {
@@ -159,7 +169,7 @@ func TestBook(t *testing.T) {
 		t.Fatal("order from non-owner sender accepted")
 	}
 	// Wrong market.
-	wrong := &MeshOrder{Market: Market{Base: 0, Quote: 42}, Qty: 1, Rate: 1,
+	wrong := &MeshOrder{Market: Market{Base: 0, Quote: 42}, Qty: 1, LotSize: 1, Rate: 1, EncPubKey: tEncPub,
 		Stamp: tNow.UnixMilli(), Expiry: tNow.Add(lifetime).UnixMilli()}
 	_ = wrong.Sign(alice)
 	if _, err := book.AddOrder(wrong, aliceID, tNow); err == nil {
@@ -190,7 +200,7 @@ func TestBook(t *testing.T) {
 
 	// Sorting and expiry.
 	mk := func(sell bool, rate uint64, life time.Duration) *MeshOrder {
-		o := &MeshOrder{Market: dcrBTC, Sell: sell, Qty: 1, Rate: rate, Stamp: tNow.UnixMilli(),
+		o := &MeshOrder{Market: dcrBTC, Sell: sell, Qty: 1, LotSize: 1, EncPubKey: tEncPub, Rate: rate, Stamp: tNow.UnixMilli(),
 			Expiry: tNow.Add(life).UnixMilli(), Nonce: rate}
 		_ = o.Sign(bob)
 		if _, err := book.AddOrder(o, "", tNow); err != nil {
@@ -249,6 +259,18 @@ type fakeMesh struct {
 	mtx  sync.Mutex
 	subs map[string]map[peer.ID]mc.TopicHandler
 	drop bool
+	// dropFn, if set, drops matching broadcasts.
+	dropFn func(topic string, from peer.ID) bool
+}
+
+func newFakeMesh() *fakeMesh {
+	return &fakeMesh{subs: make(map[string]map[peer.ID]mc.TopicHandler)}
+}
+
+func (f *fakeMesh) setDrop(fn func(topic string, from peer.ID) bool) {
+	f.mtx.Lock()
+	f.dropFn = fn
+	f.mtx.Unlock()
 }
 
 type fakeClient struct {
@@ -260,7 +282,7 @@ func (f *fakeMesh) client(id peer.ID) *fakeClient { return &fakeClient{m: f, id:
 
 func (c *fakeClient) Broadcast(_ context.Context, topic string, data []byte) error {
 	c.m.mtx.Lock()
-	if c.m.drop {
+	if c.m.drop || (c.m.dropFn != nil && c.m.dropFn(topic, c.id)) {
 		c.m.mtx.Unlock()
 		return nil
 	}
@@ -296,8 +318,11 @@ func (c *fakeClient) Subscribe(_ context.Context, topic string, h mc.TopicHandle
 
 func newTestBooks(t *testing.T, m *fakeMesh, clock *time.Time) *OrderBooks {
 	priv := newPriv(t)
-	ob := NewOrderBooks(m.client(pid(t, priv)), priv, tLogger)
-	ob.now = func() time.Time { return *clock }
+	encPriv, _ := secp256k1.GeneratePrivateKey()
+	ob := NewOrderBooks(m.client(pid(t, priv)), priv, encPriv, tLogger)
+	if clock != nil {
+		ob.now = func() time.Time { return *clock }
+	}
 	return ob
 }
 
@@ -318,7 +343,7 @@ func TestOrderBooksGossip(t *testing.T) {
 	if err := b.SubscribeMarket(tCtx, dcrBTC); err != nil {
 		t.Fatal(err)
 	}
-	ord, err := a.PostOrder(tCtx, dcrBTC, true, 1e8, 2e5, 30*time.Second)
+	ord, err := a.PostOrder(tCtx, dcrBTC, true, 1e8, 0, 2e5, 30*time.Second)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -348,7 +373,7 @@ func TestOrderBooksGossip(t *testing.T) {
 
 	// A lost broadcast is recovered by the periodic re-broadcast.
 	m.drop = true
-	ord2, err := a.PostOrder(tCtx, dcrBTC, false, 2e8, 1e5, 30*time.Second)
+	ord2, err := a.PostOrder(tCtx, dcrBTC, false, 2e8, 1e8, 1e5, 30*time.Second)
 	if err != nil {
 		t.Fatal(err)
 	}

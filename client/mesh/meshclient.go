@@ -19,11 +19,15 @@ import (
 	"github.com/bisoncraft/mesh/bond"
 	mc "github.com/bisoncraft/mesh/client"
 	"github.com/decred/dcrd/crypto/blake256"
+	"github.com/decred/dcrd/dcrec/secp256k1/v4"
 	"github.com/decred/dcrd/hdkeychain/v3"
 	libp2pcrypto "github.com/libp2p/go-libp2p/core/crypto"
 )
 
-const hdKeyPurposeMesh uint32 = hdkeychain.HardenedKeyStart + 0x6d657368 // ASCII "mesh"
+const (
+	hdKeyPurposeMesh      uint32 = hdkeychain.HardenedKeyStart + 0x6d657368 // ASCII "mesh"
+	hdKeyPurposeMeshInbox uint32 = hdkeychain.HardenedKeyStart + 0x696e6278 // ASCII "inbx"
+)
 
 type Client struct {
 	*mc.Client
@@ -48,6 +52,7 @@ func NewClient(cfg *ClientConfig) (*Client, error) {
 	if err != nil {
 		return nil, fmt.Errorf("error deriving mesh private key: %w", err)
 	}
+	encPriv := deriveInboxPriv(cfg.Seed)
 	cl, err := mc.NewClient(&mc.Config{
 		PrivateKey:      meshPriv,
 		RemotePeerAddrs: []string{cfg.BootstrapPeer},
@@ -64,12 +69,15 @@ func NewClient(cfg *ClientConfig) (*Client, error) {
 		ch:           make(chan interface{}, 128),
 		netTickerMap: asset.NetworkTickers(),
 	}
-	c.OrderBooks = NewOrderBooks(cl, meshPriv, cfg.Log.SubLogger("BOOK"))
+	c.OrderBooks = NewOrderBooks(cl, meshPriv, encPriv, cfg.Log.SubLogger("BOOK"))
 	return c, nil
 }
 
 func (c *Client) Connect(ctx context.Context) (*sync.WaitGroup, error) {
 	var wg sync.WaitGroup
+	if err := c.OrderBooks.SubscribeInbox(ctx); err != nil {
+		return nil, fmt.Errorf("error subscribing to inbox: %w", err)
+	}
 	wg.Add(2)
 	go func() {
 		c.OrderBooks.RunMaintenance(ctx, DefaultRebroadcastInterval)
@@ -144,6 +152,12 @@ func (c *Client) emit(ctx context.Context, thing any) {
 		c.log.Errorf("Mesh event channel blocking for > 10 seconds: %v", thing)
 	case <-ctx.Done():
 	}
+}
+
+// deriveInboxPriv derives the static secp256k1 inbox encryption key.
+func deriveInboxPriv(seed []byte) *secp256k1.PrivateKey {
+	k := blake256.Sum256(append(append([]byte{}, seed...), encode.Uint32Bytes(hdKeyPurposeMeshInbox)...))
+	return secp256k1.PrivKeyFromBytes(k[:])
 }
 
 func deriveMeshPriv(seed []byte) (libp2pcrypto.PrivKey, error) {

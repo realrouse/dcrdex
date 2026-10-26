@@ -32,11 +32,13 @@ const (
 	// MaxClockSkew is how far into the future an order or cancel stamp may be.
 	MaxClockSkew = time.Minute
 
-	orderSigDomain  = "tatanka-mesh-order-v1"
+	orderSigDomain  = "tatanka-mesh-order-v2"
 	cancelSigDomain = "tatanka-mesh-cancel-v1"
+	updateSigDomain = "tatanka-mesh-order-update-v1"
 
 	msgTypeOrder  = "order"
 	msgTypeCancel = "cancel"
+	msgTypeUpdate = "update"
 )
 
 // OrderID is the blake256 hash of an order's serialized, signed fields.
@@ -116,19 +118,23 @@ func ParseMarket(name string) (Market, error) {
 }
 
 // MeshOrder is a signed standing limit order gossiped on a market topic.
-// Qty is in base asset atoms, Rate is in the conventional dcrdex message-rate
-// encoding (quote atoms per 1e8 base atoms).
+// Qty and LotSize are in base asset atoms, Rate is in the conventional dcrdex
+// message-rate encoding (quote atoms per 1e8 base atoms). Matches must be an
+// integer number of lots. EncPubKey is the owner's static secp256k1 inbox
+// encryption key (compressed), used by takers to encrypt match proposals.
 type MeshOrder struct {
 	Market
-	Owner  string `json:"owner"` // libp2p peer ID of the mesh client
-	Sell   bool   `json:"sell"`
-	Qty    uint64 `json:"qty"`
-	Rate   uint64 `json:"rate"`
-	Stamp  int64  `json:"stamp"`  // unix ms
-	Expiry int64  `json:"expiry"` // unix ms
-	Nonce  uint64 `json:"nonce"`
-	PubKey []byte `json:"pubkey"` // libp2p marshaled public key
-	Sig    []byte `json:"sig"`
+	Owner     string `json:"owner"` // libp2p peer ID of the mesh client
+	Sell      bool   `json:"sell"`
+	Qty       uint64 `json:"qty"`
+	LotSize   uint64 `json:"lotSize"`
+	Rate      uint64 `json:"rate"`
+	Stamp     int64  `json:"stamp"`  // unix ms
+	Expiry    int64  `json:"expiry"` // unix ms
+	Nonce     uint64 `json:"nonce"`
+	EncPubKey []byte `json:"encPubKey"`
+	PubKey    []byte `json:"pubkey"` // libp2p marshaled public key
+	Sig       []byte `json:"sig"`
 }
 
 func (o *MeshOrder) serialize() []byte {
@@ -142,10 +148,13 @@ func (o *MeshOrder) serialize() []byte {
 		b.WriteByte(0)
 	}
 	_ = binary.Write(b, binary.BigEndian, o.Qty)
+	_ = binary.Write(b, binary.BigEndian, o.LotSize)
 	_ = binary.Write(b, binary.BigEndian, o.Rate)
 	_ = binary.Write(b, binary.BigEndian, o.Stamp)
 	_ = binary.Write(b, binary.BigEndian, o.Expiry)
 	_ = binary.Write(b, binary.BigEndian, o.Nonce)
+	_ = binary.Write(b, binary.BigEndian, uint16(len(o.EncPubKey)))
+	b.Write(o.EncPubKey)
 	_ = binary.Write(b, binary.BigEndian, uint16(len(o.Owner)))
 	b.WriteString(o.Owner)
 	return b.Bytes()
@@ -173,8 +182,14 @@ func (o *MeshOrder) Validate(now time.Time) error {
 	if _, err := o.Market.Name(); err != nil {
 		return err
 	}
-	if o.Qty == 0 || o.Rate == 0 {
-		return errors.New("zero qty or rate")
+	if o.Qty == 0 || o.Rate == 0 || o.LotSize == 0 {
+		return errors.New("zero qty, lot size or rate")
+	}
+	if o.Qty%o.LotSize != 0 {
+		return errors.New("qty is not a multiple of the lot size")
+	}
+	if len(o.EncPubKey) != 33 {
+		return errors.New("bad encryption pubkey length")
 	}
 	nowMs := now.UnixMilli()
 	if o.Stamp > nowMs+MaxClockSkew.Milliseconds() {
@@ -227,6 +242,47 @@ func (c *MeshCancel) Validate(now time.Time) error {
 	return verifySig(c.Owner, c.PubKey, c.serialize(), c.Sig)
 }
 
+// MeshOrderUpdate is a signed update of an order's remaining quantity after
+// (partial) fills. Remaining only ever decreases; zero removes the order.
+type MeshOrderUpdate struct {
+	OrderID   OrderID `json:"orderID"`
+	Owner     string  `json:"owner"`
+	Remaining uint64  `json:"remaining"`
+	Stamp     int64   `json:"stamp"`
+	PubKey    []byte  `json:"pubkey"`
+	Sig       []byte  `json:"sig"`
+}
+
+func (u *MeshOrderUpdate) serialize() []byte {
+	b := new(bytes.Buffer)
+	b.WriteString(updateSigDomain)
+	b.Write(u.OrderID[:])
+	_ = binary.Write(b, binary.BigEndian, u.Remaining)
+	_ = binary.Write(b, binary.BigEndian, u.Stamp)
+	_ = binary.Write(b, binary.BigEndian, uint16(len(u.Owner)))
+	b.WriteString(u.Owner)
+	return b.Bytes()
+}
+
+// Sign sets the owner, public key and signature using priv.
+func (u *MeshOrderUpdate) Sign(priv libp2pcrypto.PrivKey) error {
+	pid, pubB, err := ownerOf(priv)
+	if err != nil {
+		return err
+	}
+	u.Owner, u.PubKey = pid.String(), pubB
+	u.Sig, err = priv.Sign(u.serialize())
+	return err
+}
+
+// Validate checks the update signature and stamp.
+func (u *MeshOrderUpdate) Validate(now time.Time) error {
+	if u.Stamp > now.Add(MaxClockSkew).UnixMilli() {
+		return errors.New("update stamp is in the future")
+	}
+	return verifySig(u.Owner, u.PubKey, u.serialize(), u.Sig)
+}
+
 func ownerOf(priv libp2pcrypto.PrivKey) (peer.ID, []byte, error) {
 	pid, err := peer.IDFromPrivateKey(priv)
 	if err != nil {
@@ -257,9 +313,10 @@ func verifySig(owner string, pubB, msg, sig []byte) error {
 
 // bookMsg is the wire envelope on an order book topic.
 type bookMsg struct {
-	Type   string      `json:"type"`
-	Order  *MeshOrder  `json:"order,omitempty"`
-	Cancel *MeshCancel `json:"cancel,omitempty"`
+	Type   string           `json:"type"`
+	Order  *MeshOrder       `json:"order,omitempty"`
+	Cancel *MeshCancel      `json:"cancel,omitempty"`
+	Update *MeshOrderUpdate `json:"update,omitempty"`
 }
 
 func encodeBookMsg(m *bookMsg) ([]byte, error) { return json.Marshal(m) }
@@ -278,6 +335,10 @@ func decodeBookMsg(b []byte) (*bookMsg, error) {
 		if m.Cancel == nil {
 			return nil, errors.New("cancel message without cancel")
 		}
+	case msgTypeUpdate:
+		if m.Update == nil {
+			return nil, errors.New("update message without update")
+		}
 	default:
 		return nil, fmt.Errorf("unknown book message type %q", m.Type)
 	}
@@ -289,12 +350,24 @@ type tombstone struct {
 	expiry int64 // unix ms
 }
 
+// BookOrder is an order on the book with its latest known remaining quantity.
+type BookOrder struct {
+	*MeshOrder
+	Remaining uint64 `json:"remaining"`
+}
+
+type bookEntry struct {
+	ord       *MeshOrder
+	remaining uint64
+	updStamp  int64
+}
+
 // Book is the set of live standing orders for one market as seen by this
 // client. It is safe for concurrent use.
 type Book struct {
 	market Market
 	mtx    sync.Mutex
-	orders map[OrderID]*MeshOrder
+	orders map[OrderID]*bookEntry
 	// cancelled tracks cancelled order IDs so that stale re-broadcasts can't
 	// resurrect them.
 	cancelled map[OrderID]*tombstone
@@ -304,7 +377,7 @@ type Book struct {
 func NewBook(m Market) *Book {
 	return &Book{
 		market:    m,
-		orders:    make(map[OrderID]*MeshOrder),
+		orders:    make(map[OrderID]*bookEntry),
 		cancelled: make(map[OrderID]*tombstone),
 	}
 }
@@ -330,7 +403,7 @@ func (b *Book) AddOrder(o *MeshOrder, sender peer.ID, now time.Time) (bool, erro
 	if _, found := b.orders[id]; found {
 		return false, nil
 	}
-	b.orders[id] = o
+	b.orders[id] = &bookEntry{ord: o, remaining: o.Qty}
 	return true, nil
 }
 
@@ -346,16 +419,57 @@ func (b *Book) Cancel(c *MeshCancel, sender peer.ID, now time.Time) (bool, error
 	b.mtx.Lock()
 	defer b.mtx.Unlock()
 	expiry := now.Add(MaxOrderLifetime).UnixMilli()
-	o, found := b.orders[c.OrderID]
+	e, found := b.orders[c.OrderID]
 	if found {
-		if o.Owner != c.Owner {
+		if e.ord.Owner != c.Owner {
 			return false, errors.New("cancel is not from the order owner")
 		}
-		expiry = o.Expiry
+		expiry = e.ord.Expiry
 		delete(b.orders, c.OrderID)
 	}
 	b.cancelled[c.OrderID] = &tombstone{owner: c.Owner, expiry: expiry}
 	return found, nil
+}
+
+// Update applies a remaining-quantity update from sender. It returns true if
+// the book changed. A zero remaining removes the order.
+func (b *Book) Update(u *MeshOrderUpdate, sender peer.ID, now time.Time) (bool, error) {
+	if sender != "" && sender.String() != u.Owner {
+		return false, fmt.Errorf("update owner %s was not the sender %s", u.Owner, sender)
+	}
+	if err := u.Validate(now); err != nil {
+		return false, err
+	}
+	b.mtx.Lock()
+	defer b.mtx.Unlock()
+	e, found := b.orders[u.OrderID]
+	if !found {
+		return false, nil
+	}
+	if e.ord.Owner != u.Owner {
+		return false, errors.New("update is not from the order owner")
+	}
+	if u.Stamp <= e.updStamp || u.Remaining >= e.remaining {
+		return false, nil // stale or not a decrease
+	}
+	if u.Remaining == 0 {
+		delete(b.orders, u.OrderID)
+		b.cancelled[u.OrderID] = &tombstone{owner: u.Owner, expiry: e.ord.Expiry}
+		return true, nil
+	}
+	e.remaining, e.updStamp = u.Remaining, u.Stamp
+	return true, nil
+}
+
+// Order returns the order with the given ID, if live.
+func (b *Book) Order(id OrderID, now time.Time) (*BookOrder, bool) {
+	b.mtx.Lock()
+	defer b.mtx.Unlock()
+	e, found := b.orders[id]
+	if !found || e.ord.Expiry <= now.UnixMilli() {
+		return nil, false
+	}
+	return &BookOrder{MeshOrder: e.ord, Remaining: e.remaining}, true
 }
 
 // Prune removes expired orders and tombstones.
@@ -363,8 +477,8 @@ func (b *Book) Prune(now time.Time) {
 	nowMs := now.UnixMilli()
 	b.mtx.Lock()
 	defer b.mtx.Unlock()
-	for id, o := range b.orders {
-		if o.Expiry <= nowMs {
+	for id, e := range b.orders {
+		if e.ord.Expiry <= nowMs {
 			delete(b.orders, id)
 		}
 	}
@@ -376,17 +490,24 @@ func (b *Book) Prune(now time.Time) {
 }
 
 // Orders returns the live orders, sells first by ascending rate, then buys by
-// descending rate.
-func (b *Book) Orders(now time.Time) []*MeshOrder {
+// descending rate (i.e. best price first on each side), then oldest first.
+func (b *Book) Orders(now time.Time) []*BookOrder {
 	nowMs := now.UnixMilli()
 	b.mtx.Lock()
-	ords := make([]*MeshOrder, 0, len(b.orders))
-	for _, o := range b.orders {
-		if o.Expiry > nowMs {
-			ords = append(ords, o)
+	ords := make([]*BookOrder, 0, len(b.orders))
+	for _, e := range b.orders {
+		if e.ord.Expiry > nowMs {
+			ords = append(ords, &BookOrder{MeshOrder: e.ord, Remaining: e.remaining})
 		}
 	}
 	b.mtx.Unlock()
+	sortBookOrders(ords)
+	return ords
+}
+
+// sortBookOrders sorts sells first by ascending rate, then buys by descending
+// rate, then oldest first.
+func sortBookOrders(ords []*BookOrder) {
 	sort.Slice(ords, func(i, j int) bool {
 		oi, oj := ords[i], ords[j]
 		if oi.Sell != oj.Sell {
@@ -400,5 +521,4 @@ func (b *Book) Orders(now time.Time) []*MeshOrder {
 		}
 		return oi.Stamp < oj.Stamp
 	})
-	return ords
 }

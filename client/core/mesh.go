@@ -51,6 +51,14 @@ func (c *Core) connectMesh(ctx context.Context) {
 		}
 	}()
 
+	// Swap parameters need our receiving address for the asset we get.
+	mesh.SetAddressFunc(func(assetID uint32) (string, error) {
+		if _, err := c.connectedWallet(assetID); err != nil {
+			return "", err
+		}
+		return c.NewDepositAddress(assetID)
+	})
+
 	// SIMNET-ONLY debug API for driving mesh order books from test scripts.
 	if addr := os.Getenv("TATANKA_MESH_DEBUG_ADDR"); addr != "" {
 		srv := meshpkg.NewDebugServer(mesh.OrderBooks, func() string { return mesh.PeerID().String() })
