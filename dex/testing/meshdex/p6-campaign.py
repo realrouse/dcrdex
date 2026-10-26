@@ -26,6 +26,8 @@ RUN = os.environ.get("RUN", "/workspace/tatanka-dev/run/p6")
 DEXTEST = os.environ.get("DEXTEST", os.path.expanduser("~/dextest"))
 MESH_ENV = dict(os.environ, SESSION="tatanka-p6", N="5", PORT_BASE="13445",
                 ROOT="/workspace/tatanka-dev/run/p6mesh", PATH=BIN + ":" + os.environ["PATH"])
+os.environ["PATH"] = BIN + ":" + os.environ["PATH"]  # harness CLIs (bitcoin-cli, dcrctl)
+PEER_OBJS = {}
 MESHSH = HERE + "/mesh-p4.sh"
 SCALE_MIN = float(os.environ.get("SCALE_MIN", 8))
 CHURN_MIN = float(os.environ.get("CHURN_MIN", 45))
@@ -411,6 +413,7 @@ def main():
     log("P6 campaign seed=%d scale=%smin churn=%smin steady=%smin locks=%d/%d" % (SEED, SCALE_MIN, CHURN_MIN, STEADY_MIN, MAKER_LOCK, TAKER_LOCK))
     log("mesh nodes:", [mesh("up", i) for i in range(1, 6)])
     P = {n: Peer(n, c) for n, c in PEERS.items()}
+    PEER_OBJS.update(P)
     for p in P.values():
         p.start()
     for p in P.values():
@@ -493,3 +496,5 @@ if __name__ == "__main__":
         sys.exit(main())
     finally:
         STOP.set()
+        for p in PEER_OBJS.values():  # never leave bisonw processes behind
+            p.kill()
