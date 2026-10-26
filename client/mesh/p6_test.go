@@ -583,6 +583,6 @@ func TestP6MissingContractAfterLock(t *testing.T) {
 	delete(chain.contracts, string(r.MakerSwap.CoinID)) // the tx vanished
 	chain.mtx.Unlock()
 	chain.advance(2*time.Hour + time.Minute)
-	waitReason(t, maker, id, "not found by the wallet")
+	waitReason(t, maker, id, "never found on chain")
 	waitSwap(t, maker, id, SwapAbandoned, 5*time.Second)
 }

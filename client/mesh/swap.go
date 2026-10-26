@@ -339,6 +339,9 @@ type swapState struct {
 	// missingSince is when our own contract was first seen missing after its
 	// lock time (refund impossible: the tx doesn't exist).
 	missingSince time.Time
+	// foreignSpend: our taker contract was spent by a tx whose secret does
+	// not match this swap (so there is nothing for us to redeem).
+	foreignSpend bool
 
 	inMtx sync.Mutex // inbound peer data, set by message handlers
 	in    swapInbound
@@ -748,19 +751,33 @@ func (ob *OrderBooks) ownContractMissing(ctx context.Context, sw *swapper, s *sw
 	if own == nil {
 		return false
 	}
-	if _, _, err := w.Confirmations(ctx, own.CoinID, own.Contract); err == nil {
+	_, spent, err := w.Confirmations(ctx, own.CoinID, own.Contract)
+	if err == nil && !spent {
 		s.missingSince = time.Time{}
 		return false
+	}
+	gone := "never found on chain or in the mempool"
+	if err == nil {
+		// Spent, and the caller has already found no redemption of it to act
+		// on: another swap's tx claimed it (P6: shared broadcast cache).
+		gone = "already spent by another tx"
+		if s.rec.Side == sideTaker && !s.foreignSpend {
+			// Only give up once a redemption was found and its secret is
+			// not ours; a lookup that keeps failing must not cost us the
+			// maker's coins.
+			ob.swapWarn(sw, s, "own contract tx %s spent, looking for the redemption (will retry)", own.TxID)
+			return true
+		}
 	}
 	now := ob.now()
 	if s.missingSince.IsZero() {
 		s.missingSince = now
 	}
 	if now.Sub(s.missingSince) < sw.cfg.missingTimeout() {
-		ob.swapWarn(sw, s, "own contract tx %s not found by the wallet (will retry)", own.TxID)
+		ob.swapWarn(sw, s, "own contract tx %s %s, can't refund (will retry)", own.TxID, gone)
 		return true
 	}
-	ob.setSwapStatus(sw, s, SwapAbandoned, "own contract tx %s never found on chain or in the mempool past its lock time; nothing to refund", own.TxID)
+	ob.setSwapStatus(sw, s, SwapAbandoned, "own contract tx %s %s past its lock time; nothing to refund", own.TxID, gone)
 	return true
 }
 
@@ -948,6 +965,8 @@ func (ob *OrderBooks) stepTaker(ctx context.Context, sw *swapper, s *swapState, 
 					secret = sec
 					r.MakerRedeem = rc
 					ob.swapEvent(s, "secret found on chain in maker redeem tx %s", rc.TxID)
+				} else if err == nil {
+					s.foreignSpend = true
 				}
 			}
 		}
