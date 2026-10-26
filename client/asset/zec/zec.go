@@ -2495,7 +2495,7 @@ func (w *zecWallet) SignCoinMessage(coin asset.Coin, msg dex.Bytes) (pubkeys, si
 
 func (w *zecWallet) Swap(ctx context.Context, swaps *asset.Swaps) ([]asset.Receipt, asset.Coin, uint64, error) {
 	// Check broadcast cache for retry of a previously built transaction.
-	cacheKey := broadcast.CoinIDsCacheKey(swaps.Inputs)
+	cacheKey := broadcast.SwapCacheKey(swaps)
 	if cached, ok := broadcast.RecoverFromCache(w.swapCache, cacheKey,
 		func(e *zecSwapCacheEntry) error { _, err := w.broadcastTx(ctx, e.signedTx); return err },
 		func(e *zecSwapCacheEntry) bool {

@@ -3849,7 +3849,7 @@ func (dcr *ExchangeWallet) Swap(ctx context.Context, swaps *asset.Swaps) ([]asse
 	}
 
 	// Check broadcast cache for retry of a previously built transaction.
-	cacheKey := broadcast.CoinIDsCacheKey(swaps.Inputs)
+	cacheKey := broadcast.SwapCacheKey(swaps)
 	if cached, ok := broadcast.RecoverFromCache(dcr.swapCache, cacheKey,
 		func(e *dcrSwapCacheEntry) error { _, err := dcr.broadcastTx(ctx, e.signedTx, e.feeRate); return err },
 		func(e *dcrSwapCacheEntry) bool {

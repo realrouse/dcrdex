@@ -5,6 +5,7 @@ package broadcast
 
 import (
 	"encoding/hex"
+	"fmt"
 	"sort"
 	"strings"
 	"sync"
@@ -30,6 +31,25 @@ func CoinIDsCacheKey(coins []asset.Coin) string {
 	}
 	sort.Strings(ids)
 	return strings.Join(ids, ",")
+}
+
+// SwapCacheKey builds a swap cache key from the sorted input coin IDs and
+// every contract's terms. Inputs alone are not enough: when a swap tx fails
+// to broadcast, its inputs are returned and may fund a different swap, which
+// must not "recover" (rebroadcast and return the receipts of) the first
+// swap's cached tx. That happened in the tatanka P6 campaign: two mesh swaps
+// recorded the same LBC contract.
+func SwapCacheKey(swaps *asset.Swaps) string {
+	var b strings.Builder
+	b.WriteString(CoinIDsCacheKey(swaps.Inputs))
+	for _, c := range swaps.Contracts {
+		if c == nil {
+			b.WriteString("|<nil>")
+			continue
+		}
+		fmt.Fprintf(&b, "|%s:%d:%x:%d", c.Address, c.Value, []byte(c.SecretHash), c.LockTime)
+	}
+	return b.String()
 }
 
 // RedeemCacheKey builds a cache key from sorted redemption input coin IDs.
