@@ -71,6 +71,7 @@ const (
 	immatureID                       = "IMMATURE"
 	feeBalanceID                     = "FEE_BALANCE"
 	candlesLoadingID                 = "CANDLES_LOADING"
+	chartHistoryLimitID              = "CHART_HISTORY_LIMIT"
 	depthLoadingID                   = "DEPTH_LOADING"
 	invalidAddrressMsgID             = "INVALID_ADDRESS_MSG"
 	txFeeSupportedID                 = "TXFEE_UNSUPPORTED"
@@ -495,6 +496,7 @@ var enUS = map[string]*intl.Translation{
 	immatureID:                       {T: "immature"},
 	feeBalanceID:                     {T: "fee balance"},
 	candlesLoadingID:                 {T: "waiting for candlesticks"},
+	chartHistoryLimitID:              {T: "only {{ days }} days of {{ tf }} history"},
 	depthLoadingID:                   {T: "retrieving depth data"},
 	invalidAddrressMsgID:             {T: "invalid address: {{ address }}"},
 	txFeeSupportedID:                 {T: "fee estimation is not supported for this wallet type"},

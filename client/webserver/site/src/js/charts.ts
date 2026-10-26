@@ -1,8 +1,7 @@
 import Doc, { Animation, clamp } from './doc'
-import { RateEncodingFactor } from './orderutil'
 import OrderBook from './orderbook'
 import State from './state'
-import { UnitInfo, Market, Candle, CandlesPayload, app } from './registry'
+import { UnitInfo, Candle } from './registry'
 
 const bind = Doc.bind
 const PIPI = 2 * Math.PI
@@ -57,10 +56,6 @@ export interface DepthReporters {
   click: (x: number) => void
   volume: (r: VolumeReport) => void
   zoom: (z: number) => void
-}
-
-export interface CandleReporters {
-  mouse: (r: Candle | null) => void
 }
 
 export interface ChartReporters {
@@ -845,217 +840,708 @@ export class DepthChart extends Chart {
   }
 }
 
-/* CandleChart is a candlestick data renderer. */
-export class CandleChart extends Chart {
-  reporters: CandleReporters
-  data: CandlesPayload
-  zoomLevel: number
-  numToShow: number
-  candleRegion: Region
-  volumeRegion: Region
-  resizeTimer: number
-  zoomLevels: number[]
-  market: Market
-  rateConversionFactor: number
+/*
+ * PriceChart is a lightweight, dependency-free exchange-style price chart:
+ * candles/line/area, volume, MA/EMA overlays, auto/manual/log/% price scale,
+ * crosshair with an OHLC readout, adaptive local-time axis, last-price line
+ * with a candle-close countdown, mouse/touch zoom and pan, and optional
+ * collapsing of periods with no trades ("no gaps").
+ */
 
-  constructor (parent: HTMLElement, reporters: CandleReporters) {
-    super(parent, {
-      resize: () => this.resized(),
-      click: (/* e: MouseEvent */) => { this.clicked() },
-      zoom: (bigger: boolean) => this.zoomed(bigger)
+const DAY = 864e5
+const HOUR = 36e5
+const WEEK = 7 * DAY
+const MONTH = 30 * DAY // nominal; 1M bins follow calendar months (UTC)
+
+export interface ChartTF {
+  ms: number
+  src: string // the server bin size the timeframe is built from
+}
+
+/* chartTFs are the chart timeframes. Native server bins are 5m, 1h and 24h. */
+export const chartTFs: Record<string, ChartTF> = {
+  '5m': { ms: 3e5, src: '5m' },
+  '15m': { ms: 9e5, src: '5m' },
+  '30m': { ms: 18e5, src: '5m' },
+  '1h': { ms: HOUR, src: '1h' },
+  '4h': { ms: 4 * HOUR, src: '1h' },
+  '1D': { ms: DAY, src: '24h' },
+  '3D': { ms: 3 * DAY, src: '24h' },
+  '1W': { ms: WEEK, src: '24h' },
+  '1M': { ms: MONTH, src: '24h' }
+}
+
+export interface PCandle {
+  t: number // bin start, unix ms
+  o: number
+  h: number
+  l: number
+  c: number
+  v: number // base volume, atoms
+  tr: boolean // had trades
+}
+
+export interface PriceChartSettings {
+  type: string // candle, line, area
+  scale: string // lin, log, pct
+  auto: boolean
+  vol: boolean
+  ma: Record<string, boolean>
+  ema: boolean
+  skip: boolean // collapse periods without trades
+}
+
+interface Layout {
+  pw: number
+  ph: number
+  cw: number
+  top: number
+  bot: number
+  tlo: number
+  thi: number
+}
+
+interface PTheme {
+  grid: string
+  txt: string
+  hi: string
+  axis: string
+  up: string
+  dn: string
+  cross: string
+  tag: string
+  tagTxt: string
+  line: string
+}
+
+const pcDark: PTheme = { grid: '#14283c', txt: '#8a9bb0', hi: '#c5d0dc', axis: '#23344a', up: '#2ebd85', dn: '#e04f5f', cross: '#6b7d93', tag: '#2a3b52', tagTxt: '#e6edf5', line: '#2997ff' }
+const pcLight: PTheme = { grid: '#e7eaee', txt: '#5d6b7a', hi: '#1b1b1b', axis: '#ccd3db', up: '#1f8a4c', dn: '#c0392b', cross: '#8a96a3', tag: '#dde3ea', tagTxt: '#1b1b1b', line: '#1e6fd9' }
+const MAS: [number, string][] = [[7, '#f0b90b'], [25, '#e377c2'], [99, '#9d7cf4']]
+const EMA_N = 20
+const EMA_COLOR = '#4fc3f7'
+const FONT = '11px sans-serif'
+
+/*
+ * normalizeCandles converts server candles to chart candles keyed by bin
+ * start. Bins without trades get the previous close. Duplicate bins (e.g. the
+ * overlap of older history and the live feed) keep the later one.
+ */
+export function normalizeCandles (cs: Candle[], ms: number): PCandle[] {
+  const out: PCandle[] = []
+  let pc = 0
+  for (const c of cs) {
+    const k: PCandle = { t: Math.floor(c.startStamp / ms) * ms, o: c.startRate, h: c.highRate, l: c.lowRate, c: c.endRate, v: c.matchVolume, tr: c.matchVolume > 0 }
+    if (!k.h) k.o = k.h = k.l = k.c = pc
+    else if (!k.o) k.o = pc || k.l
+    if (!k.c) continue
+    const prev = out[out.length - 1]
+    if (prev && prev.t >= k.t) {
+      if (prev.t === k.t) out[out.length - 1] = k
+      continue
+    }
+    pc = k.c
+    out.push(k)
+  }
+  return out
+}
+
+function binKey (t: number, ms: number): number {
+  if (ms === MONTH) {
+    const d = new Date(t)
+    return d.getUTCFullYear() * 12 + d.getUTCMonth()
+  }
+  if (ms === WEEK) return Math.floor((t / DAY + 3) / 7) // weeks start Monday
+  return Math.floor(t / ms)
+}
+
+function binStart (k: number, ms: number): number {
+  if (ms === MONTH) return Date.UTC(Math.floor(k / 12), k % 12, 1)
+  if (ms === WEEK) return (k * 7 - 3) * DAY
+  return k * ms
+}
+
+/* aggregateCandles builds coarser bins. OHLC come from bins with trades. */
+export function aggregateCandles (cs: PCandle[], ms: number): PCandle[] {
+  const out: PCandle[] = []
+  let cur: PCandle | null = null
+  let ck = 0
+  for (const c of cs) {
+    const k = binKey(c.t, ms)
+    if (!cur || k !== ck) {
+      ck = k
+      cur = { t: binStart(k, ms), o: c.o, h: c.h, l: c.l, c: c.c, v: 0, tr: false }
+      out.push(cur)
+    }
+    if (c.tr) {
+      if (!cur.tr) [cur.o, cur.h, cur.l] = [c.o, c.h, c.l]
+      else [cur.h, cur.l] = [Math.max(cur.h, c.h), Math.min(cur.l, c.l)]
+      cur.tr = true
+      cur.v += c.v
+    }
+    cur.c = c.c
+  }
+  return out
+}
+
+export class PriceChart {
+  parent: HTMLElement
+  canvas: HTMLCanvasElement
+  ctx: CanvasRenderingContext2D
+  s: PriceChartSettings
+  rf: number // message rate -> conventional
+  vf: number // base atoms -> conventional
+  all: PCandle[]
+  view: PCandle[]
+  ind: [string, string, number[]][]
+  ms: number
+  n: number // candles across the plot
+  off: number // candles from the right edge
+  ylo: number
+  yhi: number
+  w: number
+  h: number
+  L: Layout | null
+  m: { x: number, y: number } | null
+  drag: { x: number, y: number, off: number, n: number, lo: number, hi: number, zone: string } | null
+  pinch: { d: number, n: number } | null
+  ptr: Map<number, { x: number, y: number }>
+  raf: number
+  ticker: number
+  ro: ResizeObserver
+  onChange: (s: PriceChartSettings) => void
+  onOlder: () => void // the left edge is near the oldest candle
+
+  constructor (parent: HTMLElement, s: PriceChartSettings) {
+    this.parent = parent
+    this.s = s
+    this.rf = this.vf = 1e8
+    this.all = []
+    this.view = []
+    this.ind = []
+    this.ms = HOUR
+    this.n = 80
+    this.off = -3
+    this.L = this.m = this.drag = this.pinch = null
+    this.ptr = new Map()
+    this.onChange = this.onOlder = () => { /* set by owner */ }
+    const c = this.canvas = document.createElement('canvas')
+    c.tabIndex = 0
+    c.className = 'price-chart'
+    parent.appendChild(c)
+    this.ctx = c.getContext('2d') as CanvasRenderingContext2D
+    this.ro = new ResizeObserver(() => this.resize())
+    this.ro.observe(parent)
+    // Redraw once a second for the candle-close countdown.
+    this.ticker = window.setInterval(() => { if (this.view.length && !document.hidden) this.req() }, 1000)
+    const pos = (e: MouseEvent) => {
+      const r = c.getBoundingClientRect()
+      return { x: e.clientX - r.left, y: e.clientY - r.top }
+    }
+    const pts = () => Array.from(this.ptr.values())
+    c.addEventListener('pointerdown', (e: PointerEvent) => {
+      c.setPointerCapture(e.pointerId)
+      const p = pos(e)
+      this.ptr.set(e.pointerId, p)
+      if (this.ptr.size === 2) {
+        const [a, b] = pts()
+        this.pinch = { d: Math.hypot(a.x - b.x, a.y - b.y), n: this.n }
+        this.drag = null
+        return
+      }
+      const L = this.L
+      if (!L) return
+      this.drag = { ...p, off: this.off, n: this.n, lo: L.tlo, hi: L.thi, zone: p.x > L.pw ? 'y' : p.y > L.ph ? 'x' : 'pan' }
     })
-    this.reporters = reporters
-    this.zoomLevel = 1
-    this.numToShow = 100
-    this.resize()
-  }
-
-  /* resized is called when the window or parent element are resized. */
-  resized () {
-    const ext = this.plotRegion.extents
-    const candleExtents = new Extents(ext.x.min, ext.x.max, ext.y.min, ext.y.min + ext.yRange * 0.85)
-    this.candleRegion = new Region(this.ctx, candleExtents)
-    const volumeExtents = new Extents(ext.x.min, ext.x.max, ext.y.min + 0.85 * ext.yRange, ext.y.max)
-    this.volumeRegion = new Region(this.ctx, volumeExtents)
-    // Set a delay on the render to prevent lag.
-    if (this.resizeTimer) clearTimeout(this.resizeTimer)
-    this.resizeTimer = window.setTimeout(() => this.draw(), 100)
-  }
-
-  clicked (/* e: MouseEvent */) {
-    // handle clicks
-  }
-
-  /* zoomed zooms the current view in or out. bigger=true is zoom in. */
-  zoomed (bigger: boolean) {
-    // bigger actually means fewer candles -> reduce zoomLevels index.
-    const idx = this.zoomLevels.indexOf(this.numToShow)
-    if (bigger) {
-      if (idx === 0) return
-      this.numToShow = this.zoomLevels[idx - 1]
-    } else {
-      if (this.zoomLevels.length <= idx + 1 || this.numToShow > this.data.candles.length) return
-      this.numToShow = this.zoomLevels[idx + 1]
-    }
-    this.draw()
-  }
-
-  /* render draws the chart */
-  render () {
-    const data = this.data
-    if (!data || !this.visible || this.canvas.width === 0) {
-      this.renderScheduled = true
-      return
-    }
-    const candleWidth = data.ms
-    const mousePos = this.mousePos
-    const allCandles = data.candles || []
-
-    const n = Math.min(this.numToShow, allCandles.length)
-    const candles = allCandles.slice(allCandles.length - n)
-
-    this.clear()
-
-    // If there are no candles. just don't draw anything.
-    if (n === 0) return
-
-    // padding definition and some helper functions to parse candles.
-    const candleWidthPadding = 0.2
-    const start = (c: Candle) => truncate(c.endStamp, candleWidth)
-    const end = (c: Candle) => start(c) + candleWidth
-    const paddedStart = (c: Candle) => start(c) + candleWidthPadding * candleWidth
-    const paddedWidth = (1 - 2 * candleWidthPadding) * candleWidth
-
-    const first = candles[0]
-    const last = candles[n - 1]
-
-    let [high, low, highVol] = [first.highRate, first.lowRate, first.matchVolume]
-    for (const c of candles) {
-      if (c.highRate > high) high = c.highRate
-      if (c.lowRate < low) low = c.lowRate
-      if (c.matchVolume > highVol) highVol = c.matchVolume
-    }
-
-    high += (high - low) * 0.1 // a little padding
-    const xStart = start(first)
-    let xEnd = end(last)
-    xEnd += (xEnd - xStart) * 0.05 // a little padding
-
-    // Calculate data extents and store them. They are used to apply labels.
-    const rateStep = this.market.ratestep
-    const dataExtents = new Extents(xStart, xEnd, low, high)
-    if (low === high) {
-      // If there is no price movement at all in the window, show a little more
-      // top and bottom so things render nicely.
-      dataExtents.y.min -= rateStep
-      dataExtents.y.max += rateStep
-    }
-    this.dataExtents = dataExtents
-
-    let mouseCandle: Candle | null = null
-    if (mousePos) {
-      this.plotRegion.plot(new Extents(dataExtents.x.min, dataExtents.x.max, 0, 1), (ctx, tools) => {
-        const selectedStartStamp = truncate(tools.unx(mousePos.x), candleWidth)
-        for (const c of candles) {
-          if (start(c) === selectedStartStamp) {
-            mouseCandle = c
-            ctx.fillStyle = this.theme.gridLines
-            ctx.fillRect(tools.x(start(c)), tools.y(0), tools.w(candleWidth), tools.h(1))
-            break
+    c.addEventListener('pointermove', (e: PointerEvent) => {
+      const p = pos(e)
+      this.m = p
+      if (this.ptr.has(e.pointerId)) this.ptr.set(e.pointerId, p)
+      const { drag: d, L } = this
+      if (this.pinch && this.ptr.size === 2) {
+        const [a, b] = pts()
+        this.zoomTo(this.pinch.n * this.pinch.d / Math.max(10, Math.hypot(a.x - b.x, a.y - b.y)), (a.x + b.x) / 2)
+      } else if (d && L) {
+        const [dx, dy] = [p.x - d.x, p.y - d.y]
+        if (d.zone === 'y') { // stretch the price axis, turns Auto off
+          const mid = (d.lo + d.hi) / 2
+          const k = Math.exp(dy * 0.006)
+          this.ylo = mid - (mid - d.lo) * k
+          this.yhi = mid + (d.hi - mid) * k
+          if (this.s.auto) this.set({ auto: false })
+        } else if (d.zone === 'x') {
+          this.n = this.clampN(d.n * Math.exp(-dx * 0.006))
+          this.off = this.clampOff(this.off)
+        } else {
+          this.off = this.clampOff(d.off + dx / L.cw)
+          if (!this.s.auto) {
+            const r = (d.hi - d.lo) * dy / (L.bot - L.top)
+            this.ylo = d.lo + r
+            this.yhi = d.hi + r
           }
         }
-      })
-    }
-
-    // Draw the grid
-    const rFactor = this.rateConversionFactor
-    const baseUnit = app().assets[this.market.baseid]?.unitInfo.conventional.unit || this.market.basesymbol.toUpperCase()
-    const xLabels = makeCandleTimeLabels(candles, candleWidth, this.plotRegion.width(), 100)
-    this.plotXGrid(xLabels, xStart, xEnd)
-    const yLabels = this.makeYLabels(this.candleRegion, rateStep, baseUnit, v => Doc.formatFourSigFigs(v / rFactor))
-    this.plotYGrid(this.candleRegion, yLabels, this.dataExtents.y.min, this.dataExtents.y.max)
-
-    // Draw the volume bars.
-    const volDataExtents = new Extents(xStart, xEnd, 0, highVol)
-    this.volumeRegion.plot(volDataExtents, (ctx, tools) => {
-      ctx.fillStyle = this.theme.gridBorder
-      for (const c of candles) {
-        ctx.fillRect(tools.x(paddedStart(c)), tools.y(0), tools.w(paddedWidth), tools.h(c.matchVolume))
       }
+      c.style.cursor = d ? 'grabbing' : L && p.x > L.pw ? 'ns-resize' : L && p.y > L.ph ? 'ew-resize' : 'crosshair'
+      this.req()
     })
-
-    // Draw the candles.
-    this.candleRegion.plot(dataExtents, (ctx, tools) => {
-      ctx.lineWidth = 1
-      for (const c of candles) {
-        const desc = c.startRate > c.endRate
-        const [x, y, w, h] = [tools.x(paddedStart(c)), tools.y(c.startRate), tools.w(paddedWidth), tools.h(c.endRate - c.startRate)]
-        const [high, low, cx] = [tools.y(c.highRate), tools.y(c.lowRate), w / 2 + x]
-        ctx.strokeStyle = desc ? this.theme.sellLine : this.theme.buyLine
-        ctx.fillStyle = desc ? this.theme.sellFill : this.theme.buyFill
-
-        ctx.beginPath()
-        ctx.moveTo(cx, high)
-        ctx.lineTo(cx, low)
-        ctx.stroke()
-
-        ctx.fillRect(x, y, w, h)
-        ctx.strokeRect(x, y, w, h)
-      }
-    })
-
-    // Apply labels.
-    this.plotXLabels(xLabels, xStart, xEnd, [])
-    this.plotYLabels(yLabels, this.dataExtents.y.min, this.dataExtents.y.max, baseUnit)
-
-    // Highlight the candle if the user mouse is over the canvas.
-    if (mouseCandle) {
-      const yExt = this.xRegion.extents.y
-      this.xRegion.plot(new Extents(dataExtents.x.min, dataExtents.x.max, yExt.min, yExt.max), (ctx, tools) => {
-        if (!mouseCandle) return // For TypeScript. Duh.
-        this.applyLabelStyle()
-        const rangeTxt = `${new Date(start(mouseCandle)).toLocaleString()} - ${new Date(end(mouseCandle)).toLocaleString()}`
-        const [xPad, yPad] = [25, 2]
-        const rangeWidth = ctx.measureText(rangeTxt).width + 2 * xPad
-        const rangeHeight = 16
-        let centerX = tools.x((start(mouseCandle) + end(mouseCandle)) / 2)
-        let left = centerX - rangeWidth / 2
-        const xExt = this.xRegion.extents.x
-        if (left < xExt.min) left = xExt.min
-        else if (left + rangeWidth > xExt.max) left = xExt.max - rangeWidth
-        centerX = left + rangeWidth / 2
-        const top = yExt.min + (this.xRegion.height() - rangeHeight) / 2
-        ctx.fillStyle = this.theme.legendFill
-        ctx.strokeStyle = this.theme.gridBorder
-        const rectArgs: [number, number, number, number] = [left - xPad, top - yPad, rangeWidth + 2 * xPad, rangeHeight + 2 * yPad]
-        ctx.fillRect(...rectArgs)
-        ctx.strokeRect(...rectArgs)
-        this.applyLabelStyle()
-        ctx.fillText(rangeTxt, centerX, this.xRegion.extents.midY, rangeWidth)
-      })
+    const up = (e: PointerEvent) => {
+      this.ptr.delete(e.pointerId)
+      if (this.ptr.size < 2) this.pinch = null
+      this.drag = null
     }
-
-    // Report the mouse candle.
-    this.reporters.mouse(mouseCandle)
+    c.addEventListener('pointerup', up)
+    c.addEventListener('pointercancel', up)
+    c.addEventListener('pointerleave', () => {
+      if (this.drag) return
+      this.m = null
+      this.req()
+    })
+    c.addEventListener('wheel', (e: WheelEvent) => {
+      e.preventDefault()
+      this.zoomTo(this.n * Math.exp(e.deltaY * 0.0015), pos(e).x)
+    }, { passive: false })
+    c.addEventListener('dblclick', (e: MouseEvent) => {
+      if (this.L && pos(e).x > this.L.pw) this.set({ auto: true })
+      else this.reset()
+    })
+    c.addEventListener('keydown', (e: KeyboardEvent) => {
+      const step = Math.max(1, this.n / 10)
+      switch (e.key) {
+        case 'ArrowLeft': this.off = this.clampOff(this.off + step); break
+        case 'ArrowRight': this.off = this.clampOff(this.off - step); break
+        case '+': case '=': this.zoomTo(this.n / 1.25); break
+        case '-': this.zoomTo(this.n * 1.25); break
+        default: return
+      }
+      e.preventDefault()
+      this.req()
+    })
   }
 
-  /* setCandles sets the candle data and redraws the chart. */
-  setCandles (data: CandlesPayload, market: Market, baseUnitInfo: UnitInfo, quoteUnitInfo: UnitInfo) {
-    this.data = data
-    if (!data.candles) return
-    this.market = market
-    const [qFactor, bFactor] = [quoteUnitInfo.conventional.conversionFactor, baseUnitInfo.conventional.conversionFactor]
-    this.rateConversionFactor = RateEncodingFactor * qFactor / bFactor
-    let n = 25
-    this.zoomLevels = []
-    const maxCandles = Math.max(data.candles.length, 1000)
-    while (n < maxCandles) {
-      this.zoomLevels.push(n)
-      n *= 2
+  /* set updates the settings and redraws. */
+  set (patch: Partial<PriceChartSettings>) {
+    Object.assign(this.s, patch)
+    if ('skip' in patch || 'ma' in patch || 'ema' in patch) this.filter()
+    if ('skip' in patch) {
+      this.n = this.clampN(Math.min(this.n, this.view.length + 3))
+      this.off = -3
+      this.s.auto = true
     }
-    this.numToShow = 100
-    this.draw()
+    if ('scale' in patch) this.s.auto = true
+    this.req()
+    this.onChange(this.s)
   }
+
+  /*
+   * setData sets the candles. With keepView, the view stays where it is
+   * relative to the newest candle, for live updates and prepended history.
+   */
+  setData (cs: PCandle[], ms: number, rf: number, vf: number, keepView?: boolean) {
+    [this.all, this.ms, this.rf, this.vf] = [cs, ms, rf, vf]
+    this.filter()
+    if (keepView) this.req()
+    else this.reset()
+  }
+
+  filter () {
+    const all = this.all
+    const v = this.view = this.s.skip ? all.filter((c, i) => c.tr || i === all.length - 1) : all
+    this.ind = []
+    for (const [p, col] of MAS) {
+      if (!this.s.ma[p]) continue
+      const a: number[] = []
+      let sum = 0
+      v.forEach((c, i) => {
+        sum += c.c
+        if (i >= p) sum -= v[i - p].c
+        a.push(i >= p - 1 ? sum / p : NaN)
+      })
+      this.ind.push(['MA' + p, col, a])
+    }
+    if (this.s.ema) {
+      const a: number[] = []
+      const k = 2 / (EMA_N + 1)
+      let e = 0
+      v.forEach((c, i) => {
+        e = i ? c.c * k + e * (1 - k) : c.c
+        a.push(i >= EMA_N - 1 ? e : NaN)
+      })
+      this.ind.push(['EMA' + EMA_N, EMA_COLOR, a])
+    }
+  }
+
+  clampN (n: number) { return Math.min(Math.max(n, 8), Math.max(this.view.length * 1.2, 8), 4000) }
+  clampOff (v: number) { return Math.min(Math.max(v, -this.n * 0.5), Math.max(this.view.length - this.n * 0.2, 0)) }
+
+  /* zoomTo zooms to n candles, keeping the candle at x fixed. */
+  zoomTo (n: number, x?: number) {
+    const L = this.L
+    if (!L) return
+    const mx = x ?? L.pw / 2
+    const len = this.view.length
+    const idx = len - this.off - (L.pw - mx) / L.cw
+    this.n = this.clampN(n)
+    this.off = this.clampOff(len - idx - (L.pw - mx) / (L.pw / this.n))
+    this.req()
+  }
+
+  reset () {
+    this.n = this.clampN(Math.min(this.parent.clientWidth < 500 ? 40 : 80, this.view.length + 3))
+    this.off = -3
+    this.set({ auto: true })
+  }
+
+  fit () {
+    this.n = this.clampN(this.view.length + 4)
+    this.off = -3
+    this.set({ auto: true })
+  }
+
+  /* setRange shows the last dur ms. It is false if there's not enough history. */
+  setRange (dur: number): boolean {
+    const v = this.view
+    if (!v.length) return false
+    const from = this.all[this.all.length - 1].t - dur + this.ms
+    let i = v.length - 1
+    while (i > 0 && v[i - 1].t >= from) i--
+    this.n = this.clampN(v.length - i + 3)
+    this.off = -3
+    this.set({ auto: true })
+    return this.all[0].t <= from
+  }
+
+  req () {
+    if (this.raf) return
+    this.raf = requestAnimationFrame(() => {
+      this.raf = 0
+      this.draw()
+    })
+  }
+
+  resize () {
+    const d = window.devicePixelRatio || 1
+    const [w, h] = [this.parent.clientWidth, this.parent.clientHeight]
+    this.canvas.width = Math.round(w * d)
+    this.canvas.height = Math.round(h * d)
+    this.ctx.setTransform(d, 0, 0, d, 0, 0)
+    this.w = w
+    this.h = h
+    this.req()
+  }
+
+  unattach () {
+    this.ro.disconnect()
+    clearInterval(this.ticker)
+  }
+
+  draw () {
+    const { ctx, s, w, h, view } = this
+    if (!w || !h) return
+    ctx.clearRect(0, 0, w, h)
+    if (!view.length) return
+    const o = State.isDark() ? pcDark : pcLight
+    ctx.font = FONT
+    ctx.textBaseline = 'middle'
+    ctx.lineWidth = 1
+    const axW = w < 500 ? 66 : 78
+    const axH = 22
+    const [pw, ph] = [w - axW, h - axH]
+    const cw = pw / this.n
+    const end = view.length - this.off
+    const i0 = Math.max(0, Math.floor(end - this.n) - 1)
+    const i1 = Math.min(view.length, Math.ceil(end) + 1)
+    if (i0 < Math.max(5, this.n * 0.3)) this.onOlder()
+    const xOf = (i: number) => pw - (end - i - 0.5) * cw
+    const top = 40
+    const volH = s.vol ? ph * 0.18 : 0
+    const bot = ph - volH - 8
+    // Price range of the visible candles (Auto), or the manual range.
+    let [lo, hi, vmax] = [Infinity, -Infinity, 0]
+    for (let i = i0; i < i1; i++) {
+      const c = view[i]
+      lo = Math.min(lo, s.type === 'candle' ? c.l : c.c)
+      hi = Math.max(hi, s.type === 'candle' ? c.h : c.c)
+      vmax = Math.max(vmax, c.v)
+    }
+    if (hi <= lo) [hi, lo] = [hi * 1.01, lo * 0.99]
+    const log = s.scale === 'log'
+    const T = (r: number) => log ? Math.log(r) : r
+    const iT = (r: number) => log ? Math.exp(r) : r
+    if (s.auto || this.ylo === undefined) {
+      const pd = (T(hi) - T(lo)) * 0.08
+      this.ylo = T(lo) - pd
+      this.yhi = T(hi) + pd
+    }
+    const [tlo, thi] = [this.ylo, this.yhi]
+    const yOf = (r: number) => top + (thi - T(r)) / (thi - tlo) * (bot - top)
+    const rOfY = (y: number) => iT(thi - (y - top) / (bot - top) * (thi - tlo))
+    this.L = { pw, ph, cw, top, bot, tlo, thi }
+    const base = view[Math.min(Math.max(i0, Math.ceil(end - this.n)), view.length - 1)].c
+    const pct = s.scale === 'pct'
+    const disp = (r: number) => pct ? (r / base - 1) * 100 : r / this.rf
+    // Price grid. Axis decimals follow the grid step; tags get one more.
+    const [rlo, rhi] = [rOfY(bot), rOfY(top)]
+    const step = niceStep((disp(rhi) - disp(rlo)) / Math.max(2, (bot - top) / 45))
+    const dec = Math.max(0, -Math.floor(Math.log10(step) + 1e-9))
+    const lbl = (r: number, x = 0) => {
+      const v = disp(r)
+      return pct ? (v >= 0 ? '+' : '') + v.toFixed(Math.min(dec + x, 2)) + '%' : v.toFixed(Math.min(dec + x, 12))
+    }
+    ctx.strokeStyle = o.grid
+    ctx.fillStyle = o.txt
+    ctx.textAlign = 'left'
+    let lastY = 1e9
+    for (let v = Math.ceil(disp(rlo) / step) * step; v <= disp(rhi); v += step) {
+      const r = pct ? base * (1 + v / 100) : v * this.rf
+      const y = Math.round(yOf(r)) + 0.5
+      if (lastY - y < 24) continue
+      lastY = y
+      hline(ctx, 0, pw, y)
+      ctx.fillText(lbl(r), pw + 6, y)
+    }
+    // Adaptive time axis: the smallest interval giving >= 80px per label.
+    const ib = Math.min(Math.max(i1 - 1, i0 + 1), view.length - 1)
+    const msPx = Math.max(ib > i0 ? (view[ib].t - view[i0].t) / ((ib - i0) * cw) : 0, this.ms / cw)
+    const ivMs = (v: number) => v < 0 ? -v * MONTH : v
+    const iv = IVS.find(v => ivMs(v) >= 80 * msPx && ivMs(v) >= this.ms) || IVS[IVS.length - 1]
+    ctx.textAlign = 'center'
+    let [lastX, plt] = [-1e9, 0]
+    let pk = i0 > 0 ? tkey(view[i0 - 1].t, iv) : null
+    for (let i = i0; i < i1; i++) {
+      const k = tkey(view[i].t, iv)
+      if (pk !== null && k !== pk) {
+        const X = Math.round(xOf(i)) + 0.5
+        if (X - lastX > 56 && X > 22 && X < pw - 20) {
+          lastX = X
+          ctx.strokeStyle = o.grid
+          vline(ctx, X, 0, ph)
+          const [t, big] = tlabel(view[i].t, plt || view[i - 1].t)
+          plt = view[i].t
+          ctx.fillStyle = big ? o.hi : o.txt
+          ctx.font = (big ? 'bold ' : '') + FONT
+          ctx.fillText(t, X, ph + axH / 2)
+          ctx.font = FONT
+        }
+      }
+      pk = k
+    }
+    ctx.strokeStyle = o.axis
+    vline(ctx, pw + 0.5, 0, h)
+    hline(ctx, 0, w, ph + 0.5)
+    // Series.
+    ctx.save()
+    ctx.beginPath()
+    ctx.rect(0, 0, pw, ph)
+    ctx.clip()
+    const bw = Math.max(1, cw * 0.72)
+    if (s.vol && vmax) {
+      ctx.globalAlpha = 0.35
+      for (let i = i0; i < i1; i++) {
+        const c = view[i]
+        if (!c.v) continue
+        const vh = Math.max(1, c.v / vmax * (volH - 4))
+        ctx.fillStyle = c.c >= c.o ? o.up : o.dn
+        ctx.fillRect(xOf(i) - bw / 2, ph - vh, bw, vh)
+      }
+      ctx.globalAlpha = 1
+    }
+    const path = () => {
+      ctx.beginPath()
+      for (let i = i0; i < i1; i++) ctx.lineTo(xOf(i), yOf(view[i].c))
+    }
+    if (s.type === 'candle') {
+      for (let i = i0; i < i1; i++) {
+        const c = view[i]
+        const X = xOf(i)
+        if (!c.tr) { // no trades: a faint dash at the carried price
+          ctx.fillStyle = o.txt
+          ctx.globalAlpha = 0.35
+          ctx.fillRect(X - bw / 2, Math.round(yOf(c.c)), bw, 1)
+          ctx.globalAlpha = 1
+          continue
+        }
+        ctx.fillStyle = ctx.strokeStyle = c.c >= c.o ? o.up : o.dn
+        vline(ctx, Math.round(X) + 0.5, yOf(c.h), yOf(c.l))
+        const y1 = yOf(Math.max(c.o, c.c))
+        ctx.fillRect(X - bw / 2, y1, bw, Math.max(1, yOf(Math.min(c.o, c.c)) - y1))
+      }
+    } else {
+      if (s.type === 'area') {
+        path()
+        ctx.lineTo(xOf(i1 - 1), bot + 8)
+        ctx.lineTo(xOf(i0), bot + 8)
+        const g = ctx.createLinearGradient(0, top, 0, bot)
+        g.addColorStop(0, o.line + '59')
+        g.addColorStop(1, o.line + '00')
+        ctx.fillStyle = g
+        ctx.fill()
+      }
+      path()
+      ctx.strokeStyle = o.line
+      ctx.lineWidth = 1.6
+      ctx.stroke()
+    }
+    ctx.lineWidth = 1.2
+    for (const [, col, a] of this.ind) {
+      ctx.strokeStyle = col
+      ctx.beginPath()
+      let pen = false
+      for (let i = i0; i < i1; i++) {
+        if (isNaN(a[i])) pen = false
+        else {
+          ctx[pen ? 'lineTo' : 'moveTo'](xOf(i), yOf(a[i]))
+          pen = true
+        }
+      }
+      ctx.stroke()
+    }
+    ctx.lineWidth = 1
+    ctx.restore()
+    // Last price line, tag, and countdown to the candle close.
+    const last = view[view.length - 1]
+    const ly = yOf(last.c)
+    const lc = last.c >= last.o ? o.up : o.dn
+    if (ly > 0 && ly < ph) {
+      ctx.setLineDash([2, 3])
+      ctx.strokeStyle = lc
+      hline(ctx, 0, pw, Math.round(ly) + 0.5)
+      ctx.setLineDash([])
+      // Bins up to 1D are aligned to the unix epoch, so the current one closes
+      // at the next multiple of the bin size.
+      const left = this.ms - Date.now() % this.ms
+      tag(ctx, pw, ly, axW, [pct ? lbl(last.c, 1) : fmtPrice(last.c / this.rf), this.ms <= 3 * DAY ? dur(left) : ''], lc, '#fff')
+    }
+    // Crosshair.
+    let hov = view.length - 1
+    const m = this.m
+    if (m && m.x < pw && m.y < ph) {
+      const i = Math.round(end - 0.5 - (pw - m.x) / cw)
+      if (i >= 0 && i < view.length) hov = i
+      const cx = Math.round(xOf(hov)) + 0.5
+      ctx.strokeStyle = o.cross
+      ctx.setLineDash([4, 4])
+      vline(ctx, cx, 0, ph)
+      hline(ctx, 0, pw, Math.round(m.y) + 0.5)
+      ctx.setLineDash([])
+      if (m.y > top - 20 && m.y < bot + 8) tag(ctx, pw, m.y, axW, [lbl(rOfY(m.y), 1)], o.tag, o.tagTxt)
+      const tl = tfull(view[hov].t, this.ms)
+      const tw = ctx.measureText(tl).width + 14
+      const tx = Math.min(Math.max(cx, tw / 2), pw - tw / 2)
+      ctx.fillStyle = o.tag
+      ctx.fillRect(tx - tw / 2, ph + 1, tw, axH - 1)
+      ctx.fillStyle = o.tagTxt
+      ctx.textAlign = 'center'
+      ctx.fillText(tl, tx, ph + axH / 2)
+    }
+    // Legend: OHLC, change and volume of the hovered (else last) candle, then
+    // the indicator values.
+    const c = view[hov]
+    const prev = view[hov - 1] || c
+    const chg = (c.c - prev.c) / prev.c * 100
+    const col = c.c >= c.o ? o.up : o.dn
+    const p = (r: number) => fmtPrice(r / this.rf)
+    const row: [string, string][] = [['O', p(c.o)], ['H', p(c.h)], ['L', p(c.l)], ['C', p(c.c)], ['', (chg >= 0 ? '+' : '') + chg.toFixed(2) + '%'], ['Vol', fmtVol(c.v / this.vf)]]
+    if (w < 500) row.splice(4, 1)
+    let lx = 8
+    ctx.textAlign = 'left'
+    for (const [k, v] of row) {
+      if (k) {
+        ctx.fillStyle = o.txt
+        ctx.fillText(k, lx, 12)
+        lx += ctx.measureText(k).width + 3
+      }
+      ctx.fillStyle = k === 'Vol' ? o.hi : col
+      ctx.fillText(v, lx, 12)
+      lx += ctx.measureText(v).width + 9
+    }
+    lx = 8
+    for (const [name, cl, a] of this.ind) {
+      const t = name + ' ' + (isNaN(a[hov]) ? '—' : p(a[hov]))
+      ctx.fillStyle = cl
+      ctx.fillText(t, lx, 28)
+      lx += ctx.measureText(t).width + 12
+    }
+  }
+}
+
+// Time axis label intervals. Negative values are months.
+const IVS = [3e5, 9e5, 18e5, HOUR, 2 * HOUR, 3 * HOUR, 6 * HOUR, 12 * HOUR, DAY, 2 * DAY, WEEK, 2 * WEEK, -1, -3, -12]
+const MON = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
+const WDAY = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat']
+const p2 = (n: number) => String(n).padStart(2, '0')
+
+/* tkey is the local-time interval index of t. */
+function tkey (t: number, iv: number): number {
+  const d = new Date(t)
+  if (iv < 0) return Math.floor((d.getFullYear() * 12 + d.getMonth()) / -iv)
+  const lt = t - d.getTimezoneOffset() * 6e4
+  return iv >= WEEK ? Math.floor((lt / DAY + 3) / (iv / DAY)) : Math.floor(lt / iv)
+}
+
+/* tlabel labels an interval boundary with its biggest changed unit. */
+function tlabel (t: number, pt: number): [string, boolean] {
+  const [d, p] = [new Date(t), new Date(pt)]
+  if (d.getFullYear() !== p.getFullYear()) return [String(d.getFullYear()), true]
+  if (d.getMonth() !== p.getMonth()) return [MON[d.getMonth()], true]
+  if (d.getDate() !== p.getDate()) return [String(d.getDate()), false]
+  return [p2(d.getHours()) + ':' + p2(d.getMinutes()), false]
+}
+
+function tfull (t: number, ms: number): string {
+  const d = new Date(t)
+  const s = `${WDAY[d.getDay()]} ${d.getDate()} ${MON[d.getMonth()]} '${String(d.getFullYear()).slice(2)}`
+  return ms >= DAY ? s : `${s}  ${p2(d.getHours())}:${p2(d.getMinutes())}`
+}
+
+function dur (ms: number): string {
+  const s = Math.floor(ms / 1e3)
+  const hh = Math.floor(s / 3600)
+  return (hh ? hh + ':' : '') + p2(Math.floor(s / 60) % 60) + ':' + p2(s % 60)
+}
+
+function hline (ctx: CanvasRenderingContext2D, x0: number, x1: number, y: number) {
+  ctx.beginPath()
+  ctx.moveTo(x0, y)
+  ctx.lineTo(x1, y)
+  ctx.stroke()
+}
+
+function vline (ctx: CanvasRenderingContext2D, x: number, y0: number, y1: number) {
+  ctx.beginPath()
+  ctx.moveTo(x, y0)
+  ctx.lineTo(x, y1)
+  ctx.stroke()
+}
+
+function tag (ctx: CanvasRenderingContext2D, pw: number, y: number, axW: number, lines: string[], bg: string, fg: string) {
+  const y0 = Math.max(y - 9, 0)
+  ctx.fillStyle = bg
+  ctx.fillRect(pw + 1, y0, axW, lines[1] ? 30 : 18)
+  ctx.fillStyle = fg
+  ctx.textAlign = 'left'
+  ctx.fillText(lines[0], pw + 6, y0 + 9)
+  if (!lines[1]) return
+  ctx.globalAlpha = 0.8
+  ctx.fillText(lines[1], pw + 6, y0 + 22)
+  ctx.globalAlpha = 1
+}
+
+function niceStep (raw: number): number {
+  const p = Math.pow(10, Math.floor(Math.log10(raw)))
+  const f = raw / p
+  return (f < 1.5 ? 1 : f < 3.5 ? 2 : f < 7.5 ? 5 : 10) * p
+}
+
+/* fmtPrice shows about 4-5 significant figures without exponents. */
+function fmtPrice (v: number): string {
+  const a = Math.abs(v)
+  if (!a) return '0'
+  if (a >= 1e5) return v.toFixed(0)
+  if (a >= 1) return v.toPrecision(5)
+  return v.toFixed(Math.min(12, 3 - Math.floor(Math.log10(a))))
+}
+
+function fmtVol (v: number): string {
+  return v >= 1e6 ? (v / 1e6).toFixed(2) + 'M' : v >= 1e3 ? (v / 1e3).toFixed(1) + 'K' : v.toFixed(v < 10 ? 2 : 0)
 }
 
 interface WaveOpts {
@@ -1386,58 +1872,6 @@ function makeLabels (
   }
 }
 
-const months = ['jan', 'feb', 'mar', 'apr', 'may', 'jun', 'jul', 'aug', 'sep', 'oct', 'nov', 'dec']
-
-/* makeCandleTimeLabels prepares labels for candlestick data. */
-function makeCandleTimeLabels (candles: Candle[], dur: number, screenW: number, spacingGuess: number): LabelSet {
-  const first = candles[0]
-  const last = candles[candles.length - 1]
-  const start = truncate(first.endStamp, dur)
-  const end = truncate(last.endStamp, dur) + dur
-  const diff = end - start
-  const n = Math.min(candles.length, screenW / spacingGuess)
-  const tick = truncate(diff / n, dur)
-  if (tick === 0) {
-    console.error('zero tick', dur, diff, n) // probably won't happen, but it'd suck if it did
-    return { lbls: [] }
-  }
-  let x = start
-  const zoneOffset = new Date().getTimezoneOffset()
-  const dayStamp = (x: number) => {
-    x = x - zoneOffset * 60000
-    return x - (x % 86400000)
-  }
-  let lastDay = dayStamp(start)
-  let lastYear = 0 // new Date(start).getFullYear()
-  if (dayStamp(first.endStamp) === dayStamp(last.endStamp)) lastDay = 0 // Force at least one day stamp.
-  const pts = []
-  let label
-  if (dur < 86400000) {
-    label = (d: Date, x: number) => {
-      const day = dayStamp(x)
-      if (day !== lastDay) return `${months[d.getMonth()]}${d.getDate()} ${d.getHours()}:${String(d.getMinutes()).padStart(2, '0')}`
-      else return `${d.getHours()}:${String(d.getMinutes()).padStart(2, '0')}`
-    }
-  } else {
-    label = (d: Date) => {
-      const year = d.getFullYear()
-      if (year !== lastYear) return `${months[d.getMonth()]}${d.getDate()} '${String(year).slice(2, 4)}`
-      else return `${months[d.getMonth()]}${d.getDate()}`
-    }
-  }
-  while (x <= end) {
-    const d = new Date(x)
-    pts.push({
-      val: x,
-      txt: label(d, x)
-    })
-    lastDay = dayStamp(x)
-    lastYear = d.getFullYear()
-    x += tick
-  }
-  return { lbls: pts }
-}
-
 /* The last element of an array. */
 function last (arr: any[]): any {
   return arr[arr.length - 1]
@@ -1470,8 +1904,4 @@ function floatCompare (a: number, b: number) {
  */
 function withinTolerance (a: number, b: number, tolerance: number) {
   return Math.abs(a - b) < Math.abs(tolerance)
-}
-
-function truncate (v: number, w: number): number {
-  return v - (v % w)
 }

@@ -4,10 +4,13 @@ import BasePage from './basepage'
 import OrderBook from './orderbook'
 import { ReputationMeter, tradingLimits, strongTier } from './account'
 import {
-  CandleChart,
+  PriceChart,
+  PriceChartSettings,
+  chartTFs,
+  normalizeCandles,
+  aggregateCandles,
   DepthChart,
   DepthLine,
-  CandleReporters,
   MouseReport,
   VolumeReport,
   DepthMarker,
@@ -148,10 +151,41 @@ interface CurrentMarket {
   buyBalance: number
   maxBuys: Record<number, MaxOrderEstimate>
   candleCaches: Record<string, CandlesPayload>
+  candleHist: Record<string, CandleHistory>
   baseCfg: Asset
   quoteCfg: Asset
   rateConversionFactor: number
   bookLoaded: boolean
+}
+
+// CandleHistory is older candles paged from the server for one bin size.
+interface CandleHistory {
+  cs: Candle[]
+  done: boolean
+  busy: boolean
+  pages: number
+  next: number // earliest time for the next request, unix ms
+}
+
+const DAY = 864e5
+
+// Chart range presets and the timeframe each one picks.
+const chartRanges: Record<string, [number, string]> = {
+  '1D': [DAY, '15m'],
+  '5D': [5 * DAY, '1h'],
+  '1M': [30 * DAY, '4h'],
+  '3M': [90 * DAY, '1D'],
+  'All': [0, '1D']
+}
+
+const chartDefaults: PriceChartSettings = {
+  type: 'candle',
+  scale: 'lin',
+  auto: true,
+  vol: true,
+  ma: { 7: true, 25: true, 99: false },
+  ema: false,
+  skip: true // no gaps by default
 }
 
 interface LoadTracker {
@@ -193,8 +227,10 @@ export default class MarketsPage extends BasePage {
   hovers: HTMLElement[]
   ogTitle: string
   depthChart: DepthChart
-  candleChart: CandleChart
-  candleDur: string
+  candleChart: PriceChart
+  candleDur: string // server bin size the chart timeframe is built from
+  chartTF: string
+  chartRange: string | null // range preset waiting for enough history
   balanceWgt: BalanceWidget
   mm: RunningMarketMakerDisplay
   marketList: MarketList
@@ -269,10 +305,7 @@ export default class MarketsPage extends BasePage {
     }
     this.depthChart = new DepthChart(page.depthChart, depthReporters, State.fetchLocal(State.depthZoomLK))
 
-    const candleReporters: CandleReporters = {
-      mouse: c => { this.reportMouseCandle(c) }
-    }
-    this.candleChart = new CandleChart(page.candlesChart, candleReporters)
+    this.setupPriceChart()
 
     const success = () => { /* do nothing */ }
     // Do not call cleanTemplates before creating the AccelerateOrderForm
@@ -280,8 +313,11 @@ export default class MarketsPage extends BasePage {
 
     this.approveTokenForm = new TokenApprovalForm(page.approveTokenForm)
 
-    // Set user's last known candle duration.
-    this.candleDur = State.fetchLocal(State.lastCandleDurationLK) || oneHrBinKey
+    // Set user's last known chart timeframe.
+    const oldDur = State.fetchLocal(State.lastCandleDurationLK)
+    this.chartTF = State.fetchLocal(State.chartTFLK) || (oldDur === '24h' ? '1D' : oldDur) || '1h'
+    if (!chartTFs[this.chartTF]) this.chartTF = '1h'
+    this.candleDur = chartTFs[this.chartTF].src
 
     // Setup the register to trade button.
     // TODO: Use dexsettings page?
@@ -334,7 +370,7 @@ export default class MarketsPage extends BasePage {
     setOptionTemplates(page)
 
     Doc.cleanTemplates(
-      page.orderRowTmpl, page.durBttnTemplate, page.booleanOptTmpl, page.rangeOptTmpl,
+      page.orderRowTmpl, page.pcTFTmpl, page.booleanOptTmpl, page.rangeOptTmpl,
       page.orderOptTmpl, page.userOrderTmpl, page.recentMatchesTemplate
     )
     this.bindOrderBookModes()
@@ -1329,15 +1365,17 @@ export default class MarketsPage extends BasePage {
 
   setCandleDurBttns () {
     const { page, market } = this
-    Doc.empty(page.durBttnBox)
-    for (const dur of market.dex.candleDurs) {
-      const bttn = page.durBttnTemplate.cloneNode(true)
-      bttn.textContent = dur
-      Doc.bind(bttn, 'click', () => this.candleDurationSelected(dur))
-      page.durBttnBox.appendChild(bttn)
+    Doc.empty(page.pcTFs)
+    for (const tf in chartTFs) {
+      if (!market.dex.candleDurs.includes(chartTFs[tf].src)) continue
+      const bttn = page.pcTFTmpl.cloneNode(true) as PageElement
+      bttn.textContent = bttn.dataset.pcTf = tf
+      Doc.bind(bttn, 'click', () => this.chartTFSelected(tf))
+      page.pcTFs.appendChild(bttn)
     }
+    this.chartRange = null
 
-    // load candlesticks here since we are resetting page.durBttnBox above.
+    // load candlesticks here since we are resetting page.pcTFs above.
     this.loadCandles()
   }
 
@@ -1420,6 +1458,7 @@ export default class MarketsPage extends BasePage {
       maxBuys: {},
       maxSellRequested: false,
       candleCaches: {},
+      candleHist: {},
       baseCfg,
       quoteCfg,
       rateConversionFactor,
@@ -1545,20 +1584,6 @@ export default class MarketsPage extends BasePage {
    */
   reportDepthZoom (zoom: number) {
     State.storeLocal(State.depthZoomLK, zoom)
-  }
-
-  reportMouseCandle (candle: Candle | null) {
-    const page = this.page
-    if (!candle) {
-      Doc.hide(page.candlesLegend)
-      return
-    }
-    Doc.show(page.candlesLegend)
-    page.candleStart.textContent = Doc.formatCoinValue(candle.startRate / this.market.rateConversionFactor)
-    page.candleEnd.textContent = Doc.formatCoinValue(candle.endRate / this.market.rateConversionFactor)
-    page.candleHigh.textContent = Doc.formatCoinValue(candle.highRate / this.market.rateConversionFactor)
-    page.candleLow.textContent = Doc.formatCoinValue(candle.lowRate / this.market.rateConversionFactor)
-    page.candleVol.textContent = Doc.formatCoinValue(candle.matchVolume, this.market.baseUnitInfo)
   }
 
   /*
@@ -2482,7 +2507,8 @@ export default class MarketsPage extends BasePage {
     if (this.candleDur !== dur) return
     if (this.loadingAnimations.candles) this.loadingAnimations.candles.stop()
     this.candleChart.canvas.classList.remove('invisible')
-    this.candleChart.setCandles(data.payload, this.market.cfg, this.market.baseUnitInfo, this.market.quoteUnitInfo)
+    this.showCandles()
+    this.applyChartRange()
   }
 
   handleEpochMatchSummary (data: BookUpdate) {
@@ -2504,7 +2530,7 @@ export default class MarketsPage extends BasePage {
       else candles.push(candle)
     }
     if (this.candleDur !== dur) return
-    this.candleChart.draw()
+    this.showCandles(true)
   }
 
   /*
@@ -3748,33 +3774,176 @@ export default class MarketsPage extends BasePage {
     this.depthChart.draw()
   }
 
-  /* candleDurationSelected sets the candleDur and loads the candles. It will
-  default to the oneHrBinKey if dur is not valid. */
-  candleDurationSelected (dur: string) {
-    if (!this.market?.dex?.candleDurs.includes(dur)) dur = oneHrBinKey
-    this.candleDur = dur
+  /* chartTFSelected sets the chart timeframe and loads its candles. */
+  chartTFSelected (tf: string, keepRange?: boolean) {
+    const durs = this.market?.dex?.candleDurs || []
+    if (!chartTFs[tf] || !durs.includes(chartTFs[tf].src)) tf = durs.includes(oneHrBinKey) ? '1h' : '5m'
+    this.chartTF = tf
+    this.candleDur = chartTFs[tf].src
+    State.storeLocal(State.chartTFLK, tf)
+    if (!keepRange) this.setChartRange(null)
     this.loadCandles()
-    State.storeLocal(State.lastCandleDurationLK, dur)
   }
 
   /*
-   * loadCandles loads the candles for the current candleDur. If a cache is already
-   * active, the cache will be used without a loadcandles request.
+   * loadCandles loads the candles for the current timeframe. If a cache is
+   * already active, the cache will be used without a loadcandles request.
    */
   loadCandles () {
-    for (const bttn of Doc.kids(this.page.durBttnBox)) {
-      if (bttn.textContent === this.candleDur) bttn.classList.add('selected')
-      else bttn.classList.remove('selected')
-    }
-    const { candleCaches, cfg, baseUnitInfo, quoteUnitInfo } = this.market
-    const cache = candleCaches[this.candleDur]
-    if (cache) {
-      // this.depthChart.hide()
-      // this.candleChart.show()
-      this.candleChart.setCandles(cache, cfg, baseUnitInfo, quoteUnitInfo)
+    this.syncChartBttns()
+    if (this.market.candleCaches[this.candleDur]) {
+      this.showCandles()
       return
     }
     this.requestCandles()
+  }
+
+  /*
+   * showCandles builds the current timeframe from the live candles and any
+   * older history, and passes it to the chart. keepView keeps the user's view.
+   */
+  showCandles (keepView?: boolean) {
+    const mkt = this.market
+    const cache = mkt.candleCaches[this.candleDur]
+    if (!cache) return
+    const hist = mkt.candleHist[this.candleDur]
+    const raw = hist ? hist.cs.concat(cache.candles || []) : cache.candles || []
+    const { ms } = chartTFs[this.chartTF]
+    let cs = normalizeCandles(raw, cache.ms)
+    if (ms !== cache.ms) cs = aggregateCandles(cs, ms)
+    this.candleChart.setData(cs, ms, mkt.rateConversionFactor, mkt.baseUnitInfo.conventional.conversionFactor, keepView)
+  }
+
+  /*
+   * loadOlderCandles fetches the page of candles before the oldest one loaded,
+   * when the chart is scrolled or zoomed out to it. Only one request runs at a
+   * time, with a pause between requests, so the server's rate limits are
+   * respected. Paging stops at the first empty page, or right away for servers
+   * without candle history.
+   */
+  async loadOlderCandles () {
+    const mkt = this.market
+    const dur = this.candleDur
+    const cache = mkt?.candleCaches[dur]
+    if (!mkt.dex.candlePageSize || !cache?.candles?.length) return
+    const h = mkt.candleHist[dur] = mkt.candleHist[dur] || { cs: [], done: false, busy: false, pages: 0, next: 0 }
+    if (h.done || h.busy || Date.now() < h.next) return
+    const oldest = h.cs[0] || cache.candles[0]
+    h.busy = true
+    let res
+    try {
+      res = await postJSON('/api/candlehistory', {
+        host: mkt.dex.host,
+        baseID: mkt.base.id,
+        quoteID: mkt.quote.id,
+        binSize: dur,
+        before: oldest.startStamp + 1,
+        n: mkt.dex.candlePageSize
+      })
+    } finally {
+      h.busy = false
+    }
+    if (!res?.ok) {
+      h.next = Date.now() + 15000
+      return
+    }
+    h.next = Date.now() + 1000
+    const got = res.supported && res.candles?.length > 0
+    if (got) h.cs = res.candles.concat(h.cs)
+    // Stop at the start of the market, or after 100 pages per bin size.
+    if (!got || ++h.pages >= 100) h.done = true
+    if (this.market !== mkt || this.candleDur !== dur) return
+    if (got) this.showCandles(true)
+    this.applyChartRange()
+  }
+
+  /* setChartRange selects a range preset, or none. */
+  setChartRange (k: string | null) {
+    this.chartRange = k
+    Doc.hide(this.page.pcNote)
+    for (const b of Doc.kids(this.page.pcRanges)) b.classList.toggle('on', b.dataset.pcRange === k)
+  }
+
+  /*
+   * applyChartRange shows the selected range preset. If the timeframe doesn't
+   * have enough history yet, it tries again as older candles arrive.
+   */
+  applyChartRange () {
+    const k = this.chartRange
+    const mkt = this.market
+    const cache = mkt.candleCaches[this.candleDur]
+    if (!k || !cache?.candles?.length) return
+    const [dur] = chartRanges[k]
+    const h = mkt.candleHist[this.candleDur]
+    const more = mkt.dex.candlePageSize > 0 && !h?.done
+    const chart = this.candleChart
+    const ok = dur ? chart.setRange(dur) : (chart.fit(), !more)
+    if (ok || !more) this.chartRange = null
+    if (ok) return
+    if (more) {
+      this.loadOlderCandles()
+      return
+    }
+    const v = chart.all
+    const days = String(Math.max(1, Math.round((v[v.length - 1].t - v[0].t) / DAY)))
+    this.page.pcNote.textContent = intl.prep(intl.ID_CHART_HISTORY_LIMIT, { days, tf: this.chartTF })
+    Doc.show(this.page.pcNote)
+  }
+
+  /* setupPriceChart creates the price chart and binds its toolbar. */
+  setupPriceChart () {
+    const page = this.page
+    const saved = State.fetchLocal(State.priceChartLK) || {}
+    const chart = this.candleChart = new PriceChart(page.candlesChart, { ...chartDefaults, ...saved, auto: true })
+    chart.onChange = (s: PriceChartSettings) => {
+      const { type, scale, vol, ma, ema, skip } = s
+      State.storeLocal(State.priceChartLK, { type, scale, vol, ma, ema, skip })
+      this.syncChartBttns()
+    }
+    chart.onOlder = () => { this.loadOlderCandles() }
+    const all = (sel: string, f: (b: PageElement) => void) => {
+      page.pcPanel.querySelectorAll(sel).forEach((b: Element) => {
+        Doc.bind(b as PageElement, 'click', () => f(b as PageElement))
+      })
+    }
+    all('[data-pc-type]', b => chart.set({ type: b.dataset.pcType }))
+    all('[data-pc-ma]', b => chart.set({ ma: { ...chart.s.ma, [b.dataset.pcMa as string]: !chart.s.ma[b.dataset.pcMa as string] } }))
+    all('[data-pc-scale]', b => chart.set({ scale: chart.s.scale === b.dataset.pcScale ? 'lin' : b.dataset.pcScale }))
+    all('[data-pc-range]', b => {
+      const k = b.dataset.pcRange as string
+      this.chartTFSelected(chartRanges[k][1], true)
+      this.setChartRange(k)
+      this.applyChartRange()
+    })
+    Doc.bind(page.pcEMA, 'click', () => chart.set({ ema: !chart.s.ema }))
+    Doc.bind(page.pcVol, 'click', () => chart.set({ vol: !chart.s.vol }))
+    Doc.bind(page.pcAuto, 'click', () => chart.set({ auto: true }))
+    Doc.bind(page.pcSkip, 'click', () => chart.set({ skip: !chart.s.skip }))
+    Doc.bind(page.pcFit, 'click', () => chart.fit())
+    Doc.bind(page.pcReset, 'click', () => chart.reset())
+    Doc.bind(page.pcFS, 'click', () => {
+      const p = page.pcPanel
+      if (document.fullscreenElement) document.exitFullscreen()
+      else if (p.requestFullscreen) p.requestFullscreen().catch(() => p.classList.toggle('pc-fs'))
+      else p.classList.toggle('pc-fs')
+    })
+    const tz = -new Date().getTimezoneOffset() / 60
+    page.pcTZ.textContent = 'UTC' + (tz >= 0 ? '+' : '') + tz
+    this.syncChartBttns()
+  }
+
+  /* syncChartBttns highlights the active chart toolbar buttons. */
+  syncChartBttns () {
+    const { page, candleChart: { s } } = this
+    const on = (b: Element, v: boolean) => b.classList.toggle('on', v)
+    page.pcPanel.querySelectorAll('[data-pc-tf]').forEach((b: Element) => on(b, (b as PageElement).dataset.pcTf === this.chartTF))
+    page.pcPanel.querySelectorAll('[data-pc-type]').forEach((b: Element) => on(b, (b as PageElement).dataset.pcType === s.type))
+    page.pcPanel.querySelectorAll('[data-pc-ma]').forEach((b: Element) => on(b, !!s.ma[(b as PageElement).dataset.pcMa as string]))
+    page.pcPanel.querySelectorAll('[data-pc-scale]').forEach((b: Element) => on(b, (b as PageElement).dataset.pcScale === s.scale))
+    on(page.pcEMA, s.ema)
+    on(page.pcVol, s.vol)
+    on(page.pcAuto, s.auto)
+    on(page.pcSkip, s.skip)
   }
 
   /* requestCandles sends the loadcandles request. It accepts an optional candle

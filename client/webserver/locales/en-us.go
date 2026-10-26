@@ -807,4 +807,13 @@ var EnUS = map[string]*intl.Translation{
 	"view":                        {T: "View"},
 	"no_proposals_in_progress":    {T: "No proposals in progress."},
 	"view_all":                    {T: "View All"},
+	"chart_candles":               {T: "Candles"},
+	"chart_line":                  {T: "Line"},
+	"chart_area":                  {T: "Area"},
+	"chart_fullscreen":            {T: "Fullscreen"},
+	"chart_fit":                   {T: "Fit all candles"},
+	"chart_reset":                 {T: "Reset view"},
+	"chart_no_gaps":               {T: "no gaps"},
+	"chart_no_gaps_tip":           {T: "Hide periods with no trades"},
+	"chart_auto_tip":              {T: "Fit the price axis to the visible candles. Drag the price axis to scale it, double-click it to reset."},
 }
