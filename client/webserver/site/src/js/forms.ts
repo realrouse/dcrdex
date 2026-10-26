@@ -1256,7 +1256,7 @@ export class WalletWaitForm {
     page.logo.src = Doc.logoPath(symbol)
     page.depoAddr.textContent = address
 
-    Doc.hide(page.syncUncheck, page.syncCheck, page.balUncheck, page.balCheck, page.syncRemainBox, page.bondCostBreakdown)
+    Doc.hide(page.syncUncheck, page.syncCheck, page.syncSpinner, page.balUncheck, page.balCheck, page.syncRemainBox, page.bondCostBreakdown)
     Doc.show(page.balanceBox)
 
     let bondLock = 2 * bondAsset.amount * tier
@@ -1289,7 +1289,7 @@ export class WalletWaitForm {
       Doc.show(page.sendEnough)
     }
 
-    Doc.show(synced ? page.syncCheck : syncProgress >= 1 ? page.syncSpinner : page.syncUncheck)
+    Doc.show(synced ? page.syncCheck : page.syncSpinner)
     Doc.show(bal.available >= 2 * bondAsset.amount + bondFeeBuffer ? page.balCheck : page.balUncheck)
 
     page.progress.textContent = (syncProgress * 100).toFixed(1)
@@ -1354,13 +1354,10 @@ export class WalletWaitForm {
       this.progressed = true
       if (this.funded) this.success()
       return
-    } else if (prog === 1) {
-      Doc.hide(page.syncUncheck)
-      Doc.show(page.syncSpinner)
-    } else {
-      Doc.hide(page.syncSpinner)
-      Doc.show(page.syncUncheck)
     }
+    // Spin while syncing, so it's clear that something is happening.
+    Doc.hide(page.syncUncheck, page.syncCheck)
+    Doc.show(page.syncSpinner)
     page.progress.textContent = (prog * 100).toFixed(1)
 
     if (prog >= 0.999) {

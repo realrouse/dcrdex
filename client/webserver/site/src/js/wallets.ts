@@ -1110,7 +1110,7 @@ export default class WalletsPage extends BasePage {
 
       const walletForLock = token ? app().walletMap[token.parentID] : w
       if (walletForLock) {
-        const { encrypted, open: unlocked, running, disabled, peerCount, syncProgress, syncStatus } = walletForLock
+        const { encrypted, open: unlocked, running, disabled, peerCount, synced, syncProgress, syncStatus } = walletForLock
         if (disabled || (w && w.disabled)) {
           Doc.show(tmpl.statusDisabled)
         } else {
@@ -1118,7 +1118,7 @@ export default class WalletsPage extends BasePage {
           if (!running) {
             Doc.show(tmpl.statusOff)
           } else {
-            const syncing = syncProgress < 1 || syncStatus.txs !== undefined
+            const syncing = !synced || syncProgress < 1 || syncStatus.txs !== undefined
             if (syncing) {
               Doc.show(tmpl.statusSyncing)
             } else if (encrypted && !unlocked) {
@@ -1163,7 +1163,7 @@ export default class WalletsPage extends BasePage {
     if (!tmpl) return
     const w = app().walletMap[assetID]
     if (!w) return
-    const { peerCount, syncProgress, syncStatus, encrypted, open: unlocked, running, disabled } = w
+    const { peerCount, synced, syncProgress, syncStatus, encrypted, open: unlocked, running, disabled } = w
 
     // Reset status icons
     Doc.hide(tmpl.statusReady, tmpl.statusLocked, tmpl.statusOff, tmpl.statusDisabled, tmpl.statusSyncing)
@@ -1198,7 +1198,7 @@ export default class WalletsPage extends BasePage {
     }
 
     // Status icons
-    const syncing = syncProgress < 1 || syncStatus.txs !== undefined
+    const syncing = !synced || syncProgress < 1 || syncStatus.txs !== undefined
     if (syncing) {
       Doc.show(tmpl.statusSyncing)
       return
