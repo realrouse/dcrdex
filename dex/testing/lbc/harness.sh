@@ -17,7 +17,11 @@ CREATE_PASS="password"
 WALLET_PASS="abc"
 
 NODES_ROOT="${HOME}/dextest/${SYMBOL}"
-rm -rf "${NODES_ROOT}"
+# Never delete chain/wallet data that may hold unrefunded swap contracts:
+# move the previous harness data aside instead.
+if [ -d "${NODES_ROOT}" ]; then
+  mv "${NODES_ROOT}" "${NODES_ROOT}.$(date +%Y%m%d-%H%M%S)"
+fi
 mkdir -p "${NODES_ROOT}"/{alpha,beta,gamma,harness-ctl}
 
 ALPHA_DIR="${NODES_ROOT}/alpha"
