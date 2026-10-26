@@ -114,10 +114,7 @@ func NewBadgerTxDB(filePath string, log dex.Logger) *BadgerTxDB {
 }
 
 func (db *BadgerTxDB) Connect(ctx context.Context) (*sync.WaitGroup, error) {
-	// If memory use is a concern, could try
-	//   .WithValueLogLoadingMode(options.FileIO) // default options.MemoryMap
-	//   .WithMaxTableSize(sz int64); // bytes, default 6MB
-	//   .WithValueLogFileSize(sz int64), bytes, default 1 GB, must be 1MB <= sz <= 1GB
+	// lexi.DefaultOptions keeps the memory mapped files small. See there.
 	v4Path, needs, err := lexi.NeedsV1toV4Update(db.filePath)
 	if err != nil {
 		return nil, err
@@ -137,7 +134,7 @@ func (db *BadgerTxDB) Connect(ctx context.Context) (*sync.WaitGroup, error) {
 				"that swap's secret nonces.", movedTo)
 		}
 	}
-	opts := badger.DefaultOptions(v4Path).WithLogger(&badgerLoggerWrapper{db.log})
+	opts := lexi.DefaultOptions(v4Path).WithLogger(&badgerLoggerWrapper{db.log})
 	if needs {
 		db.DB, err = lexi.BadgerV1Update(db.filePath, v4Path, db.log, opts)
 		if err != nil {
