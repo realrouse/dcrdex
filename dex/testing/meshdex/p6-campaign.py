@@ -359,7 +359,10 @@ def verify(P, b0, b1):
             sa, sv, ra, rv = (ba, b, qa, q) if sends_base else (qa, q, ba, b)
             own, own_ref = ("makerSwap", "makerRefund") if maker else ("takerSwap", "takerRefund")
             own_red = "makerRedeem" if maker else "takerRedeem"
-            if r.get(own):
+            never_sent = r["status"] == "abandoned" and r.get(own) and not r.get(own_ref)
+            if r.get(own) and never_sent:
+                pass  # contract never broadcast (abandoned as missing): nothing left the wallet
+            elif r.get(own):
                 ntx["%s/%s" % (name, sa)] += 1
                 if not r.get(own_ref):
                     expected["%s/%s" % (name, sa)] -= Decimal(sv) / LOT
