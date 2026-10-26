@@ -393,15 +393,33 @@ func (btc *Backend) shutdown() {
 
 // Connect connects to the node RPC server. A dex.Connector.
 func (btc *Backend) Connect(ctx context.Context) (*sync.WaitGroup, error) {
-	client, err := rpcclient.New(&rpcclient.ConnConfig{
-		HTTPPostMode: true,
-		DisableTLS:   !btc.rpcCfg.IsPublicProvider,
-		Host:         btc.rpcCfg.RPCBind,
-		User:         btc.rpcCfg.RPCUser,
-		Pass:         btc.rpcCfg.RPCPass,
-	}, nil)
-	if err != nil {
-		return nil, fmt.Errorf("error creating %q RPC client: %w", btc.name, err)
+	// Each rpcclient.Client sends one request at a time, so use a few of
+	// them. See rpcPoolSize. Public providers are typically rate limited,
+	// so they get just the one.
+	poolSize := rpcPoolSize
+	if btc.rpcCfg.IsPublicProvider {
+		poolSize = 1
+	}
+	requesters := make([]RawRequester, 0, poolSize)
+	for range poolSize {
+		client, err := rpcclient.New(&rpcclient.ConnConfig{
+			HTTPPostMode: true,
+			DisableTLS:   !btc.rpcCfg.IsPublicProvider,
+			Host:         btc.rpcCfg.RPCBind,
+			User:         btc.rpcCfg.RPCUser,
+			Pass:         btc.rpcCfg.RPCPass,
+		}, nil)
+		if err != nil {
+			for _, c := range requesters {
+				c.Shutdown()
+			}
+			return nil, fmt.Errorf("error creating %q RPC client: %w", btc.name, err)
+		}
+		requesters = append(requesters, client)
+	}
+	var client RawRequester = requesters[0]
+	if len(requesters) > 1 {
+		client = newRequesterPool(requesters)
 	}
 
 	maxFeeBlocks := btc.cfg.MaxFeeBlocks

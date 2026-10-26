@@ -407,6 +407,8 @@ type TBackend struct {
 	unfunded       bool
 	// fundingGate, if set, blocks FundingCoin until it is closed.
 	fundingGate chan struct{}
+	// fundingCalls counts FundingCoin calls.
+	fundingCalls atomic.Int32
 }
 
 func tNewUTXOBackend() *tUTXOBackend {
@@ -491,6 +493,7 @@ type tUTXOBackend struct {
 }
 
 func (b *tUTXOBackend) FundingCoin(ctx context.Context, coinID, redeemScript []byte) (asset.FundingCoin, error) {
+	b.fundingCalls.Add(1)
 	if b.fundingGate != nil {
 		<-b.fundingGate
 	}
@@ -2373,7 +2376,7 @@ func TestLookupFundingCoinsTimeout(t *testing.T) {
 	r := &OrderRouter{coinLookupSem: make(chan struct{}, 2)}
 	coins := map[int]*msgjson.Coin{0: {ID: []byte{1}}, 1: {ID: []byte{2}}, 2: {ID: []byte{3}}}
 	start := time.Now()
-	res := r.lookupFundingCoinsWithin(be, coins, 150*time.Millisecond)
+	res := r.newFundingLookups(be, len(coins)).lookup(coins, 150*time.Millisecond)
 	if el := time.Since(start); el > 2*time.Second {
 		t.Fatalf("lookups not bounded by the timeout: %v", el)
 	}
@@ -2384,5 +2387,57 @@ func TestLookupFundingCoinsTimeout(t *testing.T) {
 		if !errors.Is(lr.err, asset.ErrRequestTimeout) {
 			t.Fatalf("coin %d: expected timeout, got %v", k, lr.err)
 		}
+	}
+}
+
+// TestLookupFundingCoinsCarryOver checks that a lookup that outlives one
+// pass is not started again by the next pass, and that its result is used
+// once it arrives.
+func TestLookupFundingCoinsCarryOver(t *testing.T) {
+	be := tNewUTXOBackend()
+	coinIDs := [][]byte{{1}, {2}, {3}, {4}}
+	for _, id := range coinIDs {
+		be.utxos[hex.EncodeToString(id)] = 1e8
+	}
+	gate := make(chan struct{})
+	be.fundingGate = gate
+	r := &OrderRouter{coinLookupSem: make(chan struct{}, 2)}
+	coins := make(map[int]*msgjson.Coin, len(coinIDs))
+	for i, id := range coinIDs {
+		coins[i] = &msgjson.Coin{ID: id}
+	}
+	fl := r.newFundingLookups(be, len(coins))
+
+	// Pass 1: the backend is stuck, everything times out.
+	for k, lr := range fl.lookup(coins, 100*time.Millisecond) {
+		if !errors.Is(lr.err, asset.ErrRequestTimeout) {
+			t.Fatalf("pass 1 coin %d: expected timeout, got %v", k, lr.err)
+		}
+	}
+	// Pass 2, still stuck: no new lookups may be started for the same coins.
+	fl.lookup(coins, 100*time.Millisecond)
+	if n := be.fundingCalls.Load(); n != 2 { // 2 slots, the rest still waiting for one
+		t.Fatalf("expected 2 backend calls in flight, got %d", n)
+	}
+
+	// The backend recovers. The lookups started in pass 1 finish, and pass 3
+	// uses their results.
+	close(gate)
+	res := fl.lookup(coins, 2*time.Second)
+	for k, lr := range res {
+		if lr.err != nil || lr.coin == nil {
+			t.Fatalf("pass 3 coin %d: expected coin, got %v", k, lr.err)
+		}
+	}
+	if n := be.fundingCalls.Load(); n != int32(len(coinIDs)) {
+		t.Fatalf("expected one backend call per coin, got %d", n)
+	}
+
+	// Only still-needed coins are reported.
+	delete(coins, 0)
+	be.fundingGate = nil
+	res = fl.lookup(coins, 2*time.Second)
+	if len(res) != 3 {
+		t.Fatalf("expected 3 results, got %d", len(res))
 	}
 }

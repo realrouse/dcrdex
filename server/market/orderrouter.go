@@ -555,11 +555,13 @@ func (r *OrderRouter) processTrade(oRecord *orderRecord, tunnel MarketTunnel, as
 		neededCoins[i] = coin
 	}
 
+	coinLookups := r.newFundingLookups(fundingAsset.Backend, len(neededCoins))
 	checkCoins := func() (tryAgain bool, msgErr *msgjson.Error) {
 		// Look up all still-needed coins concurrently. The backend RPCs
 		// dominate the time spent here (one or more round trips per coin),
-		// so a 20-input order no longer costs 20 serial lookups.
-		lookups := r.lookupFundingCoins(fundingAsset.Backend, neededCoins)
+		// so a 20-input order no longer costs 20 serial lookups. Lookups
+		// that outlive this pass carry over to the next one.
+		lookups := coinLookups.lookup(neededCoins, coinLookupTimeout)
 		for key, coin := range neededCoins {
 			res := lookups[key]
 			dexCoin, err := res.coin, res.err
@@ -698,42 +700,89 @@ type coinLookup struct {
 	err  error
 }
 
-// lookupFundingCoins fetches the given funding coins from the backend
-// concurrently, at most maxConcurrentCoinLookups at a time across the
-// router. A lookup that has not returned within coinLookupTimeout is
-// reported as asset.ErrRequestTimeout; it is left to finish in the
-// background (holding its slot) since some backends ignore the context.
-func (r *OrderRouter) lookupFundingCoins(backend asset.Backend, coins map[int]*msgjson.Coin) map[int]coinLookup {
-	return r.lookupFundingCoinsWithin(backend, coins, coinLookupTimeout)
+// fundingLookups runs one order's funding coin lookups across checkCoins
+// passes. At most one backend lookup per coin is in flight at a time, and a
+// lookup that is still running when a pass gives up keeps running: its
+// result is picked up by a later pass instead of being dropped and the
+// lookup started over. Starting over is what made orders with many inputs
+// fail on a slow node (e.g. LBC over a high latency link): every pass timed
+// out with the same coins half done, and the abandoned lookups kept the
+// backend busy for the next pass.
+type fundingLookups struct {
+	r       *OrderRouter
+	backend asset.Backend
+	// results receives the outcome of every started lookup. It is buffered
+	// for one result per coin, and there is at most one lookup per coin in
+	// flight, so lookups never block on it.
+	results  chan keyedCoinLookup
+	inFlight map[int]bool
 }
 
-func (r *OrderRouter) lookupFundingCoinsWithin(backend asset.Backend, coins map[int]*msgjson.Coin, timeout time.Duration) map[int]coinLookup {
-	type keyed struct {
-		key int
-		coinLookup
+type keyedCoinLookup struct {
+	key int
+	coinLookup
+}
+
+func (r *OrderRouter) newFundingLookups(backend asset.Backend, numCoins int) *fundingLookups {
+	return &fundingLookups{
+		r:        r,
+		backend:  backend,
+		results:  make(chan keyedCoinLookup, numCoins),
+		inFlight: make(map[int]bool, numCoins),
 	}
-	resC := make(chan keyed, len(coins))
-	deadline := time.NewTimer(timeout)
-	defer deadline.Stop()
+}
+
+// lookup returns a result for each of the coins, starting backend lookups
+// for coins that do not have one running, at most maxConcurrentCoinLookups
+// at a time across the router. A coin whose lookup has not returned within
+// timeout is reported as asset.ErrRequestTimeout, but its lookup is left
+// running for the next call. Results from lookups that finished since the
+// last call are used first. Some backends ignore the context, so the
+// timeout is enforced here.
+func (fl *fundingLookups) lookup(coins map[int]*msgjson.Coin, timeout time.Duration) map[int]coinLookup {
 	for key, coin := range coins {
+		if fl.inFlight[key] {
+			continue
+		}
+		fl.inFlight[key] = true
 		go func(key int, coin *msgjson.Coin) {
+			// Wait for a slot for as long as the order may wait for its
+			// coins. Giving up sooner just starts the same wait over.
 			select {
-			case r.coinLookupSem <- struct{}{}:
-			case <-time.After(timeout):
-				resC <- keyed{key, coinLookup{err: asset.ErrRequestTimeout}}
+			case fl.r.coinLookupSem <- struct{}{}:
+			case <-time.After(fundingTxWait):
+				fl.results <- keyedCoinLookup{key, coinLookup{err: asset.ErrRequestTimeout}}
 				return
 			}
-			defer func() { <-r.coinLookupSem }()
-			c, err := fundingCoin(backend, coin.ID, coin.Redeem)
-			resC <- keyed{key, coinLookup{c, err}}
+			defer func() { <-fl.r.coinLookupSem }()
+			c, err := fundingCoin(fl.backend, coin.ID, coin.Redeem)
+			fl.results <- keyedCoinLookup{key, coinLookup{c, err}}
 		}(key, coin)
 	}
 	results := make(map[int]coinLookup, len(coins))
+	record := func(res keyedCoinLookup) {
+		delete(fl.inFlight, res.key)
+		if _, wanted := coins[res.key]; wanted {
+			results[res.key] = res.coinLookup
+		}
+	}
+	deadline := time.NewTimer(timeout)
+	defer deadline.Stop()
 	for len(results) < len(coins) {
 		select {
-		case res := <-resC:
-			results[res.key] = res.coinLookup
+		case res := <-fl.results:
+			record(res)
 		case <-deadline.C:
+			// Take any results that are already in, then report the rest
+			// as timed out. Their lookups keep running.
+			for drained := false; !drained; {
+				select {
+				case res := <-fl.results:
+					record(res)
+				default:
+					drained = true
+				}
+			}
 			for key := range coins {
 				if _, found := results[key]; !found {
 					results[key] = coinLookup{err: asset.ErrRequestTimeout}
