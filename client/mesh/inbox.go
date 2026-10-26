@@ -231,6 +231,7 @@ func (ob *OrderBooks) sendInbox(ctx context.Context, to peer.ID, toEnc *secp256k
 		return
 	}
 	ob.log.Tracef("Sending %s (%d bytes) to %s", typ, len(b), to)
+	ob.adv.record(to, b)
 	if err := ob.ps.Broadcast(ctx, InboxTopic(to), b); err != nil {
 		ob.log.Warnf("Error sending %s to %s: %v", typ, to, err)
 	}

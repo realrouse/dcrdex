@@ -505,3 +505,27 @@ func TestP6ForgedOrders(t *testing.T) {
 	}
 	_ = context.Background
 }
+
+// Replays and junk injected through the mesh are dropped by the receiver.
+func TestP6FloodInjection(t *testing.T) {
+	_, obs := newNegotiators(t, 2)
+	a, b := obs[0], obs[1]
+	a.EnableAdversary()
+	if _, err := a.Flood(tCtx, b.self, "replay", 10, 0); err == nil {
+		t.Fatal("replay with nothing captured")
+	}
+	a.sendInbox(tCtx, b.self, b.encPriv.PubKey(), "ping", 1)
+	time.Sleep(50 * time.Millisecond)
+	before := b.InboxDropped()
+	res, err := a.Flood(tCtx, b.self, "replay", 50, 0)
+	if err != nil || res.Sent != 50 {
+		t.Fatalf("flood: %+v %v", res, err)
+	}
+	if _, err := a.Flood(tCtx, b.self, "junk", 200, 300); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(100 * time.Millisecond)
+	if d := b.InboxDropped() - before; d < 50 {
+		t.Fatalf("only %d replays dropped", d)
+	}
+}

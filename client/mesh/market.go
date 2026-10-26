@@ -83,6 +83,7 @@ type OrderBooks struct {
 	policies map[Market]LockPolicy
 	// guard is the inbox replay cache and rate limit.
 	guard *inboxGuard
+	adv   advCapture // debug only (adversary.go)
 }
 
 // NewOrderBooks constructs an OrderBooks.

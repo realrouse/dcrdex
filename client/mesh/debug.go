@@ -11,6 +11,8 @@ import (
 	"net"
 	"net/http"
 	"time"
+
+	"github.com/libp2p/go-libp2p/core/peer"
 )
 
 // DebugServer is a SIMNET-ONLY, loopback-only, unauthenticated HTTP API for
@@ -29,6 +31,7 @@ import (
 //	POST /mesh/swap/halt {"stage":"redeem"}  ("" clears; init|participate|redeem)
 //	POST /mesh/config {"market":"dcr_btc","makerLockSec":240,"takerLockSec":120}  (lock policy override)
 //	POST /mesh/swap/tamper {"mode":"value"}  (adversary: value|secrethash|locktime|recipient, "" clears)
+//	POST /mesh/adversary/flood {"peer":"<id>","mode":"replay|junk","n":500,"size":512}
 //	GET  /mesh/inbox/dropped          -> {"dropped": n}  (rate-limited or replayed inbox messages)
 //	GET  /mesh/policy?market=dcr_btc  -> {"makerLockSec":...,"takerLockSec":...}
 type DebugServer struct {
@@ -38,6 +41,7 @@ type DebugServer struct {
 
 // NewDebugServer creates a debug server for ob.
 func NewDebugServer(ob *OrderBooks, peerID func() string) *DebugServer {
+	ob.EnableAdversary() // the debug API can inject floods and replays
 	return &DebugServer{ob: ob, peerID: peerID}
 }
 
@@ -251,6 +255,29 @@ func (s *DebugServer) Handler(ctx context.Context) http.Handler {
 			return
 		}
 		writeJSON(w, http.StatusOK, map[string]string{"tamper": req.Mode})
+	})
+	mux.HandleFunc("POST /mesh/adversary/flood", func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			Peer string `json:"peer"`
+			Mode string `json:"mode"`
+			N    int    `json:"n"`
+			Size int    `json:"size"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			writeErr(w, http.StatusBadRequest, err)
+			return
+		}
+		pid, err := peer.Decode(req.Peer)
+		if err != nil {
+			writeErr(w, http.StatusBadRequest, err)
+			return
+		}
+		res, err := s.ob.Flood(r.Context(), pid, req.Mode, req.N, req.Size)
+		if err != nil {
+			writeErr(w, http.StatusBadRequest, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, res)
 	})
 	mux.HandleFunc("GET /mesh/inbox/dropped", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]uint64{"dropped": s.ob.InboxDropped()})

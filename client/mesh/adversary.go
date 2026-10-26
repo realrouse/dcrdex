@@ -4,8 +4,12 @@
 package mesh
 
 import (
+	"context"
 	"crypto/rand"
 	"fmt"
+	"sync"
+
+	"github.com/libp2p/go-libp2p/core/peer"
 )
 
 // SIMNET DEBUG ONLY (P6 test campaign). A tamper mode makes this client
@@ -56,4 +60,81 @@ func (ob *OrderBooks) tamperContract(sw *swapper, sc *SwapContract, sendAsset ui
 		return
 	}
 	ob.log.Warnf("DEBUG TAMPER %q: creating a wrong contract on purpose", mode)
+}
+
+// advCapture holds the last sealed inbox message sent to each peer, only
+// when enabled by the debug server, so floods and replays can be injected.
+type advCapture struct {
+	mtx  sync.Mutex
+	on   bool
+	last map[peer.ID][]byte
+}
+
+func (c *advCapture) record(to peer.ID, b []byte) {
+	c.mtx.Lock()
+	defer c.mtx.Unlock()
+	if !c.on {
+		return
+	}
+	if c.last == nil {
+		c.last = make(map[peer.ID][]byte)
+	}
+	if len(c.last) < 1000 {
+		c.last[to] = b
+	} else if _, ok := c.last[to]; ok {
+		c.last[to] = b
+	}
+}
+
+// EnableAdversary turns on capture of sent inbox messages (debug only).
+func (ob *OrderBooks) EnableAdversary() {
+	ob.adv.mtx.Lock()
+	ob.adv.on = true
+	ob.adv.mtx.Unlock()
+}
+
+// FloodResult reports what Flood published.
+type FloodResult struct {
+	Sent   int    `json:"sent"`
+	Failed int    `json:"failed"`
+	Err    string `json:"lastErr,omitempty"`
+}
+
+// Flood publishes n messages to peer to's inbox: "replay" re-sends the last
+// real message we sent them, "junk" random envelopes of size bytes, as fast
+// as possible. Debug only.
+func (ob *OrderBooks) Flood(ctx context.Context, to peer.ID, mode string, n, size int) (*FloodResult, error) {
+	var msg []byte
+	switch mode {
+	case "replay":
+		ob.adv.mtx.Lock()
+		msg = ob.adv.last[to]
+		ob.adv.mtx.Unlock()
+		if msg == nil {
+			return nil, fmt.Errorf("nothing sent to %s yet", to)
+		}
+	case "junk":
+		if size <= 0 {
+			size = 512
+		}
+	default:
+		return nil, fmt.Errorf("unknown flood mode %q", mode)
+	}
+	res := new(FloodResult)
+	for i := 0; i < n; i++ {
+		b := msg
+		if mode == "junk" {
+			b = make([]byte, size)
+			_, _ = rand.Read(b)
+			b[0] = inboxVersion
+		}
+		if err := ob.ps.Broadcast(ctx, InboxTopic(to), b); err != nil {
+			res.Failed++
+			res.Err = err.Error()
+			continue
+		}
+		res.Sent++
+	}
+	ob.log.Warnf("DEBUG FLOOD %s x%d to %s: %+v", mode, n, to, res)
+	return res, nil
 }
