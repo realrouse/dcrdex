@@ -47,7 +47,7 @@ ADDR_A=$("$MESH" addr 1); ADDR_B=$("$MESH" addr 2)
 declare -A PID
 cleanup() { for p in "${PID[@]}"; do kill "$p" 2>/dev/null || true; done; wait 2>/dev/null || true; }
 trap cleanup EXIT
-rm -rf "$RUN.prev"; [ -d "$RUN" ] && mv "$RUN" "$RUN.prev"   # keep the last run (its swaps may still be refundable)
+[ -d "$RUN" ] && mv "$RUN" "$RUN.$(date +%Y%m%d-%H%M%S)"   # never delete appdata that may hold unrefunded contracts
 mkdir -p "$RUN/a" "$RUN/b"
 
 web_of() { [ "$1" = a ] && echo "$WEB_A" || echo "$WEB_B"; }

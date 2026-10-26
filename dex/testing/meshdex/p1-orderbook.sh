@@ -33,7 +33,8 @@ PIDS=()
 cleanup() { for p in "${PIDS[@]}"; do kill "$p" 2>/dev/null || true; done; wait 2>/dev/null || true; }
 trap cleanup EXIT
 
-rm -rf "$RUN"; mkdir -p "$RUN/a" "$RUN/b"
+[ -d "$RUN" ] && mv "$RUN" "$RUN.$(date +%Y%m%d-%H%M%S)"   # never delete appdata that may hold unrefunded contracts
+mkdir -p "$RUN/a" "$RUN/b"
 
 start() { # name addr web dbg
   local name=$1 addr=$2 web=$3 dbg=$4

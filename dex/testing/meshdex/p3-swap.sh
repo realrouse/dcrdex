@@ -43,7 +43,8 @@ ADDR_B=/ip4/127.0.0.1/tcp/$PORT_B/p2p/$ID_B
 declare -A PID
 cleanup() { for p in "${PID[@]}"; do kill "$p" 2>/dev/null || true; done; wait 2>/dev/null || true; }
 trap cleanup EXIT
-rm -rf "$RUN"; mkdir -p "$RUN/a" "$RUN/b"
+[ -d "$RUN" ] && mv "$RUN" "$RUN.$(date +%Y%m%d-%H%M%S)"   # never delete appdata that may hold unrefunded contracts
+mkdir -p "$RUN/a" "$RUN/b"
 
 start() { # name addr web dbg
   TATANKA_SIMNET_ADDR=$2 TATANKA_MESH_DEBUG_ADDR=$4 "$BISONW" --simnet --mesh \
