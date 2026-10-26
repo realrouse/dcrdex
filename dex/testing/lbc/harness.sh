@@ -293,6 +293,7 @@ except Exception:
 
 cat > ./mine-alpha <<EOF
 #!/usr/bin/env bash
+cd "\$(dirname "\$0")"
 N="\${1:-1}"
 ./alpha walletpassphrase "${WALLET_PASS}" 600 >/dev/null 2>&1 || true
 ADDR=\$(./alpha getnewaddress | python3 -c "import sys,json; print(json.load(sys.stdin).get('result') or '')")
