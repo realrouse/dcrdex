@@ -5,6 +5,7 @@ package lbc
 
 import (
 	"context"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"os"
@@ -20,6 +21,7 @@ import (
 	"github.com/btcsuite/btcd/btcjson"
 	"github.com/btcsuite/btcd/btcutil"
 	"github.com/btcsuite/btcd/btcutil/gcs"
+	"github.com/btcsuite/btcd/btcutil/hdkeychain"
 	"github.com/btcsuite/btcd/btcutil/psbt"
 	"github.com/btcsuite/btcd/chaincfg"
 	"github.com/btcsuite/btcd/chaincfg/chainhash"
@@ -36,6 +38,7 @@ import (
 	lbcchainhash "github.com/lbryio/lbcd/chaincfg/chainhash"
 	lbcwire "github.com/lbryio/lbcd/wire"
 	lbcutil "github.com/lbryio/lbcutil"
+	lbchdkeychain "github.com/lbryio/lbcutil/hdkeychain"
 	"github.com/lbryio/lbcwallet/chain"
 	lbcwaddrmgr "github.com/lbryio/lbcwallet/waddrmgr"
 	"github.com/lbryio/lbcwallet/wallet"
@@ -501,7 +504,27 @@ func (w *lbcSPVWallet) AccountProperties(_ waddrmgr.KeyScope, acct uint32) (*wad
 			Purpose: scope.Purpose,
 			Coin:    scope.Coin,
 		},
+		AccountPubKey: convertAccountPubKey(props.AccountPubKey),
 	}, nil
+}
+
+// convertAccountPubKey converts an lbcutil account extended public key to a
+// btcutil one, or returns nil if there is none. The btc wallet's Fingerprint
+// is the hash of this key, and it names the transaction history DB. Without
+// it the wallet fell back to an address-named DB and, since that lookup
+// never matched, started a new, empty history DB at every startup.
+func convertAccountPubKey(k *lbchdkeychain.ExtendedKey) *hdkeychain.ExtendedKey {
+	if k == nil {
+		return nil
+	}
+	pub, err := k.ECPubKey()
+	if err != nil {
+		return nil
+	}
+	parentFP := make([]byte, 4)
+	binary.BigEndian.PutUint32(parentFP, k.ParentFingerprint())
+	return hdkeychain.NewExtendedKey(k.Version(), pub.SerializeCompressed(), k.ChainCode(),
+		parentFP, k.Depth(), k.ChildIndex(), false)
 }
 
 func (w *lbcSPVWallet) RescanAsync() error {

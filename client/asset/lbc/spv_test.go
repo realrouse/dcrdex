@@ -4,6 +4,7 @@
 package lbc
 
 import (
+	"bytes"
 	"os"
 	"path/filepath"
 	"strings"
@@ -12,7 +13,9 @@ import (
 	"decred.org/dcrdex/dex"
 	dexlbc "decred.org/dcrdex/dex/networks/lbc"
 	"github.com/btcsuite/btcd/chaincfg/chainhash"
+	lbcchaincfg "github.com/lbryio/lbcd/chaincfg"
 	lbcchainhash "github.com/lbryio/lbcd/chaincfg/chainhash"
+	lbchdkeychain "github.com/lbryio/lbcutil/hdkeychain"
 )
 
 func TestHashRoundTrip(t *testing.T) {
@@ -113,4 +116,41 @@ func TestResetStaleNeutrinoChain(t *testing.T) {
 			t.Fatal("stamped chain files were removed")
 		}
 	})
+}
+
+func TestConvertAccountPubKey(t *testing.T) {
+	if convertAccountPubKey(nil) != nil {
+		t.Fatalf("nil key not converted to nil")
+	}
+	seed := bytes.Repeat([]byte{7}, 32)
+	master, err := lbchdkeychain.NewMaster(seed, &lbcchaincfg.MainNetParams)
+	if err != nil {
+		t.Fatal(err)
+	}
+	acct := master
+	for _, i := range []uint32{84 + lbchdkeychain.HardenedKeyStart, 140 + lbchdkeychain.HardenedKeyStart, lbchdkeychain.HardenedKeyStart} {
+		if acct, err = acct.Derive(i); err != nil {
+			t.Fatal(err)
+		}
+	}
+	pub, err := acct.Neuter()
+	if err != nil {
+		t.Fatal(err)
+	}
+	conv := convertAccountPubKey(pub)
+	if conv == nil {
+		t.Fatalf("key not converted")
+	}
+	// Same serialization, so the same key and metadata.
+	if conv.String() != pub.String() {
+		t.Fatalf("converted key %s != %s", conv, pub)
+	}
+	lbcPub, _ := pub.ECPubKey()
+	btcPub, err := conv.ECPubKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(lbcPub.SerializeCompressed(), btcPub.SerializeCompressed()) {
+		t.Fatalf("public keys differ")
+	}
 }

@@ -1586,7 +1586,8 @@ func (btc *baseWallet) txHistoryDBPath(walletID string) string {
 
 // findExistingAddressBasedTxHistoryDB finds the path of a tx history db that
 // was created using an address controlled by the wallet. This should only be
-// used for wallets that are unable to generate a fingerprint.
+// used for wallets that are unable to generate a fingerprint. If there are
+// several, the most recently modified one is returned.
 func (btc *baseWallet) findExistingAddressBasedTxHistoryDB() (string, error) {
 	dir, err := os.Open(btc.walletDir)
 	if err != nil {
@@ -1599,29 +1600,41 @@ func (btc *baseWallet) findExistingAddressBasedTxHistoryDB() (string, error) {
 		return "", fmt.Errorf("error reading wallet directory: %w", err)
 	}
 
-	pattern := regexp.MustCompile(`^txhistorydb-(.+)$`)
-
+	var best os.FileInfo
 	for _, entry := range entries {
-		if !entry.IsDir() {
+		address, ok := addressFromTxHistoryDBName(entry)
+		if !ok {
 			continue
 		}
-
-		match := pattern.FindStringSubmatch(entry.Name())
-		if match == nil {
-			continue
-		}
-
-		address := match[1]
 		owns, err := btc.OwnsDepositAddress(address)
-		if err != nil {
+		if err != nil || !owns {
 			continue
 		}
-		if owns {
-			return filepath.Join(btc.walletDir, entry.Name()), nil
+		if best == nil || entry.ModTime().After(best.ModTime()) {
+			best = entry
 		}
 	}
+	if best == nil {
+		return "", nil
+	}
+	return filepath.Join(btc.walletDir, best.Name()), nil
+}
 
-	return "", nil
+var txHistoryDBNameRE = regexp.MustCompile(`^txhistorydb-(.+?)(_v4)?$`)
+
+// addressFromTxHistoryDBName returns the address in the name of an
+// address-named tx history DB directory. Since badger v4 the directories
+// have a "_v4" suffix, which is not part of the address. Matching the whole
+// name never found the DB, so every startup made a new, empty one.
+func addressFromTxHistoryDBName(entry os.FileInfo) (string, bool) {
+	if !entry.IsDir() {
+		return "", false
+	}
+	match := txHistoryDBNameRE.FindStringSubmatch(entry.Name())
+	if match == nil {
+		return "", false
+	}
+	return match[1], true
 }
 
 func (btc *baseWallet) startTxHistoryDB(ctx context.Context) (*sync.WaitGroup, error) {
