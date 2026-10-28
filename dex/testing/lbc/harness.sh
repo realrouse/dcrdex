@@ -51,6 +51,9 @@ rpcuser=${RPC_USER}
 rpcpassword=${RPC_PASS}
 rpcbind=127.0.0.1:${port}
 rpcport=${port}
+# lbcwallet runs with --noservertls; bisonw's LBC RPC wallet assumes TLS
+# unless nontls is set.
+nontls=1
 EOF
 }
 
