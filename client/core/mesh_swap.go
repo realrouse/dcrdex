@@ -75,6 +75,12 @@ func (w *meshSwapWallet) Initiate(ctx context.Context, sc *meshpkg.SwapContract,
 			MaxSwapCount:  1,
 			MaxFeeRate:    feeRate,
 			FeeSuggestion: feeRate,
+			// The contract is sent right away, so a split tx only costs a
+			// fee. It also breaks lbcwallet RPC wallets: lbcwallet does not
+			// know its own just-sent split tx and can't sign the swap that
+			// spends it ("can't sign unknown transactions"), and every retry
+			// sent another split.
+			Options: map[string]string{"swapsplit": "false"},
 		})
 		if err != nil {
 			return nil, err
