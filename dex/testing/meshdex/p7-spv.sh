@@ -131,11 +131,12 @@ swap_status() { swap "$1" "$2" | py 'import sys,json; s=sys.stdin.read().strip()
 wait_swap() { local s; for _ in $(seq 1 $(( ${4:-$TIMEOUT} * SLOW ))); do s=$(swap_status "$1" "$2" 2>/dev/null || echo down); [ "$s" = "$3" ] && return 0; sleep 1; done; log "swap on $1 for $2 is $s, want $3"; return 1; }
 match_status() { curl -sf "http://$(dbg_of "$1")/mesh/matches" | py "import sys,json; m=[m for m in json.load(sys.stdin)['matches'] if m['match']['id']=='$2']; print(m[0]['status'] if m else 'none')"; }
 wait_match() { local s; for _ in $(seq 1 "$TIMEOUT"); do s=$(match_status "$1" "$2"); [ "$s" = "$3" ] && return 0; sleep 1; done; log "match $2 on $1: $s"; return 1; }
-trade() { # market lots -> matchID
-  local o m
-  o=$(post "$DBG_A" /mesh/order "{\"market\":\"$1\",\"sell\":true,\"qty\":$(($2*LOT)),\"lotSize\":$LOT,\"rate\":$RATE,\"lifetimeSec\":600}" | py 'import sys,json; print(json.load(sys.stdin)["id"])')
+trade() { # market lots [buy] -> matchID. A makes (sells the base, or buys it with "buy"), B takes.
+  local o m asell=true bsell=false
+  [ "${3:-}" = buy ] && { asell=false; bsell=true; }
+  o=$(post "$DBG_A" /mesh/order "{\"market\":\"$1\",\"sell\":$asell,\"qty\":$(($2*LOT)),\"lotSize\":$LOT,\"rate\":$RATE,\"lifetimeSec\":600}" | py 'import sys,json; print(json.load(sys.stdin)["id"])')
   for _ in $(seq 1 "$TIMEOUT"); do curl -sf "http://$DBG_B/mesh/book?market=$1" | grep -q "$o" && break; sleep 1; done
-  m=$(post "$DBG_B" /mesh/take "{\"market\":\"$1\",\"sell\":false,\"qty\":$(($2*LOT)),\"rate\":$RATE,\"lotSize\":$LOT}" \
+  m=$(post "$DBG_B" /mesh/take "{\"market\":\"$1\",\"sell\":$bsell,\"qty\":$(($2*LOT)),\"rate\":$RATE,\"lotSize\":$LOT}" \
     | py 'import sys,json; d=json.load(sys.stdin); assert len(d["proposed"] or [])==1, d; print(d["proposed"][0])') || fail "take on $1"
   wait_match b "$m" agreed || fail "match $m not agreed on B"
   wait_match a "$m" agreed || fail "match $m not agreed on A"
@@ -274,6 +275,24 @@ for MK in $MARKETS; do
   wait_swap b "$M" complete 180 || fail "$MK restart: B not complete"
   record "$M" "$MK-restart"
   log "PASS $MK restart mid-swap ($WHAT): both complete"
+
+  # -- restart, reversed: B sells the base, so after a kill -9 B must find the
+  # secret in A's redeem of B's base-asset contract (LBC SPV FindRedemption).
+  if [ "$BS" = lbc ] && [ "$Q" = btc ]; then
+    halt a redeem
+    M=$(trade "$MK" 1 buy)
+    wait_swap b "$M" part_sent || fail "reverse: B not part_sent"
+    wait_swap a "$M" part_audited || fail "reverse: A not part_audited"
+    crash b; halt a ""
+    wait_swap a "$M" redeemed 60 || fail "reverse: A did not redeem B's $BU contract while B was down"
+    log "A redeemed B's $BU contract while B was down"
+    restart b
+    wait_swap b "$M" complete 180 || fail "$MK reverse restart: B not complete"
+    wait_swap a "$M" complete 180 || fail "$MK reverse restart: A not complete"
+    record "$M" "$MK-restart-reverse"
+    grep -q "secret found on chain" "$RUN/swap-$MK-restart-reverse-B.json" || fail "reverse: B did not take the secret from the chain"
+    log "PASS $MK reverse restart (A buys $BU; kill -9 taker after its $BU contract; it finds the secret on the $BU chain): both complete"
+  fi
 
   # -- refund --
   set_policy "$MK" $REFUND_LOCKS
