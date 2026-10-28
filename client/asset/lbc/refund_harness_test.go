@@ -345,9 +345,19 @@ func TestNormalSwapRedeem(t *testing.T) {
 	}
 	t.Logf("RESULT ContractLockTimeExpired before lock time = %v (correct)", expired)
 
-	audit, err := gamma.AuditContract(r.Coin().ID(), r.Contract(), nil, false)
-	if err != nil {
-		t.Fatalf("AuditContract: %v", err)
+	// The swap may need a few seconds (lbcd inventory trickle) to reach
+	// gamma's node, so retry the audit, mining in between.
+	var audit *asset.AuditInfo
+	for i := 0; ; i++ {
+		audit, err = gamma.AuditContract(r.Coin().ID(), r.Contract(), nil, false)
+		if err == nil {
+			break
+		}
+		if i == 20 {
+			t.Fatalf("AuditContract: %v", err)
+		}
+		time.Sleep(3 * time.Second)
+		mtMine(t)
 	}
 	_, redeemCoin, _, err := gamma.Redeem(ctx, &asset.RedeemForm{
 		Redemptions:   []*asset.Redemption{{Spends: audit, Secret: secret}},
@@ -362,6 +372,22 @@ func TestNormalSwapRedeem(t *testing.T) {
 
 	fctx, fcancel := context.WithTimeout(ctx, 90*time.Second)
 	defer fcancel()
+	// lbcd relays with an inventory trickle, so the redeem may reach the
+	// miner (alpha) only after the block above. A Native SPV wallet can't
+	// search the mempool and FindRedemption blocks until a block with the
+	// redeem arrives, so keep mining while it searches.
+	go func() {
+		for {
+			select {
+			case <-fctx.Done():
+				return
+			case <-time.After(3 * time.Second):
+				cmd := exec.Command("./mine-alpha", "1")
+				cmd.Dir = filepath.Join(mtHarness(), "harness-ctl")
+				_ = cmd.Run() // no t.Fatal off the test goroutine
+			}
+		}
+	}()
 	var found dex.Bytes
 	var foundSecret dex.Bytes
 	for found == nil {
