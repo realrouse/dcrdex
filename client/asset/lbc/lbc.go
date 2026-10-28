@@ -338,6 +338,9 @@ func newRPCWallet(cfg *asset.WalletConfig, logger dex.Logger, network dex.Networ
 	cloneCFG.InitTxSize = dexbtc.InitTxSizeSegwit
 	cloneCFG.InitTxSizeBase = dexbtc.InitTxSizeBaseSegwit
 	cloneCFG.AccountFirstAddrRPC = true
+	// lbcwallet's signrawtransaction can't sign the P2WPKH coins this
+	// wallet receives (redeems, refunds, change); sign those locally.
+	cloneCFG.LocalWitnessSign = true
 	cloneCFG.OmitAddressType = true // skip fundrawtransaction ChangeType
 	cloneCFG.LegacySignTxRPC = true
 	cloneCFG.LegacyValidateAddressRPC = true
