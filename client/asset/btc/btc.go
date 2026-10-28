@@ -403,6 +403,9 @@ type BTCCloneCFG struct {
 	// passing "bech32" as the first argument would be treated as an
 	// account name.
 	AccountFirstAddrRPC bool
+	// LocalWitnessSign signs P2WPKH inputs locally (dumpprivkey) when the
+	// wallet's legacy signrawtransaction can't, e.g. lbcwallet.
+	LocalWitnessSign bool
 	// LegacySignTxRPC causes the RPC client to use the signrawtransaction
 	// endpoint instead of the signrawtransactionwithwallet endpoint.
 	LegacySignTxRPC bool
@@ -1260,6 +1263,7 @@ func newRPCWallet(requester RawRequester, cfg *BTCCloneCFG, parsedCfg *RPCWallet
 		chainParams:         cfg.ChainParams,
 		omitAddressType:     cfg.OmitAddressType,
 		accountFirstAddrRPC: cfg.AccountFirstAddrRPC,
+		localWitnessSign:    cfg.LocalWitnessSign,
 		legacySignTx:        cfg.LegacySignTxRPC,
 		booleanGetBlock:     cfg.BooleanGetBlockRPC,
 		unlockSpends:        cfg.UnlockSpends,

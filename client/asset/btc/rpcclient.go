@@ -116,6 +116,7 @@ type rpcCore struct {
 	chainParams         *chaincfg.Params
 	omitAddressType     bool
 	accountFirstAddrRPC bool
+	localWitnessSign    bool
 	legacySignTx        bool
 	booleanGetBlock     bool
 	unlockSpends        bool
@@ -648,6 +649,15 @@ func (wc *rpcClient) SignTx(ctx context.Context, inTx *wire.MsgTx) (*wire.MsgTx,
 	err = Call(ctx, wc.requester(), method, anylist{hex.EncodeToString(txBytes)}, res)
 	if err != nil {
 		return nil, fmt.Errorf("tx signing error: %w", err)
+	}
+	if !res.Complete && wc.localWitnessSign {
+		// lbcwallet: sign the P2WPKH inputs it could not.
+		if partTx, err := wc.deserializeTx(res.Hex); err == nil {
+			if err = wc.signWitnessInputsLocally(ctx, partTx); err == nil {
+				return partTx, nil
+			}
+			wc.log.Debugf("local witness signing failed: %v", err)
+		}
 	}
 	if !res.Complete {
 		sep := ""
