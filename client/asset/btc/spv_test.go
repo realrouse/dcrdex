@@ -984,11 +984,26 @@ func TestCheckRescanStall(t *testing.T) {
 		t.Fatal("should not detect stall when divergence < threshold")
 	}
 
-	// --- No stall when wallet height is 0 (rescan in progress) ---
+	// --- Height 0 does not trigger immediately (rescan may be starting) ---
 	setWalletHeight(0)
 	if spvw.checkRescanStall() {
-		t.Fatal("should not detect stall when wallet height is 0")
+		t.Fatal("should not trigger rescan on first height-0 observation")
 	}
+	if spvw.stallDetectedAt.Load() == 0 {
+		t.Fatal("height 0 past birthday should start the stall timer")
+	}
+	spvw.stallDetectedAt.Store(time.Now().Add(-stallConfirmationTime - time.Second).Unix())
+	btcWallet.rescanCalled.Store(false)
+	if !spvw.checkRescanStall() {
+		t.Fatal("should trigger rescan when height stays 0 past confirmation time")
+	}
+	if !btcWallet.rescanCalled.Load() {
+		t.Fatal("RescanAsync should have been called for stuck height 0")
+	}
+	spvw.stallDetectedAt.Store(0)
+	spvw.lastWalletHeight.Store(0)
+	spvw.lastRescanAt.Store(0)
+	btcWallet.rescanCalled.Store(false)
 
 	// --- No stall before wallet birthday ---
 	// Set birthday to a time in the future relative to chain tip timestamp.

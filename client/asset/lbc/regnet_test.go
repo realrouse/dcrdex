@@ -41,3 +41,21 @@ func TestWallet(t *testing.T) {
 		},
 	})
 }
+
+func TestSPVWallet(t *testing.T) {
+	livetest.Run(t, &livetest.Config{
+		NewWallet:     NewWallet,
+		LotSize:       tLotSize,
+		Asset:         tLBC,
+		SPV:           true,
+		MineAfterSend: true,
+		FirstWallet: &livetest.WalletName{
+			Node:       "alpha",
+			WalletType: walletTypeSPV,
+		},
+		SecondWallet: &livetest.WalletName{
+			Node:       "beta",
+			WalletType: walletTypeSPV,
+		},
+	})
+}

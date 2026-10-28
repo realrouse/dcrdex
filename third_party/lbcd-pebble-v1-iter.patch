@@ -1,0 +1,85 @@
+From d3f27d51d41e11c2b041907ade49267fad2532d1 Mon Sep 17 00:00:00 2001
+From: realrouse <real0rouse@gmail.com>
+Date: Tue, 25 Aug 2026 23:15:43 +0300
+Subject: [PATCH] claimtrie: handle pebble v1 NewIter error return
+
+go-ethereum pulls cockroachdb/pebble v1, whose NewIter returns (Iterator, error).
+lbcd still compiled against the old one-value API. This unblocks linking lbcwallet
+into dcrdex/Bison next to the ETH backend.
+---
+ claimtrie/block/blockrepo/pebble.go       |  7 +++++--
+ claimtrie/node/noderepo/pebble.go         | 10 ++++++++--
+ claimtrie/temporal/temporalrepo/pebble.go |  5 ++++-
+ 3 files changed, 17 insertions(+), 5 deletions(-)
+
+diff --git a/claimtrie/block/blockrepo/pebble.go b/claimtrie/block/blockrepo/pebble.go
+index b2df6af..3f72f29 100644
+--- a/claimtrie/block/blockrepo/pebble.go
++++ b/claimtrie/block/blockrepo/pebble.go
+@@ -24,14 +24,17 @@ func NewPebble(path string) (*Pebble, error) {
+ 
+ func (repo *Pebble) Load() (int32, error) {
+ 
+-	iter := repo.db.NewIter(nil)
++	iter, err := repo.db.NewIter(nil)
++	if err != nil {
++		return 0, errors.Wrap(err, "creating iterator")
++	}
+ 	if !iter.Last() {
+ 		err := iter.Close()
+ 		return 0, errors.Wrap(err, "closing iterator with no last")
+ 	}
+ 
+ 	height := int32(binary.BigEndian.Uint32(iter.Key()))
+-	err := iter.Close()
++	err = iter.Close()
+ 	return height, errors.Wrap(err, "closing iterator")
+ }
+ 
+diff --git a/claimtrie/node/noderepo/pebble.go b/claimtrie/node/noderepo/pebble.go
+index 32ca2c0..4253c61 100644
+--- a/claimtrie/node/noderepo/pebble.go
++++ b/claimtrie/node/noderepo/pebble.go
+@@ -201,7 +201,10 @@ func (repo *Pebble) IterateChildren(name []byte, f func(changes []change.Change)
+ 		UpperBound: end,
+ 	}
+ 
+-	iter := repo.db.NewIter(prefixIterOptions)
++	iter, err := repo.db.NewIter(prefixIterOptions)
++	if err != nil {
++		return errors.Wrap(err, "creating iterator")
++	}
+ 	defer iter.Close()
+ 
+ 	for iter.First(); iter.Valid(); iter.Next() {
+@@ -218,7 +221,10 @@ func (repo *Pebble) IterateChildren(name []byte, f func(changes []change.Change)
+ }
+ 
+ func (repo *Pebble) IterateAll(predicate func(name []byte) bool) {
+-	iter := repo.db.NewIter(nil)
++	iter, err := repo.db.NewIter(nil)
++	if err != nil {
++		return
++	}
+ 	defer iter.Close()
+ 
+ 	for iter.First(); iter.Valid(); iter.Next() {
+diff --git a/claimtrie/temporal/temporalrepo/pebble.go b/claimtrie/temporal/temporalrepo/pebble.go
+index f7b083d..eb3ee07 100644
+--- a/claimtrie/temporal/temporalrepo/pebble.go
++++ b/claimtrie/temporal/temporalrepo/pebble.go
+@@ -58,7 +58,10 @@ func (repo *Pebble) NodesAt(height int32) ([][]byte, error) {
+ 
+ 	var names [][]byte
+ 
+-	iter := repo.db.NewIter(prefixIterOptions)
++	iter, err := repo.db.NewIter(prefixIterOptions)
++	if err != nil {
++		return nil, errors.Wrap(err, "creating iterator")
++	}
+ 	for iter.First(); iter.Valid(); iter.Next() {
+ 		// Skipping the first 5 bytes (height and a null byte), we get the name.
+ 		name := make([]byte, len(iter.Key())-5)
+-- 
+2.43.0
+
