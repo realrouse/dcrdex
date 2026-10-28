@@ -233,3 +233,20 @@ func TestRecoverFromCache(t *testing.T) {
 		}
 	})
 }
+
+func TestSwapCacheKey(t *testing.T) {
+	in := []asset.Coin{&testCoin{id: []byte{0xaa}}}
+	mk := func(addr string, val uint64, sh byte, lock uint64) *asset.Swaps {
+		return &asset.Swaps{Inputs: in, Contracts: []*asset.Contract{{Address: addr, Value: val, SecretHash: []byte{sh}, LockTime: lock}}}
+	}
+	base := SwapCacheKey(mk("a", 1, 1, 1))
+	if SwapCacheKey(mk("a", 1, 1, 1)) != base {
+		t.Fatal("same swap, different key")
+	}
+	// Same inputs, different terms: must not share a cache entry.
+	for i, s := range []*asset.Swaps{mk("b", 1, 1, 1), mk("a", 2, 1, 1), mk("a", 1, 2, 1), mk("a", 1, 1, 2)} {
+		if SwapCacheKey(s) == base {
+			t.Fatalf("case %d: different swap terms share a cache key", i)
+		}
+	}
+}

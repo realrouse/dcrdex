@@ -3901,7 +3901,7 @@ func (btc *baseWallet) Swap(ctx context.Context, swaps *asset.Swaps) ([]asset.Re
 	}
 
 	// Check broadcast cache for retry of a previously built transaction.
-	cacheKey := broadcast.CoinIDsCacheKey(swaps.Inputs)
+	cacheKey := broadcast.SwapCacheKey(swaps)
 	if cached, ok := broadcast.RecoverFromCache(btc.swapCache, cacheKey,
 		func(e *swapCacheEntry) error { _, err := btc.broadcastTx(ctx, e.signedTx); return err },
 		func(e *swapCacheEntry) bool {

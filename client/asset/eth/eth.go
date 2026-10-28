@@ -3789,7 +3789,7 @@ func (w *ETHWallet) Swap(ctx context.Context, swaps *asset.Swaps) ([]asset.Recei
 
 	// Only check on-chain state on retry (cache hit) to avoid unnecessary
 	// RPC calls on the first attempt.
-	cacheKey := broadcast.CoinIDsCacheKey(swaps.Inputs)
+	cacheKey := broadcast.SwapCacheKey(swaps)
 	if _, seen := w.swapSeen.Get(cacheKey); seen {
 		allInitiated := true
 		for _, contract := range swaps.Contracts {
@@ -3951,7 +3951,7 @@ func (w *TokenWallet) Swap(ctx context.Context, swaps *asset.Swaps) ([]asset.Rec
 
 	// Only check on-chain state on retry (cache hit) to avoid unnecessary
 	// RPC calls on the first attempt.
-	cacheKey := broadcast.CoinIDsCacheKey(swaps.Inputs)
+	cacheKey := broadcast.SwapCacheKey(swaps)
 	if _, seen := w.swapSeen.Get(cacheKey); seen {
 		allInitiated := true
 		for _, contract := range swaps.Contracts {
