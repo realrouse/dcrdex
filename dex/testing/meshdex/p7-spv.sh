@@ -55,6 +55,7 @@ ADDR_A=$("$MESH" addr 1); ADDR_B=$("$MESH" addr 2)
 declare -A PID
 cleanup() { for p in "${PID[@]}"; do kill "$p" 2>/dev/null || true; done; wait 2>/dev/null || true; }
 trap cleanup EXIT
+trap 'log "FAIL: command failed at line $LINENO: $BASH_COMMAND" >&2' ERR
 # Never delete appdata that may hold unrefunded contracts.
 [ -d "$RUN" ] && mv "$RUN" "$RUN.$(date +%Y%m%d-%H%M%S)"
 mkdir -p "$RUN/a" "$RUN/b"
@@ -175,7 +176,9 @@ assert qa-fee < d["A_"+q] <= qa+1e-9, ("A quote", d)
 assert ba-fee < d["B_"+b] <= ba+1e-9, ("B base", d)
 assert -qa-fee < d["B_"+q] <= -qa+1e-9, ("B quote", d)'
 }
-mine() { "$DCRCTL/mine-alpha" "$1" >/dev/null 2>&1; "$BTCCTL/mine-alpha" "$1" >/dev/null 2>&1; "$LBCCTL/mine-alpha" "$1" >/dev/null 2>&1; }
+# The background miner and settle() can call generate at the same time, and a
+# node may refuse one of them; that must not end the run (set -e) or the miner.
+mine() { "$DCRCTL/mine-alpha" "$1" >/dev/null 2>&1 || true; "$BTCCTL/mine-alpha" "$1" >/dev/null 2>&1 || true; "$LBCCTL/mine-alpha" "$1" >/dev/null 2>&1 || true; }
 # lbcd relays txs with an inventory trickle, so a tx can take several seconds
 # to reach alpha (the miner); SPV wallets then need the block's filter.
 settle() { sleep 6; mine 2; sleep $((4 * SLOW)); }
