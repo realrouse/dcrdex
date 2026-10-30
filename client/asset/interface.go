@@ -821,6 +821,23 @@ type BondDetails struct {
 	CheckPrivKey func(priv *secp256k1.PrivateKey) bool
 }
 
+// BondRefundChecker is an optional interface for a Bonder that can verify on
+// chain whether a bond refund has actually happened. If a wallet implements it,
+// Core does not consider a bond refunded until the refund is confirmed or the
+// bond output is otherwise known to be spent, and it rebroadcasts refunds that
+// do not confirm. It also lets Core re-check bonds that were marked refunded by
+// an older client without the refund actually being mined.
+type BondRefundChecker interface {
+	// BondRefundConfirmations returns the number of confirmations of a bond
+	// refund transaction broadcast by this wallet, identified by the coin ID
+	// returned from RefundBond. CoinNotFoundError is returned if the wallet
+	// has no record of the transaction.
+	BondRefundConfirmations(ctx context.Context, refundCoinID []byte) (uint32, error)
+	// BondSpent reports whether the bond output has been spent in a mined
+	// transaction. An error is returned if this cannot be determined.
+	BondSpent(ctx context.Context, ver uint16, bondCoinID, bondScript []byte) (bool, error)
+}
+
 // Bonder is a wallet capable of creating and redeeming time-locked fidelity
 // bond transaction outputs.
 type Bonder interface {

@@ -14,9 +14,20 @@ const (
 	// DefaultCandleRequest is the number of candles to return if the request
 	// does not specify otherwise.
 	DefaultCandleRequest = 50
-	// CacheSize is the default cache size. Also represents the maximum number
-	// of candles that can be requested at once.
+	// CacheSize is the default cache size. It is used for any bin size not
+	// listed in CacheSizes (e.g. the epoch-duration cache). It is also the
+	// maximum number of candles that a server that does not advertise its
+	// cache sizes in the 'config' response (i.e. upstream servers) will
+	// return for a single request, so clients must not request more than this
+	// from such a server.
 	CacheSize = 1000
+	// MaxCacheSize is a sanity limit on the cache size a client will use for a
+	// server-advertised bin size.
+	MaxCacheSize = 10_000
+	// HistoryPageSize is the maximum number of candles a server will return
+	// for one request for older candle history (msgjson.CandlesRequest with
+	// Before set).
+	HistoryPageSize = 1000
 )
 
 var (
@@ -24,7 +35,26 @@ var (
 	// use in the 'config' response. Internally, we will parse these to uint64
 	// milliseconds.
 	BinSizes = []string{"24h", "1h", "5m"}
+
+	// CacheSizes are the in-memory cache sizes for the BinSizes. These are
+	// also the maximum number of candles that can be requested at once for the
+	// bin size, and are advertised to clients in the 'config' response. A
+	// candle is 64 bytes in memory, so 3000 candles are ~190 KB per market.
+	CacheSizes = map[string]int{
+		"24h": 1000, // ~2.7 years
+		"1h":  3000, // 125 days
+		"5m":  3000, // ~10.4 days
+	}
 )
+
+// CacheSizeFor returns the cache size for the bin size, or CacheSize if the
+// bin size has no specific size.
+func CacheSizeFor(binSize string) int {
+	if sz, ok := CacheSizes[binSize]; ok && sz > 0 {
+		return sz
+	}
+	return CacheSize
+}
 
 // Candle is a report about the trading activity of a market over some specified
 // period of time. Candles are managed with a Cache, which takes into account
@@ -48,6 +78,11 @@ func NewCache(cap int, binSize uint64) *Cache {
 		cap:     cap,
 		BinSize: binSize,
 	}
+}
+
+// Cap is the maximum number of candles the Cache will hold.
+func (c *Cache) Cap() int {
+	return c.cap
 }
 
 // Add adds a new candle TO THE END of the Cache. The caller is responsible to

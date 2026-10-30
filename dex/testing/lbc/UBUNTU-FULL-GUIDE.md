@@ -1,7 +1,7 @@
 # Complete Ubuntu guide: test LBC on DCRDEX (local simnet)
 
 This document is **Linux / Ubuntu** oriented. It covers prerequisites through
-**deposits, bonds, and a successful atomic swap** on a local **DCR/LBC** market.
+**deposits, bonds, and a successful atomic swap** on a local **LBC/DCR** market.
 
 | Audience | Path |
 |----------|------|
@@ -23,7 +23,7 @@ This document is **Linux / Ubuntu** oriented. It covers prerequisites through
        └─────────┬─────────┘
                  ▼
          ┌───────────────┐
-         │  dcrdex       │  market dcr_lbc @ 127.0.0.1:17273
+         │  dcrdex       │  market lbc_dcr @ 127.0.0.1:17273
          └───────┬───────┘
                  ▼
     simnet-trade-tests (2 clients)
@@ -36,7 +36,7 @@ This document is **Linux / Ubuntu** oriented. It covers prerequisites through
 
 ## Option A2 — Manual Bison Wallet UI (you place the trades)
 
-Starts DCR + LBC harnesses, `dcrdex` (`dcr_lbc`), background miners, and **two**
+Starts DCR + LBC harnesses, `dcrdex` (`lbc_dcr`), background miners, and **two**
 `bisonw` instances. Open the printed `http://127.0.0.1:…` URLs in a browser and
 drive deposits / bonds / swaps yourself.
 
@@ -99,10 +99,10 @@ The script will:
 1. Install packages, Go 1.24, Decred tools, build `lbcd`/`lbcwallet`
 2. Start **DCR** harness (`NOMINER=1`)
 3. Start **LBC** harness (alpha/beta/gamma wallets)
-4. Build and start **dcrdex** with market **DCR_simnet / LBC_simnet**
+4. Build and start **dcrdex** with market **LBC_simnet / DCR_simnet**
 5. Run unit tests
 6. Run LBC client `TestWallet` (deposit-like fund, swap, redeem, refund, send, withdraw)
-7. Run `./run dcrlbc -t success` (bonds + full trade)
+7. Run `./run lbcdcr -t success` (bonds + full trade)
 
 ---
 
@@ -209,7 +209,7 @@ Creates:
 | `~/dextest/lbc/gamma/gamma.conf` | Client 2 quote wallet |
 | `~/dextest/lbc/alpha/alpha-node.conf` | **Server** node RPC |
 
-### B7. Start dcrdex with DCR/LBC market
+### B7. Start dcrdex with LBC/DCR market
 
 Easiest: use the automated script’s `start_dcrdex` logic, **or** the built-in harness after genmarkets sees LBC:
 
@@ -238,7 +238,7 @@ $APP/dcrdex --appdata=$APP --configfile=$APP/dcrdex.conf \
 
 ```bash
 curl -sk --basic -u u:adminpass https://127.0.0.1:16542/api/config | jq '.assets[].symbol, .markets[].name'
-# expect: dcr, lbc, dcr_lbc
+# expect: dcr, lbc, lbc_dcr
 ```
 
 Logs: `~/dextest/dcrdex/dcrdex-stdout.log` or `~/dextest/dcrdex/logs/simnet/`
@@ -273,7 +273,7 @@ for w in alpha beta gamma; do
   ~/dextest/lbc/harness-ctl/$w walletpassphrase abc 1000000
 done
 
-./run dcrlbc -t success -runonce -debug
+./run lbcdcr -t success -runonce -debug
 ```
 
 **What this exercises:**
@@ -283,10 +283,10 @@ done
 | Wallet create / connect | DCR trading1/trading2 + LBC beta/gamma |
 | Fund from harness alpha | **Deposits** into client wallets |
 | Bond post with `--regasset dcr` | **Bonds** on the simnet DEX |
-| Place maker/taker orders | Order book on `dcr_lbc` |
+| Place maker/taker orders | Order book on `lbc_dcr` |
 | Match → swap → redeem | **Atomic swap** success path |
 
-Other scenarios: `./run dcrlbc --all` (see [simnet-trade-tests README](../../client/cmd/simnet-trade-tests/README.md)).
+Other scenarios: `./run lbcdcr --all` (see [simnet-trade-tests README](../../client/cmd/simnet-trade-tests/README.md)).
 
 ### B11. Shutdown
 

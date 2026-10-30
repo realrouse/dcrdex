@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"math/rand"
 	"os"
@@ -404,6 +405,10 @@ type TBackend struct {
 	confsMinus2    int64
 	invalidFeeRate bool
 	unfunded       bool
+	// fundingGate, if set, blocks FundingCoin until it is closed.
+	fundingGate chan struct{}
+	// fundingCalls counts FundingCoin calls.
+	fundingCalls atomic.Int32
 }
 
 func tNewUTXOBackend() *tUTXOBackend {
@@ -488,6 +493,10 @@ type tUTXOBackend struct {
 }
 
 func (b *tUTXOBackend) FundingCoin(ctx context.Context, coinID, redeemScript []byte) (asset.FundingCoin, error) {
+	b.fundingCalls.Add(1)
+	if b.fundingGate != nil {
+		<-b.fundingGate
+	}
 	return b.utxo(coinID)
 }
 
@@ -2276,4 +2285,159 @@ func TestParcelLimits(t *testing.T) {
 
 	lo.Quantity += lotSize
 	ensureErr()
+}
+
+// TestLimitFundingCheckOffReadLoop ensures handleLimit returns without
+// waiting for the backend to find the funding coins, so the user's
+// websocket read loop keeps processing (e.g. preimage replies).
+func TestLimitFundingCheckOffReadLoop(t *testing.T) {
+	qty := uint64(dcrLotSize) * 3
+	user := oRig.user
+	pi := ordertest.RandomPreimage()
+	commit := pi.Commit()
+	limit := msgjson.LimitOrder{
+		Prefix: msgjson.Prefix{
+			AccountID:  user.acct[:],
+			Base:       dcrID,
+			Quote:      btcID,
+			OrderType:  msgjson.LimitOrderNum,
+			ClientTime: uint64(nowMs().UnixMilli()),
+			Commit:     commit[:],
+		},
+		Trade: msgjson.Trade{
+			Side:     msgjson.SellOrderNum,
+			Quantity: qty,
+			Coins: []*msgjson.Coin{
+				oRig.signedUTXO(dcrID, qty, 1),
+				oRig.signedUTXO(dcrID, dcrLotSize, 2),
+			},
+			Address: btcAddr,
+		},
+		Rate: 1000 * dcrRateStep,
+		TiF:  msgjson.StandingOrderNum,
+	}
+
+	// Other tests may swap the router's tunnels, so use the live one.
+	mkt := oRig.router.tunnels["dcr_btc"].(*TMarketTunnel)
+	oRig.auth.sent = make(chan *msgjson.Error, 1)
+	mkt.added = make(chan struct{}, 1)
+	gate := make(chan struct{})
+	oRig.dcr.fundingGate = gate
+	defer func() {
+		oRig.auth.sent = nil
+		mkt.added = nil
+		oRig.dcr.fundingGate = nil
+	}()
+
+	msg, _ := msgjson.NewRequest(7, msgjson.LimitRoute, limit)
+	done := make(chan *msgjson.Error, 1)
+	go func() { done <- oRig.router.handleLimit(user.acct, msg) }()
+	select {
+	case rpcErr := <-done:
+		if rpcErr != nil {
+			t.Fatalf("handleLimit error: %v", rpcErr)
+		}
+	case <-time.After(2 * time.Second):
+		close(gate)
+		t.Fatalf("handleLimit blocked on the funding coin lookup")
+	}
+
+	// Nothing is answered while the backend is still looking.
+	select {
+	case <-oRig.auth.sent:
+		t.Fatalf("response sent before funding coins were found")
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	close(gate)
+	select {
+	case rpcErr := <-oRig.auth.sent:
+		if rpcErr != nil {
+			t.Fatalf("unexpected error response: %v", rpcErr)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatalf("no response after funding coins were found")
+	}
+	select {
+	case <-mkt.added:
+	case <-time.After(time.Second):
+		t.Fatalf("order not submitted to epoch")
+	}
+	if mkt.pop() == nil {
+		t.Fatalf("no order submitted")
+	}
+}
+
+func TestLookupFundingCoinsTimeout(t *testing.T) {
+	be := tNewUTXOBackend()
+	gate := make(chan struct{})
+	be.fundingGate = gate
+	defer close(gate)
+	r := &OrderRouter{coinLookupSem: make(chan struct{}, 2)}
+	coins := map[int]*msgjson.Coin{0: {ID: []byte{1}}, 1: {ID: []byte{2}}, 2: {ID: []byte{3}}}
+	start := time.Now()
+	res := r.newFundingLookups(be, len(coins)).lookup(coins, 150*time.Millisecond)
+	if el := time.Since(start); el > 2*time.Second {
+		t.Fatalf("lookups not bounded by the timeout: %v", el)
+	}
+	if len(res) != 3 {
+		t.Fatalf("expected 3 results, got %d", len(res))
+	}
+	for k, lr := range res {
+		if !errors.Is(lr.err, asset.ErrRequestTimeout) {
+			t.Fatalf("coin %d: expected timeout, got %v", k, lr.err)
+		}
+	}
+}
+
+// TestLookupFundingCoinsCarryOver checks that a lookup that outlives one
+// pass is not started again by the next pass, and that its result is used
+// once it arrives.
+func TestLookupFundingCoinsCarryOver(t *testing.T) {
+	be := tNewUTXOBackend()
+	coinIDs := [][]byte{{1}, {2}, {3}, {4}}
+	for _, id := range coinIDs {
+		be.utxos[hex.EncodeToString(id)] = 1e8
+	}
+	gate := make(chan struct{})
+	be.fundingGate = gate
+	r := &OrderRouter{coinLookupSem: make(chan struct{}, 2)}
+	coins := make(map[int]*msgjson.Coin, len(coinIDs))
+	for i, id := range coinIDs {
+		coins[i] = &msgjson.Coin{ID: id}
+	}
+	fl := r.newFundingLookups(be, len(coins))
+
+	// Pass 1: the backend is stuck, everything times out.
+	for k, lr := range fl.lookup(coins, 100*time.Millisecond) {
+		if !errors.Is(lr.err, asset.ErrRequestTimeout) {
+			t.Fatalf("pass 1 coin %d: expected timeout, got %v", k, lr.err)
+		}
+	}
+	// Pass 2, still stuck: no new lookups may be started for the same coins.
+	fl.lookup(coins, 100*time.Millisecond)
+	if n := be.fundingCalls.Load(); n != 2 { // 2 slots, the rest still waiting for one
+		t.Fatalf("expected 2 backend calls in flight, got %d", n)
+	}
+
+	// The backend recovers. The lookups started in pass 1 finish, and pass 3
+	// uses their results.
+	close(gate)
+	res := fl.lookup(coins, 2*time.Second)
+	for k, lr := range res {
+		if lr.err != nil || lr.coin == nil {
+			t.Fatalf("pass 3 coin %d: expected coin, got %v", k, lr.err)
+		}
+	}
+	if n := be.fundingCalls.Load(); n != int32(len(coinIDs)) {
+		t.Fatalf("expected one backend call per coin, got %d", n)
+	}
+
+	// Only still-needed coins are reported.
+	delete(coins, 0)
+	be.fundingGate = nil
+	res = fl.lookup(coins, 2*time.Second)
+	if len(res) != 3 {
+		t.Fatalf("expected 3 results, got %d", len(res))
+	}
 }

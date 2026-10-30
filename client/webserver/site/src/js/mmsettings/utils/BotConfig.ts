@@ -539,7 +539,11 @@ function setBotSpecificDefaultConfig (
         gapStrategy: 'percent-plus',
         sellPlacements: [{ lots: 1, gapFactor: 0.01 }],
         buyPlacements: [{ lots: 1, gapFactor: 0.01 }],
-        driftTolerance: 0.001
+        driftTolerance: 0.001,
+        inventorySkew: 1,
+        inventorySkewCap: 0.03,
+        doNotCross: true,
+        bidAnchorFadeHours: 4
       }
       break
     case 'arbMM': {
@@ -805,6 +809,10 @@ type BotConfigAction =
   | { type: 'TOGGLE_QUICK_BALANCE'; payload: boolean }
   | { type: 'UPDATE_MANUAL_ALLOCATION'; payload: { assetID: number; amount: number; source: 'dex' | 'cex' } }
   | { type: 'UPDATE_DRIFT_TOLERANCE'; payload: number }
+  | { type: 'UPDATE_INVENTORY_SKEW'; payload: number }
+  | { type: 'UPDATE_INVENTORY_SKEW_CAP'; payload: number }
+  | { type: 'UPDATE_DO_NOT_CROSS'; payload: boolean }
+  | { type: 'UPDATE_BID_ANCHOR_FADE_HOURS'; payload: number }
   | { type: 'UPDATE_ORDER_PERSISTENCE'; payload: number }
   | { type: 'UPDATE_REBALANCE_SETTINGS'; payload: RebalanceSettingsAction }
   | { type: 'UPDATE_WALLET_SETTING'; payload: { asset: 'base' | 'quote'; key: string; value: string } }
@@ -1342,6 +1350,58 @@ export const botConfigStateReducer = (state: BotConfigState | null, action: BotC
           arbMarketMakingConfig: state.botConfig.arbMarketMakingConfig
             ? { ...state.botConfig.arbMarketMakingConfig, driftTolerance: action.payload }
             : undefined
+        }
+      }
+
+    case 'UPDATE_INVENTORY_SKEW':
+      if (!state.botConfig.basicMarketMakingConfig) return state
+      return {
+        ...state,
+        botConfig: {
+          ...state.botConfig,
+          basicMarketMakingConfig: {
+            ...state.botConfig.basicMarketMakingConfig,
+            inventorySkew: action.payload
+          }
+        }
+      }
+
+    case 'UPDATE_INVENTORY_SKEW_CAP':
+      if (!state.botConfig.basicMarketMakingConfig) return state
+      return {
+        ...state,
+        botConfig: {
+          ...state.botConfig,
+          basicMarketMakingConfig: {
+            ...state.botConfig.basicMarketMakingConfig,
+            inventorySkewCap: action.payload
+          }
+        }
+      }
+
+    case 'UPDATE_DO_NOT_CROSS':
+      if (!state.botConfig.basicMarketMakingConfig) return state
+      return {
+        ...state,
+        botConfig: {
+          ...state.botConfig,
+          basicMarketMakingConfig: {
+            ...state.botConfig.basicMarketMakingConfig,
+            doNotCross: action.payload
+          }
+        }
+      }
+
+    case 'UPDATE_BID_ANCHOR_FADE_HOURS':
+      if (!state.botConfig.basicMarketMakingConfig) return state
+      return {
+        ...state,
+        botConfig: {
+          ...state.botConfig,
+          basicMarketMakingConfig: {
+            ...state.botConfig.basicMarketMakingConfig,
+            bidAnchorFadeHours: action.payload
+          }
         }
       }
 

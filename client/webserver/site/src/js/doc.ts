@@ -37,6 +37,7 @@ const BipIDs: Record<number, string> = {
   128: 'xmr',
   136: 'firo',
   133: 'zec',
+  140: 'lbc', // LBRY Credits
   966: 'polygon',
   966001: 'usdc.polygon',
   966002: 'weth.polygon',
@@ -347,8 +348,15 @@ export default class Doc {
   static formatRateFullPrecision (encRate: number, bui: UnitInfo, qui: UnitInfo, rateStepEnc: number) {
     const r = bui.conventional.conversionFactor / qui.conventional.conversionFactor
     const convRate = encRate * r / RateEncodingFactor
-    const rateStepDigits = log10RateEncodingFactor - Math.floor(Math.log10(rateStepEnc)) -
+    let rateStepDigits = log10RateEncodingFactor - Math.floor(Math.log10(Math.max(rateStepEnc, 1))) -
       Math.floor(Math.log10(bui.conventional.conversionFactor) - Math.log10(qui.conventional.conversionFactor))
+    if (!Number.isFinite(rateStepDigits) || rateStepDigits < 0) rateStepDigits = 0
+    // A coarse rate step (e.g. 1e6 → 2 fraction digits) must not round a
+    // live LBC/DCR rate like 0.00016 to "0.00".
+    if (encRate > 0 && convRate > 0 && convRate < 1) {
+      const minDigits = Math.ceil(-Math.log10(convRate)) + 2
+      if (rateStepDigits < minDigits) rateStepDigits = minDigits
+    }
     if (rateStepDigits <= 0) return intFormatter.format(convRate)
     return fullPrecisionFormatter(rateStepDigits).format(convRate)
   }
@@ -969,7 +977,12 @@ if (process.env.NODE_ENV === 'development') {
       // UTXO assets but with a rate step that's not a perfect power of 10.
       // For a rate step of 500, a min rate would be e.g. rate step = 500.
       // 5e2 / 1e8 = 5e-6 = 0.000005
-      [5e2, 500, 1e8, 1e8, '0.000005']
+      [5e2, 500, 1e8, 1e8, '0.000005'],
+      // LBC-DCR-like: tiny conventional rate must not render as 0.00 even if
+      // the encoded rate step is coarse (1e6 → only 2 fraction digits).
+      [16429, 1e6, 1e8, 1e8, '0.000164'],
+      // Live LBC/DCR book after rateStep=10: 15260/1e8 = 0.0001526
+      [15260, 10, 1e8, 1e8, '0.0001526']
     ]
 
     for (const [encRate, rateStep, qFactor, bFactor, expEncoding] of tests) {

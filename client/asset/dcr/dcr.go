@@ -100,6 +100,9 @@ const (
 	// freshFeeAge is the expiry age for cached fee rates of external origin,
 	// past which fetchFeeFromOracle should be used to refresh the rate.
 	freshFeeAge = time.Minute
+	// maxStaleOracleFeeAge is how long an expired oracle fee rate is still
+	// served while a refresh is running or the oracle is failing.
+	maxStaleOracleFeeAge = 30 * time.Minute
 
 	// confTxFinality is the amount of confirms a redeem or refund
 	// transaction needs before the trade is considered confirmed. The tx is
@@ -666,6 +669,7 @@ type ExchangeWallet struct {
 	oracleFeesMtx sync.Mutex
 	oracleFees    map[uint64]feeStamped // conf target => fee rate
 	oracleFailing bool
+	oracleFetches map[uint64]chan struct{} // conf target => fetch done
 
 	handleTipMtx sync.Mutex
 	currentTip   atomic.Value // *block
@@ -884,6 +888,7 @@ func unconnectedWallet(cfg *asset.WalletConfig, dcrCfg *walletConfig, chainParam
 		findRedemptionQueue: make(map[outPoint]*findRedemptionReq),
 		externalTxCache:     make(map[chainhash.Hash]*externalTx),
 		oracleFees:          make(map[uint64]feeStamped),
+		oracleFetches:       make(map[uint64]chan struct{}),
 		mempoolTxs:          make(map[[32]byte]*mempoolTx),
 		vspFilepath:         vspFilepath,
 		walletType:          cfg.Type,
@@ -1375,33 +1380,89 @@ func (dcr *ExchangeWallet) feeRate(confTarget uint64) (uint64, error) {
 		return 0, fmt.Errorf("fee rate estimation unavailable and external API is disabled")
 	}
 
-	now := time.Now()
+	return dcr.oracleFeeRate(confTarget), nil
+}
 
+// oracleFeeRate returns the external fee oracle's rate for confTarget without
+// ever waiting on the oracle while holding oracleFeesMtx. A fresh cached rate
+// is returned as is. A stale one triggers a single background refresh and is
+// returned meanwhile if it is no older than maxStaleOracleFeeAge. Only when
+// there is no usable cached rate does the caller wait, at most for the one
+// fetch in flight. Zero means no rate is available, which callers treat as a
+// failed estimate and fall back from.
+func (dcr *ExchangeWallet) oracleFeeRate(confTarget uint64) uint64 {
+	now := time.Now()
 	dcr.oracleFeesMtx.Lock()
-	defer dcr.oracleFeesMtx.Unlock()
 	oracleFee := dcr.oracleFees[confTarget]
 	if now.Sub(oracleFee.stamp) < freshFeeAge {
-		return oracleFee.rate, nil
+		dcr.oracleFeesMtx.Unlock()
+		return oracleFee.rate
 	}
-	if dcr.oracleFailing {
-		return 0, errors.New("fee rate oracle is in a temporary failing state")
+	var fetchDone chan struct{}
+	if !dcr.oracleFailing {
+		fetchDone = dcr.refreshOracleFeeLocked(confTarget)
 	}
+	dcr.oracleFeesMtx.Unlock()
 
+	if oracleFee.rate != 0 && now.Sub(oracleFee.stamp) < maxStaleOracleFeeAge {
+		return oracleFee.rate // serve the last good rate while refreshing
+	}
+	if fetchDone == nil {
+		// The oracle is failing and nothing recent is cached.
+		return 0
+	}
+	select {
+	case <-fetchDone:
+	case <-dcr.ctx.Done():
+		return 0
+	}
+	dcr.oracleFeesMtx.Lock()
+	defer dcr.oracleFeesMtx.Unlock()
+	if oracleFee = dcr.oracleFees[confTarget]; time.Since(oracleFee.stamp) < freshFeeAge {
+		return oracleFee.rate
+	}
+	return 0
+}
+
+// refreshOracleFeeLocked starts a fetch of the oracle fee rate for confTarget
+// unless one is already running, and returns a channel that is closed when
+// the running fetch completes. oracleFeesMtx MUST be held.
+func (dcr *ExchangeWallet) refreshOracleFeeLocked(confTarget uint64) chan struct{} {
+	if done, running := dcr.oracleFetches[confTarget]; running {
+		return done
+	}
+	done := make(chan struct{})
+	dcr.oracleFetches[confTarget] = done
+	go func() {
+		defer close(done)
+		rate, err := dcr.fetchOracleFee(confTarget)
+		dcr.oracleFeesMtx.Lock()
+		defer dcr.oracleFeesMtx.Unlock()
+		delete(dcr.oracleFetches, confTarget)
+		if err != nil {
+			// We want to meter these logs.
+			dcr.log.Meter("feeRate.fetch.fail", time.Hour).Errorf("external fee rate API failure: %v", err)
+			// Flag the oracle as failing so we don't keep trying for a
+			// bit. Remove the flag after a while.
+			dcr.oracleFailing = true
+			time.AfterFunc(freshFeeAge, func() {
+				dcr.oracleFeesMtx.Lock()
+				dcr.oracleFailing = false
+				dcr.oracleFeesMtx.Unlock()
+			})
+			return
+		}
+		dcr.oracleFees[confTarget] = feeStamped{rate, time.Now()}
+	}()
+	return done
+}
+
+// fetchOracleFee fetches and validates the oracle fee rate in atoms/B.
+func (dcr *ExchangeWallet) fetchOracleFee(confTarget uint64) (uint64, error) {
 	dcr.log.Tracef("Retrieving fee rate from external fee oracle for %d target blocks", confTarget)
-	dcrPerKB, err := fetchFeeFromOracle(dcr.ctx, dcr.network, confTarget)
+	dcrPerKB, err := oracleFeeFetcher(dcr.ctx, dcr.network, confTarget)
 	if err != nil {
-		// Just log it and return zero. If we return an error, it's just logged
-		// anyway, and we want to meter these logs.
-		dcr.log.Meter("feeRate.fetch.fail", time.Hour).Errorf("external fee rate API failure: %v", err)
-		// Flag the oracle as failing so subsequent requests don't also try and
-		// fail after the request timeout. Remove the flag after a bit.
-		dcr.oracleFailing = true
-		time.AfterFunc(freshFeeAge, func() {
-			dcr.oracleFeesMtx.Lock()
-			dcr.oracleFailing = false
-			dcr.oracleFeesMtx.Unlock()
-		})
-		return 0, nil
+		return 0, err
 	}
 	if dcrPerKB <= 0 {
 		return 0, fmt.Errorf("invalid fee rate %f from fee oracle", dcrPerKB)
@@ -1411,11 +1472,10 @@ func (dcr *ExchangeWallet) feeRate(confTarget uint64) (uint64, error) {
 	if err != nil {
 		return 0, err
 	}
-	if atomsPerByte > cfg.feeRateLimit {
+	if limit := dcr.config().feeRateLimit; atomsPerByte > limit {
 		return 0, fmt.Errorf("fee rate from external API greater than fee rate limit: %v > %v",
-			atomsPerByte, cfg.feeRateLimit)
+			atomsPerByte, limit)
 	}
-	dcr.oracleFees[confTarget] = feeStamped{atomsPerByte, now}
 	return atomsPerByte, nil
 }
 
@@ -1433,6 +1493,9 @@ func dcrPerKBToAtomsPerByte(dcrPerkB float64) (uint64, error) {
 	}
 	return uint64(dex.IntDivUp(int64(atomsPerKB), 1000)), nil
 }
+
+// oracleFeeFetcher is fetchFeeFromOracle. var for testing.
+var oracleFeeFetcher = fetchFeeFromOracle
 
 // fetchFeeFromOracle gets the fee rate from the external API.
 func fetchFeeFromOracle(ctx context.Context, net dex.Network, nb uint64) (float64, error) {

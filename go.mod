@@ -302,5 +302,5 @@ require (
 
 // lbcd claimtrie still calls pebble.NewIter with the v0 API. go-ethereum pulls
 // pebble v1 (Iterator, error). third_party/lbcd is lbcd v0.22.119 (a0ff51b) plus
-// that 4-call-site fix; see third_party/README.md. (Ported from the LBC branch.)
+// that 4-call-site fix; see third_party/README.md.
 replace github.com/lbryio/lbcd => ./third_party/lbcd

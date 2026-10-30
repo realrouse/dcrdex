@@ -1635,6 +1635,52 @@ func (db *BoltDB) MatchesForOrder(oid order.OrderID, excludeCancels bool) ([]*de
 	}, excludeCancels, true) // include archived matches
 }
 
+// MatchesForOrders retrieves the matches for all of the specified orders,
+// keyed by order ID, with a single scan of the matches buckets. This is much
+// faster than calling MatchesForOrder for each order, since each such call
+// scans every active and archived match.
+func (db *BoltDB) MatchesForOrders(oids []order.OrderID, excludeCancels bool) (map[order.OrderID][]*dexdb.MetaMatch, error) {
+	matches := make(map[order.OrderID][]*dexdb.MetaMatch, len(oids))
+	if len(oids) == 0 {
+		return matches, nil
+	}
+	want := make(map[order.OrderID]bool, len(oids))
+	for _, oid := range oids {
+		want[oid] = true
+	}
+	return matches, db.matchesView(func(mb, archivedMB *bbolt.Bucket) error {
+		for _, master := range []*bbolt.Bucket{mb, archivedMB} {
+			err := master.ForEach(func(k, _ []byte) error {
+				mBkt := master.Bucket(k)
+				if mBkt == nil {
+					return fmt.Errorf("match %x bucket is not a bucket", k)
+				}
+				oidB := mBkt.Get(orderIDKey)
+				if len(oidB) != order.OrderIDSize {
+					return nil
+				}
+				var oid order.OrderID
+				copy(oid[:], oidB)
+				if !want[oid] {
+					return nil
+				}
+				match, err := loadMatchBucket(mBkt, excludeCancels)
+				if err != nil {
+					return fmt.Errorf("loading match %x bucket: %w", k, err)
+				}
+				if match != nil {
+					matches[oid] = append(matches[oid], match)
+				}
+				return nil
+			})
+			if err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+}
+
 // filteredMatches gets all matches that pass the provided filter function. Each
 // match's bucket is provided to the filter, and a boolean true return value
 // indicates the match should be decoded and returned. Matches with cancel

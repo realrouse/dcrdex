@@ -26,6 +26,7 @@ import (
 	"decred.org/dcrdex/client/orderbook"
 	"decred.org/dcrdex/dex"
 	"decred.org/dcrdex/dex/encode"
+	"decred.org/dcrdex/dex/msgjson"
 	"decred.org/dcrdex/dex/order"
 	pi "decred.org/dcrdex/dex/politeia"
 	"github.com/go-chi/chi/v5"
@@ -66,6 +67,8 @@ func (c *tCoin) Confirmations(context.Context) (uint32, error) {
 
 type TCore struct {
 	clientCore       // This is here so we don't have to implement core methods we're not testing
+	candleHistory    []msgjson.Candle
+	candleHistoryErr error
 	balanceErr       error
 	syncFeed         core.BookFeed
 	syncErr          error
@@ -99,6 +102,9 @@ type TCore struct {
 func (c *TCore) Network() dex.Network                         { return dex.Mainnet }
 func (c *TCore) Exchanges() map[string]*core.Exchange         { return nil }
 func (c *TCore) Exchange(host string) (*core.Exchange, error) { return nil, nil }
+func (c *TCore) CandleHistory(host string, base, quote uint32, binSize string, before uint64, n int) ([]msgjson.Candle, error) {
+	return c.candleHistory, c.candleHistoryErr
+}
 func (c *TCore) GetDEXConfig(dexAddr string, certI any) (*core.Exchange, error) {
 	return nil, c.getDEXConfigErr // TODO along with test for apiUser / Exchanges() / User()
 }
@@ -1231,4 +1237,31 @@ func TestMdToHTML(t *testing.T) {
 			t.Errorf("expected table tag, got: %s", got)
 		}
 	})
+}
+
+func TestAPICandleHistory(t *testing.T) {
+	s, tCore, shutdown := newTServer(t, false)
+	defer shutdown()
+
+	writer := new(TWriter)
+	reader := new(TReader)
+	body := map[string]any{"host": "somedex.com", "baseID": 42, "quoteID": 0, "binSize": "5m", "before": 1000, "n": 2}
+
+	tCore.candleHistory = []msgjson.Candle{{StartStamp: 1, EndStamp: 2, MatchVolume: 3, QuoteVolume: 4, HighRate: 5, LowRate: 6, StartRate: 7, EndRate: 8}}
+	want := `{"ok":true,"supported":true,"candles":[{"startStamp":1,"endStamp":2,"matchVolume":3,"quoteVolume":4,"highRate":5,"lowRate":6,"startRate":7,"endRate":8}]}`
+	ensureResponse(t, s.apiCandleHistory, want, reader, writer, body, nil)
+
+	// No more history.
+	tCore.candleHistory = nil
+	want = `{"ok":true,"supported":true,"candles":[]}`
+	ensureResponse(t, s.apiCandleHistory, want, reader, writer, body, nil)
+
+	// Server without candle history is not an error.
+	tCore.candleHistoryErr = core.ErrCandleHistoryUnsupported
+	want = `{"ok":true,"supported":false,"candles":[]}`
+	ensureResponse(t, s.apiCandleHistory, want, reader, writer, body, nil)
+
+	tCore.candleHistoryErr = errors.New("boom")
+	want = `{"ok":false,"msg":"boom"}`
+	ensureResponse(t, s.apiCandleHistory, want, reader, writer, body, nil)
 }

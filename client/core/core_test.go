@@ -180,6 +180,7 @@ type TWebsocket struct {
 	handlers       map[string][]func(*msgjson.Message, msgFunc) error
 	submittedBond  *msgjson.PostBond
 	liveBondExpiry uint64
+	lastExpire     func()
 }
 
 func newTWebsocket() *TWebsocket {
@@ -329,12 +330,13 @@ func (conn *TWebsocket) Request(msg *msgjson.Message, f msgFunc) error {
 func (conn *TWebsocket) RequestRaw(msgID uint64, rawMsg []byte, respHandler func(*msgjson.Message)) error {
 	return nil
 }
-func (conn *TWebsocket) RequestWithTimeout(msg *msgjson.Message, f func(*msgjson.Message), _ time.Duration, _ func()) error {
+func (conn *TWebsocket) RequestWithTimeout(msg *msgjson.Message, f func(*msgjson.Message), _ time.Duration, expire func()) error {
 	if conn.reqErr != nil {
 		return conn.reqErr
 	}
 	conn.mtx.Lock()
 	defer conn.mtx.Unlock()
+	conn.lastExpire = expire
 	handlers := conn.handlers[msg.Route]
 	if len(handlers) > 0 {
 		handler := handlers[0]
@@ -618,6 +620,20 @@ func (tdb *TDB) MatchesForOrder(oid order.OrderID, excludeCancels bool) ([]*db.M
 		return tdb.matchesByOrderID[oid], tdb.matchesForOIDErr
 	}
 	return tdb.matchesForOID, tdb.matchesForOIDErr
+}
+
+func (tdb *TDB) MatchesForOrders(oids []order.OrderID, excludeCancels bool) (map[order.OrderID][]*db.MetaMatch, error) {
+	matches := make(map[order.OrderID][]*db.MetaMatch, len(oids))
+	for _, oid := range oids {
+		ms, err := tdb.MatchesForOrder(oid, excludeCancels)
+		if err != nil {
+			return nil, err
+		}
+		if len(ms) > 0 {
+			matches[oid] = ms
+		}
+	}
+	return matches, nil
 }
 
 func (tdb *TDB) DEXOrdersWithActiveMatches(dex string) ([]order.OrderID, error) {
@@ -3009,7 +3025,7 @@ func trade(t *testing.T, async bool) {
 	tBtcWallet.fundingCoins = asset.Coins{btcCoin}
 	tBtcWallet.fundRedeemScripts = []dex.Bytes{nil}
 
-	book := newBookie(rig.dc, tUTXOAssetA.ID, tUTXOAssetB.ID, nil, tLogger)
+	book := newBookie(rig.dc, tUTXOAssetA.ID, tUTXOAssetB.ID, nil, nil, tLogger)
 	rig.dc.books[tDcrBtcMktName] = book
 
 	msgOrderNote := &msgjson.BookOrderNote{
@@ -6718,7 +6734,7 @@ func TestHandleEpochOrderMsg(t *testing.T) {
 		t.Fatal("[handleEpochOrderMsg] expected a non-existent orderbook error")
 	}
 
-	rig.dc.books[tDcrBtcMktName] = newBookie(rig.dc, tUTXOAssetA.ID, tUTXOAssetB.ID, nil, tLogger)
+	rig.dc.books[tDcrBtcMktName] = newBookie(rig.dc, tUTXOAssetA.ID, tUTXOAssetB.ID, nil, nil, tLogger)
 
 	err = handleEpochOrderMsg(rig.core, rig.dc, req)
 	if err != nil {
@@ -6780,7 +6796,7 @@ func TestHandleMatchProofMsg(t *testing.T) {
 		t.Fatal("[handleMatchProofMsg] expected a non-existent orderbook error")
 	}
 
-	rig.dc.books[tDcrBtcMktName] = newBookie(rig.dc, tUTXOAssetA.ID, tUTXOAssetB.ID, nil, tLogger)
+	rig.dc.books[tDcrBtcMktName] = newBookie(rig.dc, tUTXOAssetA.ID, tUTXOAssetB.ID, nil, nil, tLogger)
 
 	err = rig.dc.books[tDcrBtcMktName].Enqueue(eo)
 	if err != nil {
@@ -6910,7 +6926,7 @@ func TestSetEpoch(t *testing.T) {
 	rig := newTestRig()
 	defer rig.shutdown()
 	dc := rig.dc
-	dc.books[tDcrBtcMktName] = newBookie(rig.dc, tUTXOAssetA.ID, tUTXOAssetB.ID, nil, tLogger)
+	dc.books[tDcrBtcMktName] = newBookie(rig.dc, tUTXOAssetA.ID, tUTXOAssetB.ID, nil, nil, tLogger)
 
 	mktEpoch := func() uint64 {
 		dc.epochMtx.RLock()
@@ -7122,7 +7138,7 @@ func TestHandleTradeSuspensionMsg(t *testing.T) {
 
 	walletSet, _, _, _ := tCore.walletSet(dc, tUTXOAssetA.ID, tUTXOAssetB.ID, true)
 
-	rig.dc.books[tDcrBtcMktName] = newBookie(rig.dc, tUTXOAssetA.ID, tUTXOAssetB.ID, nil, tLogger)
+	rig.dc.books[tDcrBtcMktName] = newBookie(rig.dc, tUTXOAssetA.ID, tUTXOAssetB.ID, nil, nil, tLogger)
 
 	addTracker := func(coins asset.Coins) *trackedTrade {
 		lo, dbOrder, preImg, _ := makeLimitOrder(dc, true, 0, 0)
@@ -10220,6 +10236,16 @@ func TestParseCert(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CertStore cert error: %v", err)
 	}
+	revivelCert, err := parseCert("dex.revivel.app:7232", []byte(nil), dex.Mainnet)
+	if err != nil {
+		t.Fatalf("revivel CertStore cert error: %v", err)
+	}
+	if len(revivelCert) == 0 {
+		t.Fatal("missing dex.revivel.app CertStore pin")
+	}
+	if _, ok := CertStore[dex.Mainnet]["dex.decred.org:7232"]; ok {
+		t.Fatal("dex.decred.org must not be pinned on this ReviveL client")
+	}
 }
 
 func TestPreOrder(t *testing.T) {
@@ -10236,7 +10262,7 @@ func TestPreOrder(t *testing.T) {
 	var rate uint64 = 1e8
 	quoteConvertedLotSize := calc.BaseToQuote(rate, dcrBtcLotSize)
 
-	book := newBookie(rig.dc, tUTXOAssetA.ID, tUTXOAssetB.ID, nil, tLogger)
+	book := newBookie(rig.dc, tUTXOAssetA.ID, tUTXOAssetB.ID, nil, nil, tLogger)
 	dc.books[tDcrBtcMktName] = book
 
 	sellNote := &msgjson.BookOrderNote{
@@ -11266,7 +11292,7 @@ func TestDynamicSwapperGasFeeLimit(t *testing.T) {
 	tEthWallet.fundingCoins = asset.Coins{ethCoin}
 	tEthWallet.fundRedeemScripts = []dex.Bytes{nil}
 
-	book := newBookie(rig.dc, tUTXOAssetB.ID, tACCTAsset.ID, nil, tLogger)
+	book := newBookie(rig.dc, tUTXOAssetB.ID, tACCTAsset.ID, nil, nil, tLogger)
 	rig.dc.books[tBtcEthMktName] = book
 
 	msgOrderNote := &msgjson.BookOrderNote{
@@ -11714,7 +11740,7 @@ func TestNetworkFeeRate(t *testing.T) {
 	wallet.Wallet = dumbWallet
 
 	const bookFeedFeeRate = 60
-	book := newBookie(rig.dc, assetID, tUTXOAssetB.ID, nil, tLogger)
+	book := newBookie(rig.dc, assetID, tUTXOAssetB.ID, nil, nil, tLogger)
 	rig.dc.books[tDcrBtcMktName] = book
 	book.logEpochReport(&msgjson.EpochReportNote{BaseFeeRate: bookFeedFeeRate})
 	if r := rig.core.NetworkFeeRate(assetID); r != bookFeedFeeRate {
@@ -11920,7 +11946,7 @@ func TestTradingLimits(t *testing.T) {
 	}
 
 	rig.dc.acct.rep.BondedTier = 10
-	book := newBookie(rig.dc, tUTXOAssetA.ID, tUTXOAssetB.ID, nil, tLogger)
+	book := newBookie(rig.dc, tUTXOAssetA.ID, tUTXOAssetB.ID, nil, nil, tLogger)
 	rig.dc.books[tDcrBtcMktName] = book
 	checkTradingLimits(0, 20)
 

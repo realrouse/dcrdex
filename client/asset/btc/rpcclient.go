@@ -77,16 +77,30 @@ func IsTxNotFoundErr(err error) bool {
 	return errors.As(err, &rpcErr) && int(rpcErr.Code) == errRPCNoTxInfo
 }
 
+// errWalletInfoUnavailable is returned when getwalletinfo is not implemented
+// (lbcwallet) or has already been probed and found missing.
+var errWalletInfoUnavailable = errors.New("getwalletinfo unavailable")
+
 // isMethodNotFoundErr will return true if the error indicates that the RPC
-// method was not found by the RPC server. The error must be dcrjson.RPCError
-// with a numeric code equal to btcjson.ErrRPCMethodNotFound.Code or a message
-// containing "method not found".
+// method was not found by the RPC server. bitcoind uses JSON-RPC -32601 /
+// "method not found"; some clones (lbcwallet) return code -1 with
+// "Method unimplemented".
 func isMethodNotFoundErr(err error) bool {
+	if err == nil {
+		return false
+	}
 	var errRPCMethodNotFound = int(btcjson.ErrRPCMethodNotFound.Code)
 	var rpcErr *dcrjson.RPCError
-	return errors.As(err, &rpcErr) &&
-		(int(rpcErr.Code) == errRPCMethodNotFound ||
-			strings.Contains(strings.ToLower(rpcErr.Message), "method not found"))
+	if errors.As(err, &rpcErr) {
+		msg := strings.ToLower(rpcErr.Message)
+		if int(rpcErr.Code) == errRPCMethodNotFound ||
+			strings.Contains(msg, "method not found") ||
+			strings.Contains(msg, "unimplemented") {
+			return true
+		}
+	}
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "method not found") || strings.Contains(msg, "unimplemented")
 }
 
 // RawRequester defines decred's rpcclient RawRequest func where all RPC
@@ -100,17 +114,19 @@ type RawRequester interface {
 type anylist []any
 
 type rpcCore struct {
-	rpcConfig            *RPCConfig
-	cloneParams          *BTCCloneCFG
-	requesterV           atomic.Value // RawRequester
-	segwit               bool
-	decodeAddr           dexbtc.AddressDecoder
-	stringAddr           dexbtc.AddressStringer
-	legacyRawSends       bool
-	minNetworkVersion    uint64
-	minProtocolVersion   uint64
-	minDescriptorVersion uint64
-	optionalWalletInfo   bool
+	rpcConfig             *RPCConfig
+	cloneParams           *BTCCloneCFG
+	requesterV            atomic.Value // RawRequester
+	segwit                bool
+	decodeAddr            dexbtc.AddressDecoder
+	stringAddr            dexbtc.AddressStringer
+	legacyRawSends        bool
+	minNetworkVersion     uint64
+	minProtocolVersion    uint64
+	minDescriptorVersion  uint64
+	optionalWalletInfo    bool
+	walletInfoUnsupported atomic.Bool // getwalletinfo missing; skip further RPCs
+	locked                atomic.Bool // local lock flag when getwalletinfo is unavailable
 
 	log                 dex.Logger
 	chainParams         *chaincfg.Params
@@ -193,14 +209,21 @@ func (wc *rpcClient) Connect(ctx context.Context, _ *sync.WaitGroup) error {
 	if !ChainOK(wc.cloneParams.Network, chainInfo.Chain) {
 		return errors.New("wrong net")
 	}
+	if wc.optionalWalletInfo {
+		wc.descriptors = false
+		wc.walletInfoUnsupported.Store(true)
+		wc.log.Debugf("getwalletinfo not supported; assuming non-descriptor wallet")
+		return nil
+	}
 	wiRes, err := wc.GetWalletInfo()
 	if err != nil {
-		if !wc.optionalWalletInfo {
-			return fmt.Errorf("getwalletinfo failure: %w", err)
+		if isMethodNotFoundErr(err) || errors.Is(err, errWalletInfoUnavailable) {
+			wc.log.Warnf("getwalletinfo unavailable (%v); assuming non-descriptor wallet", err)
+			wc.descriptors = false
+			wc.walletInfoUnsupported.Store(true)
+			return nil
 		}
-		wc.log.Warnf("getwalletinfo unavailable (%v); assuming non-descriptor wallet", err)
-		wc.descriptors = false
-		return nil
+		return fmt.Errorf("getwalletinfo failure: %w", err)
 	}
 	wc.descriptors = wiRes.Descriptors
 	if wc.descriptors {
@@ -511,8 +534,10 @@ func (wc *rpcClient) Balances() (*GetBalancesResult, error) {
 // ListUnspent retrieves a list of the wallet's UTXOs.
 func (wc *rpcClient) ListUnspent() ([]*ListUnspentResult, error) {
 	unspents := make([]*ListUnspentResult, 0)
-	// TODO: listunspent 0 9999999 []string{}, include_unsafe=false
-	return unspents, wc.call(methodListUnspent, anylist{uint8(0)}, &unspents)
+	// Explicit maxconf so clones that do not apply jsonrpcdefault still
+	// return confirmed coins (lbcwallet panics or defaults MaxConf to 0
+	// if only minconf is sent).
+	return unspents, wc.call(methodListUnspent, anylist{uint32(0), uint32(9999999)}, &unspents)
 }
 
 // LockUnspent locks and unlocks outputs for spending. An output that is part of
@@ -592,7 +617,8 @@ func (wc *rpcClient) changeAddressArgs() anylist {
 		return anylist{"default", wc.addrType()}
 	}
 	if wc.omitAddressType {
-		return nil
+		// lbcwallet without an address type still needs the account name.
+		return anylist{"default"}
 	}
 	return anylist{wc.addrType()}
 }
@@ -898,20 +924,32 @@ func (wc *rpcClient) GetWalletTransaction(txHash *chainhash.Hash) (*GetTransacti
 // WalletUnlock unlocks the wallet.
 func (wc *rpcClient) WalletUnlock(pw []byte) error {
 	// 100000000 comes from bitcoin-cli help walletpassphrase
-	return wc.call(methodUnlock, anylist{string(pw), 100000000}, nil)
+	err := wc.call(methodUnlock, anylist{string(pw), 100000000}, nil)
+	if err == nil {
+		wc.locked.Store(false)
+	}
+	return err
 }
 
 // WalletLock locks the wallet.
 func (wc *rpcClient) WalletLock() error {
-	return wc.call(methodLock, nil, nil)
+	err := wc.call(methodLock, nil, nil)
+	if err == nil {
+		wc.locked.Store(true)
+	}
+	return err
 }
 
 // Locked returns the wallet's lock state.
 func (wc *rpcClient) Locked() bool {
+	if wc.optionalWalletInfo || wc.walletInfoUnsupported.Load() {
+		return wc.locked.Load()
+	}
 	walletInfo, err := wc.GetWalletInfo()
 	if err != nil {
-		if wc.cloneParams != nil && wc.cloneParams.OptionalWalletInfo {
-			return false
+		if isMethodNotFoundErr(err) || errors.Is(err, errWalletInfoUnavailable) {
+			wc.walletInfoUnsupported.Store(true)
+			return wc.locked.Load()
 		}
 		wc.log.Errorf("GetWalletInfo error: %v", err)
 		return false
@@ -981,8 +1019,18 @@ func (wc *rpcClient) EstimateSendTxFee(tx *wire.MsgTx, feeRate uint64, subtract 
 
 // GetWalletInfo gets the getwalletinfo RPC result.
 func (wc *rpcClient) GetWalletInfo() (*GetWalletInfoResult, error) {
+	if wc.optionalWalletInfo || wc.walletInfoUnsupported.Load() {
+		return nil, errWalletInfoUnavailable
+	}
 	wi := new(GetWalletInfoResult)
-	return wi, wc.call(methodGetWalletInfo, nil, wi)
+	err := wc.call(methodGetWalletInfo, nil, wi)
+	if err != nil {
+		if isMethodNotFoundErr(err) {
+			wc.walletInfoUnsupported.Store(true)
+		}
+		return nil, err
+	}
+	return wi, nil
 }
 
 // Fingerprint returns an identifier for this wallet. Only HD wallets will have

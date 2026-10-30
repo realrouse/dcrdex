@@ -1,7 +1,5 @@
 const path = require('path')
 const MiniCssExtractPlugin = require('mini-css-extract-plugin')
-const StyleLintPlugin = require('stylelint-webpack-plugin')
-const ESLintPlugin = require('eslint-webpack-plugin')
 
 const child_process = require('child_process')
 function git(command) {
@@ -52,15 +50,10 @@ module.exports = {
   plugins: [
     new MiniCssExtractPlugin({
       filename: '../dist/style.css'
-    }),
-    new StyleLintPlugin({
-      threads: true,
-    }),
-    new ESLintPlugin({
-      configType: 'flat',
-      extensions: ['ts', 'tsx'],
-      formatter: 'stylish'
     })
+    // Do not run eslint/stylelint from webpack. neostandard + eslint 9
+    // crash on Node < 18 (`structuredClone is not defined`), and
+    // stylelint 17 is ESM-only. Lint via `npm run lint` instead.
   ],
   output: {
     clean: true,

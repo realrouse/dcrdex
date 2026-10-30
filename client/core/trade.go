@@ -339,6 +339,13 @@ type trackedTrade struct {
 	refundLocked     uint64 // remaining locked of refundReserves
 	readyToTick      bool   // this will be false if either of the wallets cannot be connected and unlocked
 	wg               *sync.WaitGroup
+	// staleCancelID is the last cancel order retired by
+	// deleteStaleCancelOrder, protected by mtx. The server may still match
+	// it, e.g. when its match arrives just as it is retired, so its match is
+	// still accepted. staleCancelMatchID is the ID of that match once its
+	// taker side is processed, which identifies the maker side.
+	staleCancelID      order.OrderID
+	staleCancelMatchID order.MatchID
 }
 
 // newTrackedTrade is a constructor for a trackedTrade.
@@ -912,8 +919,14 @@ func (t *trackedTrade) negotiate(msgMatches []*msgjson.Match, perMatchAddrs map[
 		// counterparty Address field would be empty. If the user placed a
 		// cancel order, that order will be recorded in t.cancel on cancel
 		// order creation via (*dexConnection).tryCancel or restored from DB
-		// via (*Core).dbTrackers.
-		if t.cancel != nil && msgMatch.Address == "" {
+		// via (*Core).dbTrackers. t.cancel may also have just been retired
+		// as stale, in which case processCancelMatch has recorded the
+		// match ID of its taker side, which the maker side shares.
+		if msgMatch.Address == "" && (t.cancel != nil || (t.staleCancelMatchID != order.MatchID{} && mid == t.staleCancelMatchID)) {
+			if cancelMatch != nil {
+				t.dc.log.Warnf("Ignoring extra cancel match %s for order %s", mid, t.ID())
+				continue
+			}
 			cancelMatch = msgMatch
 			continue
 		}
@@ -954,17 +967,31 @@ func (t *trackedTrade) negotiate(msgMatches []*msgjson.Match, perMatchAddrs map[
 		cancelMatch.Status = uint8(order.MatchComplete) // we're completing it now
 		cancelMatch.Address = ""                        // not a trade match
 
-		t.cancel.matches.maker = cancelMatch // taker is stored via processCancelMatch before negotiate
-		// Set the order status for the cancel order.
-		err := t.db.UpdateOrderStatus(t.cancel.ID(), order.OrderStatusExecuted)
-		if err != nil {
-			t.dc.log.Errorf("Failed to update status of cancel order %v to executed: %v",
-				t.cancel.ID(), err)
-			// Try to store the match anyway.
+		if t.cancel != nil {
+			t.cancel.matches.maker = cancelMatch // taker is stored via processCancelMatch before negotiate
+			// Set the order status for the cancel order.
+			err := t.db.UpdateOrderStatus(t.cancel.ID(), order.OrderStatusExecuted)
+			if err != nil {
+				t.dc.log.Errorf("Failed to update status of cancel order %v to executed: %v",
+					t.cancel.ID(), err)
+				// Try to store the match anyway.
+			}
+		} else {
+			// The cancel order was already retired, e.g. as stale while
+			// this match was on its way. The server canceled the order,
+			// so record it as canceled anyway.
+			t.dc.log.Warnf("Order %s canceled by a cancel order that is no longer tracked (last stale cancel: %v).",
+				t.ID(), t.staleCancelID)
+			if !t.staleCancelID.IsZero() {
+				if err := t.db.UpdateOrderStatus(t.staleCancelID, order.OrderStatusExecuted); err != nil {
+					t.dc.log.Errorf("Failed to update status of cancel order %v to executed: %v",
+						t.staleCancelID, err)
+				}
+			}
 		}
 		// Store a completed maker cancel match in the DB.
 		metaCancelMatch = t.makeMetaMatch(cancelMatch)
-		err = t.db.UpdateMatch(metaCancelMatch)
+		err := t.db.UpdateMatch(metaCancelMatch)
 		if err != nil {
 			return fmt.Errorf("failed to update match in db: %w", err)
 		}
@@ -1173,7 +1200,23 @@ func (t *trackedTrade) processCancelMatch(msgMatch *msgjson.Match) error {
 	t.mtx.Lock()
 	defer t.mtx.Unlock()
 	if t.cancel == nil {
-		return fmt.Errorf("no cancel order recorded for order %v", oid)
+		if oid.IsZero() || oid != t.staleCancelID {
+			return fmt.Errorf("no cancel order recorded for order %v", oid)
+		}
+		// We retired this cancel as stale, but the server matched it.
+		t.dc.log.Warnf("Cancel order %v for order %v matched after it was considered stale. "+
+			"Recording the cancel match. Match id = %s", oid, t.ID(), mid)
+		if err := t.db.UpdateOrderStatus(oid, order.OrderStatusExecuted); err != nil {
+			t.dc.log.Errorf("Failed to update status of cancel order %v to executed: %v", oid, err)
+		}
+		t.staleCancelMatchID = mid
+		takerCancelMeta := t.makeMetaMatch(msgMatch)
+		takerCancelMeta.Status = order.MatchComplete
+		takerCancelMeta.Address = "" // not a trade match
+		if err := t.db.UpdateMatch(takerCancelMeta); err != nil {
+			return fmt.Errorf("failed to update match in db: %w", err)
+		}
+		return nil
 	}
 	if oid != t.cancel.ID() {
 		return fmt.Errorf("negotiate called for wrong order. %s != %s", oid, t.cancel.ID())
@@ -1272,6 +1315,16 @@ func (t *trackedTrade) deleteCancelOrder() {
 	t.metaData.LinkedOrder = order.OrderID{} // NOTE: caller may wish to update the trades's DB entry
 }
 
+// staleCancelMatchGrace is the extra time beyond preimageReqTimeout that a
+// cancel order whose preimage was sent is given to be matched: two epochs,
+// but at least a minute.
+func staleCancelMatchGrace(epochLen time.Duration) time.Duration {
+	if g := 2 * epochLen; g > time.Minute {
+		return g
+	}
+	return time.Minute
+}
+
 func (t *trackedTrade) hasStaleCancelOrder() bool {
 	if t.cancel == nil || t.metaData.Status != order.OrderStatusBooked {
 		return false
@@ -1280,7 +1333,19 @@ func (t *trackedTrade) hasStaleCancelOrder() bool {
 	epoch := order.EpochID{Idx: t.cancelEpochIdx(), Dur: t.epochLen()}
 	epochEnd := epoch.End()
 
-	return time.Since(epochEnd) >= preimageReqTimeout
+	// If we sent the cancel's preimage, the server will match or nomatch
+	// it once matching for that epoch is done, which can take until after
+	// preimageReqTimeout. Give that time before giving up on it, or the
+	// match can arrive just as the cancel is retired.
+	t.csumMtx.RLock()
+	preimageSent := t.cancelCsum != nil
+	t.csumMtx.RUnlock()
+	timeout := preimageReqTimeout
+	if preimageSent {
+		timeout += staleCancelMatchGrace(time.Duration(t.epochLen()) * time.Millisecond)
+	}
+
+	return time.Since(epochEnd) >= timeout
 }
 
 // deleteStaleCancelOrder checks if this trade has an associated cancel order,
@@ -1306,8 +1371,10 @@ func (t *trackedTrade) deleteStaleCancelOrder() {
 		t.cancel.ID(), t.cancel.ServerTime, time.Since(t.cancel.ServerTime))
 
 	// Clear the trackedCancel, allowing this order to be canceled again, and
-	// set the cancel order's status as revoked.
+	// set the cancel order's status as revoked. Remember it in case its
+	// match is still on the way.
 	cancelOrd := t.cancel
+	t.staleCancelID = cancelOrd.ID()
 	t.deleteCancelOrder()
 	err := t.db.LinkOrder(t.ID(), order.OrderID{})
 	if err != nil {

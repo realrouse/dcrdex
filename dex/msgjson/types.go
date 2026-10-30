@@ -1315,6 +1315,15 @@ type ConfigResult struct {
 	Assets           []*Asset  `json:"assets"`
 	Markets          []*Market `json:"markets"`
 	BinSizes         []string  `json:"binSizes"` // Just apidata.BinSizes for now.
+	// CandleCacheSizes maps the BinSizes to the number of candles the server
+	// keeps in memory, which is also the maximum NumCandles for a
+	// CandlesRequest for that bin size. Servers that don't set this field
+	// serve at most 1000 candles per request.
+	CandleCacheSizes map[string]int `json:"candleCacheSizes,omitempty"`
+	// CandlePageSize is the maximum NumCandles for a CandlesRequest with
+	// Before set, i.e. a request for older candle history. Zero means that
+	// the server does not support candle history requests.
+	CandlePageSize int `json:"candlePageSize,omitempty"`
 
 	BondAssets map[string]*BondAsset `json:"bondAssets"`
 	// BondExpiry defines the duration of time remaining until lockTime below
@@ -1351,6 +1360,15 @@ type CandlesRequest struct {
 	QuoteID    uint32 `json:"quoteID"`
 	BinSize    string `json:"binSize"`
 	NumCandles int    `json:"numCandles,omitempty"` // default and max defined in apidata.
+	// Before, if non-zero, requests a page of older candles from the server's
+	// stored history instead of the most recent candles: up to NumCandles
+	// candles with an EndStamp strictly before Before (unix ms), oldest
+	// first. To page back, set Before to the EndStamp of the oldest candle
+	// already held. Only send Before to servers that advertise a non-zero
+	// ConfigResult.CandlePageSize. Servers without the feature ignore it and
+	// return the most recent candles. NumCandles must not exceed the page
+	// size.
+	Before uint64 `json:"before,omitempty"`
 }
 
 // Candle is a statistical history of a specified period of market activity.

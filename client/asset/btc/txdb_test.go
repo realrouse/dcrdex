@@ -8,6 +8,8 @@ import (
 	"context"
 	"encoding/hex"
 	"errors"
+	"os"
+	"path/filepath"
 	"reflect"
 	"testing"
 
@@ -297,5 +299,56 @@ func TestStoreAndGetSecNonce(t *testing.T) {
 	_, err = txHistoryStore.GetSecNonce(pubNonce, encKey)
 	if err == nil {
 		t.Fatalf("expected error when retrieving deleted nonce, but got none")
+	}
+}
+
+func TestTxDBMovesAsideCorruptTable(t *testing.T) {
+	tempDir := filepath.Join(t.TempDir(), "txhistorydb-x")
+	tLogger := dex.StdOutLogger("TXDB", dex.LevelInfo)
+
+	// Create a DB with some data flushed to table files.
+	ctx, cancel := context.WithCancel(context.Background())
+	db := NewBadgerTxDB(tempDir, tLogger)
+	wg, err := db.Connect(ctx)
+	if err != nil {
+		t.Fatalf("error connecting: %v", err)
+	}
+	if err := db.StoreTx(&ExtendedWalletTx{WalletTransaction: &asset.WalletTransaction{ID: "abc"}}); err != nil {
+		t.Fatalf("error storing tx: %v", err)
+	}
+	cancel()
+	wg.Wait()
+
+	v4Path := tempDir + "_v4"
+	ssts, _ := filepath.Glob(filepath.Join(v4Path, "*.sst"))
+	if len(ssts) == 0 {
+		t.Fatalf("no table files written")
+	}
+	// Zero-fill a table, as seen after an unclean shutdown. Opening this with
+	// badger directly panics in a background goroutine.
+	fi, _ := os.Stat(ssts[0])
+	if err := os.WriteFile(ssts[0], make([]byte, fi.Size()), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, cancel = context.WithCancel(context.Background())
+	defer cancel()
+	db = NewBadgerTxDB(tempDir, tLogger)
+	wg, err = db.Connect(ctx)
+	if err != nil {
+		t.Fatalf("error connecting with corrupt table: %v", err)
+	}
+	defer func() {
+		cancel()
+		wg.Wait()
+	}()
+	if moved, _ := filepath.Glob(v4Path + ".corrupt-*"); len(moved) != 1 {
+		t.Fatalf("expected the corrupt DB to be moved aside, found %v", moved)
+	}
+	if _, err := db.GetTx("abc"); err == nil {
+		t.Fatalf("expected a fresh, empty DB")
+	}
+	if err := db.StoreTx(&ExtendedWalletTx{WalletTransaction: &asset.WalletTransaction{ID: "def"}}); err != nil {
+		t.Fatalf("error storing tx in fresh DB: %v", err)
 	}
 }

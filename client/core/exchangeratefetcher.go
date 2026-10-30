@@ -6,6 +6,8 @@ package core
 import (
 	"context"
 	"fmt"
+	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -28,6 +30,7 @@ const (
 	messari       = "Messari"
 	coinpaprika   = "Coinpaprika"
 	dcrdataDotOrg = "dcrdata"
+	mexc          = "MEXC"
 )
 
 var (
@@ -40,15 +43,18 @@ var (
 	// would need to have 20 * 12 = 480 assets. To hit 1000 requests per day,
 	// we would need 12 * 60 / (86,400 / 1000) = 8.33 assets. Very likely. So
 	// we're in a similar position to coinpaprika here too.
-	messariURL  = "https://data.messari.io/api/v1/assets/%s/metrics/market-data"
-	btcBipID, _ = dex.BipSymbolID("btc")
-	dcrBipID, _ = dex.BipSymbolID("dcr")
+	messariURL = "https://data.messari.io/api/v1/assets/%s/metrics/market-data"
+	// Spot ticker. No symbol → all pairs. LBC is listed as LBCUSDT.
+	mexcPriceURL = "https://api.mexc.com/api/v3/ticker/price"
+	btcBipID, _  = dex.BipSymbolID("btc")
+	dcrBipID, _  = dex.BipSymbolID("dcr")
 )
 
 // fiatRateFetchers is the list of all supported fiat rate fetchers.
 var fiatRateFetchers = map[string]rateFetcher{
 	coinpaprika:   FetchCoinpaprikaRates,
 	dcrdataDotOrg: FetchDcrdataRates,
+	mexc:          FetchMEXCRates,
 	// TODO: messari is temporarily disabled until it is decided to procure an API Key.
 	// messari:       FetchMessariRates,
 }
@@ -211,4 +217,48 @@ func FetchMessariRates(ctx context.Context, log dex.Logger, assets map[uint32]*S
 
 func getRates(ctx context.Context, uri string, thing any) error {
 	return dexnet.Get(ctx, uri, thing, dexnet.WithSizeLimit(1<<22))
+}
+
+type mexcTicker struct {
+	Symbol string `json:"symbol"`
+	Price  string `json:"price"`
+}
+
+func mexcUSDTPrices(tickers []mexcTicker) map[string]float64 {
+	usdt := make(map[string]float64, len(tickers))
+	for _, t := range tickers {
+		if !strings.HasSuffix(t.Symbol, "USDT") {
+			continue
+		}
+		p, err := strconv.ParseFloat(t.Price, 64)
+		if err != nil || p <= 0 {
+			continue
+		}
+		usdt[strings.TrimSuffix(t.Symbol, "USDT")] = p
+	}
+	return usdt
+}
+
+// FetchMEXCRates maps MEXC *USDT last prices to USD (USDT ≈ USD), same approach
+// as the server-side Binance fiat source. LBC is not on Binance/KuCoin.
+func FetchMEXCRates(ctx context.Context, log dex.Logger, assets map[uint32]*SupportedAsset) map[uint32]float64 {
+	var res []mexcTicker
+	ctx, cancel := context.WithTimeout(ctx, fiatRequestTimeout)
+	defer cancel()
+	if err := getRates(ctx, mexcPriceURL, &res); err != nil {
+		log.Errorf("Error getting fiat exchange rates from MEXC: %v", err)
+		return nil
+	}
+	usdt := mexcUSDTPrices(res)
+	fiatRates := make(map[uint32]float64)
+	for assetID, sa := range assets {
+		if sa == nil {
+			continue
+		}
+		sym := strings.ToUpper(dex.TokenSymbol(sa.Symbol))
+		if p, ok := usdt[sym]; ok {
+			fiatRates[assetID] = p
+		}
+	}
+	return fiatRates
 }

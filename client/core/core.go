@@ -125,6 +125,18 @@ var (
 	walletDisabledErrStr = "%s wallet is disabled"
 
 	errTimeout = errors.New("timeout")
+
+	// ErrTradeRequestTimeout is returned when the server does not answer a
+	// new order request in time. The order may still be accepted and
+	// adopted later, which is signaled with a TopicLateOrderAdopted note.
+	ErrTradeRequestTimeout = errors.New("order request timed out")
+	// tradeRequestTimeout is how long a trade request waits for the
+	// server's response before reporting a timeout to the caller.
+	tradeRequestTimeout = fundingTxWait + DefaultResponseTimeout
+	// lateOrderGrace is how much longer the funding coins stay locked and
+	// the commitment stays known after a trade request timed out, in case
+	// the server accepts the order late.
+	lateOrderGrace = 5 * time.Minute
 )
 
 type dexTicker struct {
@@ -576,6 +588,7 @@ func (c *Core) exchangeInfo(dc *dexConnection) *Exchange {
 		BondAssets:       bondAssets,
 		ConnectionStatus: dc.status(),
 		CandleDurs:       cfg.BinSizes,
+		CandlePageSize:   cfg.CandlePageSize,
 		ViewOnly:         dc.acct.isViewOnly(),
 		Auth:             acctBondState.ExchangeAuth,
 		MaxScore:         cfg.MaxScore,
@@ -754,6 +767,18 @@ func (c *Core) tryCancelTrade(dc *dexConnection, tracker *trackedTrade) error {
 		return newError(marketErr, "unknown market %q", tracker.mktID)
 	}
 
+	// If the server does not know the order, it is no longer active there.
+	// Get its actual status so it is retired instead of being shown as
+	// booked, and canceled again, forever. Done after the trade lock is
+	// released.
+	var unknownToServer bool
+	defer func() {
+		if unknownToServer {
+			dc.log.Warnf("Server does not know order %v targeted by our cancel. Requesting its status.", oid)
+			dc.syncOrderStatuses([]*trackedTrade{tracker})
+		}
+	}()
+
 	tracker.mtx.Lock()
 	defer tracker.mtx.Unlock()
 
@@ -775,6 +800,10 @@ func (c *Core) tryCancelTrade(dc *dexConnection, tracker *trackedTrade) error {
 	// Construct and send the order.
 	preImg, co, sig, commitSig, err := c.sendCancelOrder(dc, oid, tracker.Base(), tracker.Quote())
 	if err != nil {
+		var msgErr *msgjson.Error
+		if errors.As(err, &msgErr) && msgErr.Code == msgjson.UnknownOrderError {
+			unknownToServer = true
+		}
 		return err
 	}
 	defer close(commitSig)
@@ -854,6 +883,22 @@ type serverMatches struct {
 	perMatchAddrs map[string]string
 }
 
+// findStaleCancelTarget finds the trade whose last cancel order, cid, was
+// retired as stale by deleteStaleCancelOrder.
+func (dc *dexConnection) findStaleCancelTarget(cid order.OrderID) *trackedTrade {
+	dc.tradeMtx.RLock()
+	defer dc.tradeMtx.RUnlock()
+	for _, t := range dc.trades {
+		t.mtx.RLock()
+		found := t.staleCancelID == cid
+		t.mtx.RUnlock()
+		if found {
+			return t
+		}
+	}
+	return nil
+}
+
 // parseMatches sorts the list of matches and associates them with a trade. This
 // may be called from handleMatchRoute on receipt of a new 'match' request, or
 // by authDEX with the list of active matches returned by the 'connect' request.
@@ -877,6 +922,15 @@ func (dc *dexConnection) parseMatches(msgMatches []*msgjson.Match, checkSigs boo
 		var oid order.OrderID
 		copy(oid[:], msgMatch.OrderID)
 		tracker, isCancel := dc.findOrder(oid)
+		if tracker == nil {
+			// A cancel order retired as stale just before its match
+			// arrived is no longer linked, but its match is still valid.
+			if tracker = dc.findStaleCancelTarget(oid); tracker != nil {
+				dc.log.Warnf("Match %s for cancel order %v that was retired as stale. Processing it anyway.",
+					msgMatch.MatchID, oid)
+				isCancel = true
+			}
+		}
 		if tracker == nil {
 			dc.blindCancelsMtx.Lock()
 			_, found := dc.blindCancels[oid]
@@ -1701,6 +1755,11 @@ type Core struct {
 	meshMtx sync.RWMutex
 	mesh    *mesh.Client
 	meshCM  *dex.ConnectionMaster
+
+	// bondRefunds tracks broadcast bond refunds that are not yet confirmed,
+	// keyed by bondRefundKey.
+	bondRefundsMtx sync.Mutex
+	bondRefunds    map[string]*bondRefundState
 }
 
 // New is the constructor for a new Core.
@@ -5231,12 +5290,22 @@ func (c *Core) Orders(filter *OrderFilter) ([]*Order, error) {
 		return nil, fmt.Errorf("UserOrders error: %w", err)
 	}
 
-	cords := make([]*Order, 0, len(ords))
+	// Load the matches for all of the orders in one pass over the matches
+	// buckets rather than one full scan per order, which gets very slow
+	// with a long trading (e.g. market making) history.
+	oids := make([]order.OrderID, 0, len(ords))
 	for _, mOrd := range ords {
-		corder, err := c.coreOrderFromMetaOrder(mOrd)
-		if err != nil {
-			return nil, err
-		}
+		oids = append(oids, mOrd.Order.ID())
+	}
+	excludeCancels := false // maybe don't include cancel order matches?
+	matches, err := c.db.MatchesForOrders(oids, excludeCancels)
+	if err != nil {
+		return nil, fmt.Errorf("MatchesForOrders error: %w", err)
+	}
+
+	cords := make([]*Order, 0, len(ords))
+	for i, mOrd := range ords {
+		corder := coreOrderFromMetaOrderAndMatches(mOrd, matches[oids[i]])
 		baseWallet, baseOK := c.wallet(corder.BaseID)
 		quoteWallet, quoteOK := c.wallet(corder.QuoteID)
 		corder.ReadyToTick = baseOK && baseWallet.connected() && baseWallet.unlocked() &&
@@ -5252,18 +5321,24 @@ func (c *Core) Orders(filter *OrderFilter) ([]*Order, error) {
 // swap coin confirmations will not be set. For active orders, get the
 // *trackedTrade and use the coreOrder method.
 func (c *Core) coreOrderFromMetaOrder(mOrd *db.MetaOrder) (*Order, error) {
-	corder := coreOrderFromTrade(mOrd.Order, mOrd.MetaData)
 	oid := mOrd.Order.ID()
 	excludeCancels := false // maybe don't include cancel order matches?
 	matches, err := c.db.MatchesForOrder(oid, excludeCancels)
 	if err != nil {
 		return nil, fmt.Errorf("MatchesForOrder error loading matches for %s: %w", oid, err)
 	}
+	return coreOrderFromMetaOrderAndMatches(mOrd, matches), nil
+}
+
+// coreOrderFromMetaOrderAndMatches creates an *Order from a *db.MetaOrder and
+// its already-loaded matches.
+func coreOrderFromMetaOrderAndMatches(mOrd *db.MetaOrder, matches []*db.MetaMatch) *Order {
+	corder := coreOrderFromTrade(mOrd.Order, mOrd.MetaData)
 	corder.Matches = make([]*Match, 0, len(matches))
 	for _, match := range matches {
 		corder.Matches = append(corder.Matches, matchFromMetaMatch(mOrd.Order, match))
 	}
-	return corder, nil
+	return corder
 }
 
 // Order fetches a single user order.
@@ -7127,24 +7202,104 @@ func (c *Core) prepareMultiTradeRequests(pw []byte, form *MultiTradeForm) ([]*tr
 // sendTradeRequest sends an order, processes the result, then prepares and
 // stores the trackedTrade.
 func (c *Core) sendTradeRequest(tr *tradeRequest) (*Order, error) {
-	dc, dbOrder, wallets, form, route := tr.dc, tr.dbOrder, tr.wallets, tr.form, tr.route
-	mktID, msgOrder, preImg, recoveryCoin, coins := tr.mktID, tr.msgOrder, tr.preImg, tr.recoveryCoin, tr.coins
-	defer tr.errCloser.Done(c.log)
-	defer close(tr.commitSig) // signals on both success and failure
+	dc, route, mktID := tr.dc, tr.route, tr.mktID
 
-	// Send and get the result.
-	result := new(msgjson.OrderResult)
-	err := dc.signAndRequest(msgOrder, route, result, fundingTxWait+DefaultResponseTimeout)
+	if dc.acct.locked() {
+		tr.errCloser.Done(c.log)
+		close(tr.commitSig)
+		return nil, fmt.Errorf("new order request with DEX server %v market %v failed: cannot sign: %s account locked",
+			dc.acct.host, mktID, dc.acct.host)
+	}
+	sign(dc.acct.privKey, tr.msgOrder)
+	reqMsg, err := msgjson.NewRequest(dc.NextID(), route, tr.msgOrder)
 	if err != nil {
-		// At this point there is a possibility that the server got the request
-		// and created the trade order, but we lost the connection before
-		// receiving the response with the trade's order ID. Any preimage
-		// request will be unrecognized. This order is ABANDONED.
+		tr.errCloser.Done(c.log)
+		close(tr.commitSig)
+		return nil, fmt.Errorf("error encoding %q request: %w", route, err)
+	}
+
+	// The response handler stays registered for lateOrderGrace beyond the
+	// time we wait here, so that an order the server accepts after we gave
+	// up can still be adopted.
+	type orderResp struct {
+		result *msgjson.OrderResult
+		err    error
+	}
+	respC := make(chan *orderResp, 1)
+	err = dc.RequestWithTimeout(reqMsg, func(msg *msgjson.Message) {
+		result := new(msgjson.OrderResult)
+		respC <- &orderResp{result, msg.UnmarshalResult(result)}
+	}, tradeRequestTimeout+lateOrderGrace, func() {
+		respC <- &orderResp{err: fmt.Errorf("timed out waiting for %q response (%w)", route, errTimeout)}
+	})
+	if err != nil {
+		tr.errCloser.Done(c.log)
+		close(tr.commitSig)
 		return nil, fmt.Errorf("new order request with DEX server %v market %v failed: %w", dc.acct.host, mktID, err)
 	}
 
+	finish := func(resp *orderResp, adopted bool) (*Order, error) {
+		defer tr.errCloser.Done(c.log)
+		defer close(tr.commitSig) // signals on both success and failure
+		if resp.err != nil {
+			// At this point there is a possibility that the server got the
+			// request and created the trade order, but we lost the
+			// connection before receiving the response with the trade's
+			// order ID. Any preimage request will be unrecognized. This
+			// order is ABANDONED.
+			return nil, fmt.Errorf("new order request with DEX server %v market %v failed: %w", dc.acct.host, mktID, resp.err)
+		}
+		return c.finishTradeRequest(tr, resp.result, adopted)
+	}
+
+	select {
+	case resp := <-respC:
+		return finish(resp, false)
+	case <-time.After(tradeRequestTimeout):
+	}
+
+	// The server has not answered in time. It may still accept the order,
+	// e.g. if it is slow to validate the funding coins, and then ask for
+	// the preimage. Keep the funding coins locked and the commitment known
+	// for lateOrderGrace so a late acceptance can be adopted and the
+	// preimage request answered, instead of missing the preimage and
+	// leaving an order on the book that we don't know about.
+	c.log.Warnf("Order request to %s for market %s timed out after %v. Keeping its funding coins "+
+		"locked for up to %v in case the server accepts it late.", dc.acct.host, mktID, tradeRequestTimeout, lateOrderGrace)
+	c.wg.Add(1)
+	go func() {
+		defer c.wg.Done()
+		var resp *orderResp
+		select {
+		case resp = <-respC:
+		case <-c.ctx.Done():
+			resp = &orderResp{err: errors.New("shutting down")}
+		}
+		if resp.err != nil {
+			c.log.Infof("No late response for timed out order request to %s for market %s (%v). Funding coins released.",
+				dc.acct.host, mktID, resp.err)
+		}
+		if corder, err := finish(resp, true); err == nil {
+			c.log.Warnf("Adopted order %s on %s market %s that the server accepted after our request timed out.",
+				corder.ID, dc.acct.host, mktID)
+		} else if resp.err == nil {
+			c.log.Errorf("Failed to adopt late order response: %v", err)
+		}
+	}()
+
+	return nil, fmt.Errorf("new order request with DEX server %v market %v failed: %w", dc.acct.host, mktID,
+		fmt.Errorf("%w (timed out waiting for %q response after %v)", ErrTradeRequestTimeout, route, tradeRequestTimeout))
+}
+
+// finishTradeRequest validates and stores an accepted order and starts
+// tracking it. adopted indicates the response arrived after sendTradeRequest
+// had already reported a timeout to the caller.
+func (c *Core) finishTradeRequest(tr *tradeRequest, result *msgjson.OrderResult, adopted bool) (*Order, error) {
+	dc, dbOrder, wallets, form := tr.dc, tr.dbOrder, tr.wallets, tr.form
+	msgOrder, preImg, recoveryCoin, coins := tr.msgOrder, tr.preImg, tr.recoveryCoin, tr.coins
+
 	ord := dbOrder.Order
-	err = validateOrderResponse(dc, result, ord, msgOrder) // stamps the order, giving it a valid ID
+	err := validateOrderResponse(dc, result, ord, msgOrder) // stamps the order, giving it a valid ID
 	if err != nil {
 		c.log.Errorf("Abandoning order. preimage: %x, server time: %d: %v",
 			preImg[:], result.ServerTime, fmt.Sprintf("order response validation failure: %v", err))
@@ -7187,7 +7342,10 @@ func (c *Core) sendTradeRequest(tr *tradeRequest) (*Order, error) {
 
 	// Send a low-priority notification.
 	corder := tracker.coreOrder()
-	if !form.IsLimit && !form.Sell {
+	if adopted {
+		subject, details := c.formatDetails(TopicLateOrderAdopted, makeOrderToken(tracker.token()))
+		c.notify(newOrderNoteWithTempID(TopicLateOrderAdopted, subject, details, db.WarningLevel, corder, tr.tempID))
+	} else if !form.IsLimit && !form.Sell {
 		ui := wallets.quoteWallet.Info().UnitInfo
 		subject, details := c.formatDetails(TopicYoloPlaced,
 			ui.ConventionalString(corder.Qty), ui.Conventional.Unit, makeOrderToken(tracker.token()))
@@ -8791,7 +8949,11 @@ func (c *Core) negotiateMatches(sm *serverMatches) (assetMap, error) {
 	if sm.cancel != nil {
 		err := tracker.processCancelMatch(sm.cancel)
 		if err != nil {
-			return updatedAssets, fmt.Errorf("processCancelMatch for cancel order %v targeting order %v failed: %w",
+			// Still process the order's own matches below. In particular
+			// the maker side of this cancel match, without which the
+			// order would stay booked here although the server canceled
+			// it.
+			c.log.Errorf("processCancelMatch for cancel order %v targeting order %v failed: %v",
 				sm.cancel.OrderID, oid, err)
 		}
 	}
@@ -8993,7 +9155,7 @@ func (c *Core) startDexConnection(acctInfo *db.AccountInfo, dc *dexConnection) e
 
 		for _, dbBond := range acctInfo.Bonds {
 			if dbBond.Refunded { // maybe don't even load these, but it may be of use for record keeping
-				continue
+				continue // see queueRefundedBondRechecks below
 			}
 
 			// IDEA: unspent bonds to register with wallet on first connect, if
@@ -9022,6 +9184,11 @@ func (c *Core) startDexConnection(acctInfo *db.AccountInfo, dc *dexConnection) e
 			// We need to start monitorBondConfs on login since postbond
 			// requires the account keys.
 		}
+
+		// Bonds marked refunded may not actually have been refunded, e.g. if
+		// the refund was rejected after the broadcast call returned. Queue
+		// recent ones to be checked on chain once their wallets are ready.
+		queueRefundedBondRechecks(dc.acct, acctInfo.Bonds, time.Now())
 
 		// Now in authDEX, we must reconcile the above categorized bonds
 		// according to ConnectResult.Bonds slice.

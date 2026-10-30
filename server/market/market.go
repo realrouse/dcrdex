@@ -164,6 +164,8 @@ type Market struct {
 
 	baseFeeFetcher  FeeFetcher
 	quoteFeeFetcher FeeFetcher
+	feeCacheBase    cachedFeeRate
+	feeCacheQuote   cachedFeeRate
 
 	// Persistent data storage
 	storage Storage
@@ -1449,6 +1451,13 @@ func (m *Market) Run(ctx context.Context) {
 		log.Infof("Market %q stopped.", m.marketInfo.Name)
 	}()
 
+	// Keep the swap fee rates cached so epoch processing never blocks on a
+	// backend fee rate request. Not part of a wait group so a slow backend
+	// cannot hold up shutdown; it exits when ctxRun is canceled.
+	if m.baseFeeFetcher != nil && m.quoteFeeFetcher != nil {
+		go m.runFeeRateRefresher(ctxRun)
+	}
+
 	// Start outgoing order feed notification goroutine.
 	wgFeeds.Add(1)
 	go func() {
@@ -2307,15 +2316,8 @@ func (m *Market) unbookedOrder(lo *order.LimitOrder) {
 
 // getFeeRate gets the fee rate for an asset.
 func (m *Market) getFeeRate(assetID uint32, f FeeFetcher) uint64 {
-	// Do not block indefinitely waiting for fetcher.
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-	defer cancel()
-	rate := f.SwapFeeRate(ctx)
-	if ctx.Err() != nil { // timeout, try last known rate
-		rate = f.LastRate()
-		log.Warnf("Failed to get latest fee rate for %v. Using last known rate %d.",
-			dex.BipIDSymbol(assetID), rate)
-	}
+	// Normally served from the cache kept by runFeeRateRefresher.
+	rate := m.unscaledSwapFeeRate(assetID, f)
 	rate = m.ScaleFeeRate(assetID, rate)
 	if rate > f.MaxFeeRate() || rate == 0 {
 		rate = f.MaxFeeRate()

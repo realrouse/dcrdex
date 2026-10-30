@@ -87,6 +87,9 @@ type DEXArchivist interface {
 	LoadEpochStats(uint32, uint32, []*candles.Cache) error
 	LastCandleEndStamp(base, quote uint32, candleDur uint64) (uint64, error)
 	InsertCandles(base, quote uint32, dur uint64, cs []*candles.Candle) error
+	// CandlesBefore loads up to n stored candles of the duration with end
+	// stamps before the stamp, oldest first.
+	CandlesBefore(base, quote uint32, dur, before uint64, n int) ([]candles.Candle, error)
 
 	OrderArchiver
 	AccountArchiver

@@ -40,22 +40,28 @@ maturity. The harness mines enough blocks to fund `beta` and `gamma`.
 
 Wallet passphrase: `abc`.
 
-Client software talks to **lbcwallet**. The server backend talks to **lbcd**.
+The **dcrdex server** still talks to **lbcd** RPC. Bison Wallet users can use
+the built-in **Native** SPV wallet (headers + compact filters over P2P :9246)
+instead of running `lbcwallet`. External RPC to `lbcwallet` remains available.
+
+Native SPV on this harness connects to alpha P2P `127.0.0.1:39246` (compact
+filters are on by default in lbcd).
 
 ## Livetest
 
 ```bash
 cd client/asset/lbc
-go test -v -count=1 -tags=harness -run TestWallet
+go test -v -count=1 -tags=harness -run TestWallet      # external lbcwallet RPC
+go test -v -count=1 -tags=harness -run TestSPVWallet   # Native SPV
 ```
 
 ## Simnet trade test
 
-With the DCR harness, this LBC harness, and dcrdex (`dcr_lbc`) running:
+With the DCR harness, this LBC harness, and dcrdex (`lbc_dcr`) running:
 
 ```bash
 cd client/cmd/simnet-trade-tests
-./run dcrlbc -t success -runonce
+./run lbcdcr -t success -runonce
 ```
 
 ## Extra scripts

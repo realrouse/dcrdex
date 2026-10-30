@@ -5,7 +5,7 @@ Checklist for verifying the LBC asset end-to-end on simnet.
 ## What this branch adds
 
 - LBRY Credits as BIP44 asset **140**
-- Client: external **lbcwallet** RPC (`client/asset/lbc`)
+- Client: **Native SPV** (default in Bison) plus external **lbcwallet** RPC (`client/asset/lbc`)
 - Server: **lbcd** backend (`server/asset/lbc`)
 - Network params + ClaimTrie block deserializer (`dex/networks/lbc`)
 - Regtest harness (`dex/testing/lbc`)
@@ -37,7 +37,7 @@ export PATH=~/bin:$PATH
 
 ```bash
 cd dcrdex   # this repo
-go test ./dex/networks/lbc/ -count=1
+go test ./dex/networks/lbc/ ./client/asset/lbc/ -count=1
 go build ./client/asset/lbc/
 go build ./server/asset/lbc/
 ```
@@ -78,6 +78,15 @@ cd ~/dextest/lbc/harness-ctl
 ./alpha getbalance
 ./beta getbalance
 ./mine-alpha 1
+
+### 2c. Native SPV livetest (no lbcwallet for the SPV side)
+
+Requires the harness `lbcd` nodes (P2P 39246) so compact filters are available.
+
+```bash
+cd client/asset/lbc
+go test -v -count=1 -tags=harness -run TestSPVWallet -timeout 180s
+```
 ```
 
 ### 2c. Client integration test
@@ -138,7 +147,7 @@ PG_PASS=dexpass ./harness.sh
 
 `genmarkets.sh` auto-includes **LBC** when `~/dextest/lbc/harness-ctl/alpha-node getblockchaininfo` succeeds:
 
-- Market: **DCR_simnet / LBC_simnet**
+- Market: **LBC_simnet / DCR_simnet** (`lbc_dcr` — buy/sell LBC)
 - Asset config: `~/dextest/lbc/alpha/alpha-node.conf`
 
 ### 3e. Verify server sees both assets
@@ -161,7 +170,7 @@ go build -o bisonw .
 # Point LBC external wallet at ~/dextest/lbc/alpha/alpha.conf
 # Point DCR wallet at dcr harness trading wallets
 # Register on simnet DEX 127.0.0.1:17273 with ~/dextest/dcrdex/rpc.cert
-# Place a small DCR/LBC order if market is live
+# Place a small LBC/DCR order if market is live
 ```
 
 ### 3g. Shutdown
@@ -200,6 +209,6 @@ go build -o bisonw .
 - [ ] Level 1 unit/build
 - [ ] Level 2 harness + `TestWallet` (swap/redeem/refund)
 - [ ] Level 3 dcrdex starts with DCR + LBC markets, no backend panics
-- [ ] (Optional) Manual order on simnet DCR/LBC
+- [ ] (Optional) Manual order on simnet LBC/DCR
 
 Questions about LBC chain params / wallet RPCs: ask Ben / LBRY foundation.

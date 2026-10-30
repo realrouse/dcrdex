@@ -1615,7 +1615,7 @@ func testFundMultiOrder(t *testing.T, segwit bool, walletType string) {
 				{nil},
 			},
 		},
-		{ // "split, maxLock too low to fund buffer"
+		{ // "split, maxLock too low to fund buffer" — still split, just without the pad
 			name: "split, maxLock too low to fund buffer",
 			multiOrder: &asset.MultiOrder{
 				Values: []*asset.MultiOrderValue{
@@ -1647,9 +1647,28 @@ func testFundMultiOrder(t *testing.T, segwit bool, walletType string) {
 					Vout:          0,
 				},
 			},
-			balance:   2*uint64(requiredForOrder(15e5, 2)*110/100) + expectedSplitFee(1, 2),
-			maxLock:   2*uint64(requiredForOrder(15e5, 2)*110/100) + expectedSplitFee(1, 2) - 1,
-			expectErr: true,
+			balance:         2*uint64(requiredForOrder(15e5, 2)*110/100) + expectedSplitFee(1, 2),
+			maxLock:         2*uint64(requiredForOrder(15e5, 2)*110/100) + expectedSplitFee(1, 2) - 1,
+			expectSendRawTx: true,
+			expectedInputs: []*wire.TxIn{
+				{
+					PreviousOutPoint: wire.OutPoint{
+						Hash:  *txHashes[0],
+						Index: 0,
+					},
+				},
+			},
+			expectedOutputs: []*wire.TxOut{
+				wire.NewTxOut(requiredForOrder(15e5, 2), []byte{}),
+				wire.NewTxOut(requiredForOrder(15e5, 2), []byte{}),
+			},
+			expectedChange: 2*uint64(requiredForOrder(15e5, 2)*110/100) + expectedSplitFee(1, 2) -
+				2*uint64(requiredForOrder(15e5, 2)) - expectedSplitFee(1, 3),
+			expectedSplitFee: expectedSplitFee(1, 3),
+			expectedRedeemScripts: [][]dex.Bytes{
+				{nil},
+				{nil},
+			},
 		},
 		{ // "only one order needs a split, rest can be funded without"
 			name: "only one order needs a split, rest can be funded without",
@@ -1815,6 +1834,49 @@ func testFundMultiOrder(t *testing.T, segwit bool, walletType string) {
 				{NewOutput(txHashes[1], 0, 12e5)},
 				nil,
 			},
+		},
+		{ // one fat UTXO must still split when bond reserves would overlock it
+			name: "fat utxo split despite bond reserves",
+			multiOrder: &asset.MultiOrder{
+				Values: []*asset.MultiOrderValue{
+					{Value: 1e6, MaxSwapCount: 1},
+					{Value: 1e6, MaxSwapCount: 1},
+				},
+				MaxFeeRate:    maxFeeRate,
+				FeeSuggestion: feeSuggestion,
+				Options: map[string]string{
+					multiSplitKey: "true",
+				},
+			},
+			utxos: []*ListUnspentResult{
+				{
+					Confirmations: 1,
+					Spendable:     true,
+					TxID:          txIDs[0],
+					RedeemScript:  nil,
+					ScriptPubKey:  scriptPubKeys(0),
+					Address:       addresses(0),
+					Amount:        50e6 / 1e8,
+					Vout:          0,
+				},
+			},
+			bondReserves:    1e6,
+			balance:         50e6,
+			expectSendRawTx: true,
+			expectedInputs: []*wire.TxIn{
+				{
+					PreviousOutPoint: wire.OutPoint{
+						Hash:  *txHashes[0],
+						Index: 0,
+					},
+				},
+			},
+			expectedOutputs: []*wire.TxOut{
+				wire.NewTxOut(requiredForOrder(1e6, 1), []byte{}),
+				wire.NewTxOut(requiredForOrder(1e6, 1), []byte{}),
+			},
+			expectedSplitFee: expectedSplitFee(1, 3),
+			expectedChange:   50e6 - uint64(requiredForOrder(1e6, 1))*2 - expectedSplitFee(1, 3),
 		},
 	}
 
@@ -3157,6 +3219,91 @@ func testSwap(t *testing.T, segwit bool, walletType string) {
 	_, _, _, err = wallet.Swap(t.Context(), swaps)
 	if err != nil {
 		t.Fatalf("re-swap error: %v", err)
+	}
+}
+
+// TestSwapCacheContractTerms checks that a swap funded with coins returned
+// from a failed broadcast does not recover a different swap's cached tx. The
+// swap broadcast cache used to be keyed only by input coin IDs, so the second
+// swap got the first swap's receipts (wrong contract).
+func TestSwapCacheContractTerms(t *testing.T) {
+	runRubric(t, testSwapCacheContractTerms)
+}
+
+func testSwapCacheContractTerms(t *testing.T, segwit bool, walletType string) {
+	wallet, node, shutdown := tNewWallet(segwit, walletType)
+	defer shutdown()
+
+	coins := asset.Coins{
+		NewOutput(tTxHash, 0, toSatoshi(3)),
+		NewOutput(tTxHash, 1, toSatoshi(3)),
+	}
+	addrStr := tP2PKHAddr
+	if segwit {
+		addrStr = tP2WPKHAddr
+	}
+	node.newAddress = addrStr
+	node.changeAddr = addrStr
+	privBytes, _ := hex.DecodeString("b07209eec1a8fb6cfe5cb6ace36567406971a75c330db7101fb21bc679bc5330")
+	privKey, _ := btcec.PrivKeyFromBytes(privBytes)
+	wif, err := btcutil.NewWIF(privKey, &chaincfg.MainNetParams, true)
+	if err != nil {
+		t.Fatalf("error encoding wif: %v", err)
+	}
+	node.privKeyForAddr = wif
+	node.signFunc = func(tx *wire.MsgTx) { signFunc(tx, 0, wallet.segwit) }
+
+	mkSwaps := func(secretHash []byte) *asset.Swaps {
+		return &asset.Swaps{
+			Inputs: coins,
+			Contracts: []*asset.Contract{{
+				Address:    addrStr,
+				Value:      toSatoshi(5),
+				SecretHash: secretHash,
+				LockTime:   uint64(time.Now().Unix()),
+			}},
+			LockChange: true,
+			FeeRate:    tBTC.MaxFeeRate,
+		}
+	}
+	secretHash1 := bytes.Repeat([]byte{0x11}, 32)
+	secretHash2 := bytes.Repeat([]byte{0x22}, 32)
+
+	// The first swap's broadcast fails. Its tx stays in the cache and its
+	// inputs are free to fund another swap.
+	node.sendErr = tErr
+	if _, _, _, err := wallet.Swap(t.Context(), mkSwaps(secretHash1)); err == nil {
+		t.Fatalf("expected broadcast error")
+	}
+	node.sendErr = nil
+
+	// A different swap funded by the same coins must build its own tx.
+	receipts, _, _, err := wallet.Swap(t.Context(), mkSwaps(secretHash2))
+	if err != nil {
+		t.Fatalf("second swap error: %v", err)
+	}
+	if len(receipts) != 1 {
+		t.Fatalf("expected 1 receipt, got %d", len(receipts))
+	}
+	contract := receipts[0].Contract()
+	if !bytes.Contains(contract, secretHash2) || bytes.Contains(contract, secretHash1) {
+		t.Fatalf("second swap recovered the first swap's cached contract")
+	}
+
+	// A retry of the same swap after a failed broadcast still recovers it.
+	node.sendErr = tErr
+	swaps3 := mkSwaps(bytes.Repeat([]byte{0x33}, 32))
+	if _, _, _, err := wallet.Swap(t.Context(), swaps3); err == nil {
+		t.Fatalf("expected broadcast error")
+	}
+	firstTx := node.sentRawTx.TxHash()
+	node.sendErr = nil
+	receipts, _, _, err = wallet.Swap(t.Context(), swaps3)
+	if err != nil {
+		t.Fatalf("retry error: %v", err)
+	}
+	if txHash, _, _ := decodeCoinID(receipts[0].Coin().ID()); *txHash != firstTx {
+		t.Fatalf("retry of the same swap did not recover the cached tx")
 	}
 }
 

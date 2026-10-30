@@ -28,15 +28,12 @@ type kvDB struct {
 }
 
 func NewFileDB(filePath string, log dex.Logger) (KeyValueDB, error) {
-	// If memory use is a concern, could try
-	//   .WithValueLogLoadingMode(options.FileIO) // default options.MemoryMap
-	//   .WithMaxTableSize(sz int64); // bytes, default 6MB
-	//   .WithValueLogFileSize(sz int64), bytes, default 1 GB, must be 1MB <= sz <= 1GB
+	// lexi.DefaultOptions keeps the memory mapped files small. See there.
 	v4Path, needs, err := lexi.NeedsV1toV4Update(filePath)
 	if err != nil {
 		return nil, err
 	}
-	opts := badger.DefaultOptions(v4Path).WithLogger(&badgerLoggerWrapper{log})
+	opts := lexi.DefaultOptions(v4Path).WithLogger(&badgerLoggerWrapper{log})
 	var db *badger.DB
 	if needs {
 		db, err = lexi.BadgerV1Update(filePath, v4Path, log, opts)

@@ -81,11 +81,31 @@ const (
 	ON CONFLICT (end_stamp) DO UPDATE
 	SET match_volume = $2, quote_volume = $3, high_rate = $4, low_rate = $5, start_rate = $6, end_rate = $7;`
 
+	// SelectCandles selects the newest $1 candles, sorted by ascending time.
 	SelectCandles = `SELECT end_stamp, match_volume, quote_volume,
 		high_rate, low_rate, start_rate, end_rate
-	FROM %s
-	ORDER BY end_stamp
-	LIMIT $1;`
+	FROM (
+		SELECT end_stamp, match_volume, quote_volume,
+			high_rate, low_rate, start_rate, end_rate
+		FROM %s
+		ORDER BY end_stamp DESC
+		LIMIT $1
+	) AS newest
+	ORDER BY end_stamp;`
+
+	// SelectCandlesBefore selects up to $2 candles with end stamps before $1,
+	// sorted by ascending time.
+	SelectCandlesBefore = `SELECT end_stamp, match_volume, quote_volume,
+		high_rate, low_rate, start_rate, end_rate
+	FROM (
+		SELECT end_stamp, match_volume, quote_volume,
+			high_rate, low_rate, start_rate, end_rate
+		FROM %s
+		WHERE end_stamp < $1
+		ORDER BY end_stamp DESC
+		LIMIT $2
+	) AS page
+	ORDER BY end_stamp;`
 
 	SelectLastEndStamp = `SELECT (end_stamp)
 		FROM %s

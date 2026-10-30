@@ -71,6 +71,7 @@ export const ID_LOCKED = 'LOCKED'
 export const ID_IMMATURE = 'IMMATURE'
 export const ID_FEE_BALANCE = 'FEE_BALANCE'
 export const ID_CANDLES_LOADING = 'CANDLES_LOADING'
+export const ID_CHART_HISTORY_LIMIT = 'CHART_HISTORY_LIMIT'
 export const ID_DEPTH_LOADING = 'DEPTH_LOADING'
 export const ID_INVALID_ADDRESS_MSG = 'INVALID_ADDRESS_MSG'
 export const ID_TXFEE_UNSUPPORTED = 'TXFEE_UNSUPPORTED'
@@ -221,6 +222,7 @@ export const ID_CEX_TRADE_ERROR = 'CEX_TRADE_ERROR'
 export const ID_ORDER_REPORT_TITLE = 'ORDER_REPORT_TITLE'
 export const ID_CEX_BALANCES = 'CEX_BALANCES'
 export const ID_CAUSES_SELF_MATCH = 'CAUSES_SELF_MATCH'
+export const ID_INSUFFICIENT_BOT_BALANCE = 'INSUFFICIENT_BOT_BALANCE'
 export const ID_CEX_NOT_CONNECTED = 'CEX_NOT_CONNECTED'
 export const ID_DELETE_BOT = 'DELETE_BOT'
 export const ID_MARKET_ORDER_CAPITALIZE = 'MARKET_ORDER_CAPITALIZE'
@@ -311,6 +313,15 @@ export const ID_MM_ARB_HEADER = 'MM_ARB_HEADER'
 export const ID_MM_CHOOSE_BOT = 'MM_CHOOSE_BOT'
 export const ID_MM_DRIFT_TOLERANCE = 'MM_DRIFT_TOLERANCE'
 export const ID_MM_DRIFT_TOLERANCE_TOOLTIP = 'MM_DRIFT_TOLERANCE_TOOLTIP'
+export const ID_MM_INVENTORY_SKEW = 'MM_INVENTORY_SKEW'
+export const ID_MM_INVENTORY_SKEW_TOOLTIP = 'MM_INVENTORY_SKEW_TOOLTIP'
+export const ID_MM_INVENTORY_SKEW_CAP = 'MM_INVENTORY_SKEW_CAP'
+export const ID_MM_INVENTORY_SKEW_CAP_TOOLTIP = 'MM_INVENTORY_SKEW_CAP_TOOLTIP'
+export const ID_MM_BOOK_PROTECTION = 'MM_BOOK_PROTECTION'
+export const ID_MM_DO_NOT_CROSS = 'MM_DO_NOT_CROSS'
+export const ID_MM_DO_NOT_CROSS_TOOLTIP = 'MM_DO_NOT_CROSS_TOOLTIP'
+export const ID_MM_BID_ANCHOR_FADE_HOURS = 'MM_BID_ANCHOR_FADE_HOURS'
+export const ID_MM_BID_ANCHOR_FADE_HOURS_TOOLTIP = 'MM_BID_ANCHOR_FADE_HOURS_TOOLTIP'
 export const ID_MM_ORDER_PERSISTENCE = 'MM_ORDER_PERSISTENCE'
 export const ID_MM_ORDER_PERSISTENCE_TOOLTIP = 'MM_ORDER_PERSISTENCE_TOOLTIP'
 export const ID_MM_MULTI_HOP_ARB = 'MM_MULTI_HOP_ARB'
@@ -466,8 +477,28 @@ export const ID_VERSION = 'VERSION'
 
 let locale: Locale
 
+// English fallbacks for strings added after a bisonw build whose locale
+// cache (localStorage) was keyed by an empty VCS revision. Without these,
+// prep() returns "" and MM settings labels vanish until the cache is cleared.
+const fallbackEnglish: Locale = {
+  MM_BOOK_PROTECTION: 'Book Protection',
+  MM_DO_NOT_CROSS: 'Do Not Cross the Book',
+  MM_DO_NOT_CROSS_TOOLTIP: 'Never sell into a live bid or buy into a live ask. Stops the bot from restocking at the oracle market price and taking a leftover aggressive bid. Asks lift; bids stay at the oracle market price so you do not buy the pump.',
+  MM_BID_ANCHOR_FADE_HOURS: 'Hours to Fade Back to Oracle Market Price',
+  MM_BID_ANCHOR_FADE_HOURS_TOOLTIP: 'After an aggressive bid or ask that ran the book is gone, walk quotes linearly back to the oracle market price over this many hours. 4 = slow return. 0 = snap back as soon as it cancels. Only the lifted side moves; the other side stays at the oracle market price.',
+  MM_INVENTORY_SKEW: 'Inventory Skew',
+  MM_INVENTORY_SKEW_TOOLTIP: 'Slide both bids and asks when your base inventory is above or below target. Strength is measured against the lots you are quoting, not the whole wallet. Does not follow last trade. 1 = full (up to the cap). 0 = off.',
+  MM_INVENTORY_SKEW_CAP: 'Inventory Skew Cap',
+  MM_INVENTORY_SKEW_CAP_TOOLTIP: 'Maximum percent the bot may move quotes away from the oracle price due to inventory.',
+  MM_DRIFT_TOLERANCE: 'Drift Tolerance',
+  MM_DRIFT_TOLERANCE_TOOLTIP: 'If an existing DEX order drifts too far from the bot\'s current target price, the bot cancels and replaces it.',
+  MM_TRADING: 'Trading'
+}
+
 export async function loadLocale (lang: string, commitHash: string, skipCache: boolean) {
-  if (!skipCache) {
+  // Trimmed bisonw builds often have an empty VCS revision, so every upgrade
+  // would reuse a stale locale cache and drop new translation keys.
+  if (!skipCache && commitHash) {
     const specs = State.fetchLocal(State.localeSpecsKey)
     if (specs && specs.lang === lang && specs.commitHash === commitHash) {
       locale = State.fetchLocal(State.localeKey)
@@ -481,7 +512,7 @@ export async function loadLocale (lang: string, commitHash: string, skipCache: b
 
 /* prep will format the message to the current locale. */
 export function prep (k: string, args?: Record<string, string>) {
-  const text = locale?.[k]
+  const text = locale?.[k] || fallbackEnglish[k]
   if (!text) return ''
   return stringTemplateParser(text, args || {})
 }

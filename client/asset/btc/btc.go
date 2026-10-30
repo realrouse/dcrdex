@@ -848,6 +848,7 @@ type baseWallet struct {
 	balanceFunc       func(ctx context.Context, locked uint64) (*asset.Balance, error)
 	segwit            bool
 	signNonSegwit     TxInSigner
+	stdSigHash        bool // no custom NonSegwitSigner, so txscript can verify our signatures
 	localFeeRate      func(context.Context, RawRequester, uint64) (uint64, error)
 	feeCache          *feeRateCache
 	decodeAddr        dexbtc.AddressDecoder
@@ -1400,6 +1401,7 @@ func newUnconnectedWallet(cfg *BTCCloneCFG, walletCfg *WalletConfig) (*baseWalle
 		initTxSize:        initTxSize,
 		initTxSizeBase:    initTxSizeBase,
 		signNonSegwit:     nonSegwitSigner,
+		stdSigHash:        cfg.NonSegwitSigner == nil,
 		localFeeRate:      cfg.FeeEstimator,
 		feeCache:          feeCache,
 		decodeAddr:        addrDecoder,
@@ -2678,12 +2680,17 @@ func (btc *baseWallet) fundMultiSplitTx(
 
 	fundSplitCoins, _, spents, _, inputsSize, _, err := btc.cm.FundWithUTXOs(utxos, keep, false, enough)
 	if err != nil {
+		btc.log.Warnf("multi-split funding failed: %v (utxos=%d required=%d keep=%d maxLock=%d)",
+			err, len(utxos), totalOutputRequired, keep, maxLock)
 		return false, nil, nil
 	}
 
 	if maxLock > 0 {
 		totalSize := inputsSize + splitTxSizeWithoutInputs
-		if totalOutputRequired+(totalSize*splitTxFeeRate) > maxLock {
+		need := totalOutputRequired + totalSize*splitTxFeeRate
+		if need > maxLock {
+			btc.log.Warnf("multi-split maxLock %d < need %d (required=%d fee=%d)",
+				maxLock, need, totalOutputRequired, totalSize*splitTxFeeRate)
 			return false, nil, nil
 		}
 	}
@@ -2784,9 +2791,39 @@ func (btc *baseWallet) fundMultiWithSplit(keep, maxLock uint64, values []*asset.
 		return nil, nil, 0, fmt.Errorf("error getting spendable utxos: %w", err)
 	}
 
+	if splitTxFeeRate == 0 {
+		splitTxFeeRate = btc.targetFeeRateWithFallback(1, 0)
+		if splitTxFeeRate == 0 {
+			splitTxFeeRate = 1
+		}
+	}
+
 	canFund, splitCoins, splitSpents := btc.fundMultiSplitTx(values, utxos, splitTxFeeRate, maxFeeRate, splitBuffer, keep, maxLock)
+	// The split buffer (default 5%) is meant for quote-asset re-use when the
+	// rate moves. MM MaxLock is the bot's unbuffered inventory, so a 5%
+	// pad on 30 lots of 1000 can need 31500 while MaxLock is only 31000.
+	// Drop the buffer rather than refusing a split that fits without it.
+	if !canFund && splitBuffer > 0 {
+		btc.log.Infof("multi-split with %.4g%% buffer cannot fund under maxLock=%d; retrying without buffer",
+			splitBuffer, maxLock)
+		canFund, splitCoins, splitSpents = btc.fundMultiSplitTx(values, utxos, splitTxFeeRate, maxFeeRate, 0, keep, maxLock)
+		if canFund {
+			splitBuffer = 0
+		}
+	}
 	if !canFund {
-		return nil, nil, 0, fmt.Errorf("cannot fund all with split")
+		var avail uint64
+		for _, u := range utxos {
+			avail += u.Amount
+		}
+		return nil, nil, 0, fmt.Errorf("cannot fund all with split: %d available in %d utxos (locked coins from cancelled orders may still be locked in the wallet)", avail, len(utxos))
+	}
+
+	var swapInputSize uint64
+	if btc.segwit {
+		swapInputSize = dexbtc.RedeemP2WPKHInputTotalSize
+	} else {
+		swapInputSize = dexbtc.RedeemP2PKHInputSize
 	}
 
 	remainingUTXOs := utxos
@@ -2802,9 +2839,24 @@ func (btc *baseWallet) fundMultiWithSplit(keep, maxLock uint64, values []*asset.
 
 	var totalFunded uint64
 
+	// Don't consume a fat UTXO as a single-order funder (e.g. 400k LBC for
+	// one 1000 LBC lot). Split it into lot-sized outputs instead.
+	skipNibble := false
+	if _, fat := btc.cm.OrderWithLeastOverFund(maxLock, maxFeeRate, values[:1], utxos); len(fat) > 0 {
+		oneReq, _ := btc.fundsRequiredForMultiOrders(values[:1], maxFeeRate, splitBuffer, swapInputSize)
+		if SumUTXOs(fat) > oneReq[0]*3 {
+			skipNibble = true
+			btc.log.Infof("Splitting %d %s orders from fat UTXO(s) worth %s rather than overlocking",
+				len(values), btc.symbol, amount(SumUTXOs(fat)))
+		}
+	}
+
 	// Find each of the orders that can be funded without being included
 	// in the split transaction.
 	for range values {
+		if skipNibble {
+			break
+		}
 		// First find the order the can be funded with the least overlock.
 		// If there is no order that can be funded without going over the
 		// maxLock limit, or not leaving enough for bond reserves, then all
@@ -2852,9 +2904,12 @@ func (btc *baseWallet) fundMultiWithSplit(keep, maxLock uint64, values []*asset.
 	// This should always be true, otherwise this function would not have been
 	// called.
 	if len(remainingOrders) > 0 {
+		btc.log.Infof("Broadcasting multi-split for %d %s orders (%d input coins)",
+			len(remainingOrders), btc.symbol, len(splitCoins))
 		splitOutputCoins, splitFees, err = btc.submitMultiSplitTx(splitCoins,
 			splitSpents, remainingOrders, maxFeeRate, splitTxFeeRate, splitBuffer)
 		if err != nil {
+			btc.log.Warnf("multi-split send failed: %v", err)
 			return nil, nil, 0, fmt.Errorf("error creating split transaction: %w", err)
 		}
 	}
@@ -6498,7 +6553,7 @@ func (btc *baseWallet) MakeBondTx(ver uint16, amt, feeRate uint64, lockTime time
 	}
 
 	// Prep the redeem / refund tx.
-	redeemMsgTx, err := btc.makeBondRefundTxV0(txid, 0, amt, bondScript, bondKey, feeRate)
+	redeemMsgTx, err := btc.makeBondRefundTxV0(txid, 0, amt, bondScript, bondKey, feeRate, btc.segwit)
 	if err != nil {
 		return nil, nil, fmt.Errorf("unable to create bond redemption tx: %w", err)
 	}
@@ -6536,8 +6591,16 @@ func (btc *baseWallet) MakeBondTx(ver uint16, amt, feeRate uint64, lockTime time
 	return bond, abandon, nil
 }
 
+// makeBondRefundTxV0 builds and signs a refund of a v0 bond output. segwitBond
+// specifies whether the bond output is P2WSH (true) or legacy P2SH (false).
+// This must match the actual bond output, which is not necessarily the same as
+// the wallet's current segwit setting. For example, LBC bonds created before
+// LBC SegWit was enabled are P2SH, but the wallet is now segwit.
 func (btc *baseWallet) makeBondRefundTxV0(txid *chainhash.Hash, vout uint32, amt uint64,
-	script []byte, priv *btcec.PrivateKey, feeRate uint64) (*wire.MsgTx, error) {
+	script []byte, priv *btcec.PrivateKey, feeRate uint64, segwitBond bool) (*wire.MsgTx, error) {
+	if segwitBond && !btc.segwit {
+		return nil, errors.New("cannot refund a segwit bond with a non-segwit wallet")
+	}
 	lockTime, pkhPush, err := dexbtc.ExtractBondDetailsV0(0, script)
 	if err != nil {
 		return nil, err
@@ -6560,11 +6623,18 @@ func (btc *baseWallet) makeBondRefundTxV0(txid *chainhash.Hash, vout uint32, amt
 
 	// Calculate fees and add the refund output.
 	size := btc.calcTxSize(msgTx)
-	if btc.segwit {
+	if segwitBond {
 		witnessVBytes := (dexbtc.RedeemBondSigScriptSize + 2 + 3) / 4
-		size += uint64(witnessVBytes) + dexbtc.P2WPKHOutputSize
+		size += uint64(witnessVBytes)
 	} else {
-		size += dexbtc.RedeemBondSigScriptSize + dexbtc.P2PKHOutputSize
+		size += dexbtc.RedeemBondSigScriptSize
+	}
+	// The refund output pays to a wallet address, whose type depends on the
+	// wallet's segwit setting, not the bond's.
+	if btc.segwit {
+		size += dexbtc.P2WPKHOutputSize
+	} else {
+		size += dexbtc.P2PKHOutputSize
 	}
 	fee := feeRate * size
 	if fee > amt {
@@ -6586,7 +6656,7 @@ func (btc *baseWallet) makeBondRefundTxV0(txid *chainhash.Hash, vout uint32, amt
 	}
 	msgTx.AddTxOut(redeemTxOut)
 
-	if btc.segwit {
+	if segwitBond {
 		sigHashes := txscript.NewTxSigHashes(msgTx, new(txscript.CannedPrevOutputFetcher))
 		sig, err := txscript.RawTxInWitnessSignature(msgTx, sigHashes, 0, int64(amt),
 			script, txscript.SigHashAll, priv)
@@ -6612,9 +6682,162 @@ func (btc *baseWallet) makeBondRefundTxV0(txid *chainhash.Hash, vout uint32, amt
 	return msgTx, nil
 }
 
+// maxBondLifetime bounds how long before its lock time a bond may have been
+// mined. MakeBondTx refuses lock times more than ~6 months out. This is used to
+// limit block filters searches by SPV wallets that don't know the bond's block.
+const maxBondLifetime = 365*12*time.Hour + 7*24*time.Hour
+
+// bondPkScript returns the pkScript of a bond output paying to the bond script,
+// either P2WSH (segwit) or P2SH.
+func (btc *baseWallet) bondPkScript(bondScript []byte, segwit bool) ([]byte, error) {
+	addr, err := scriptHashAddress(segwit, bondScript, btc.chainParams)
+	if err != nil {
+		return nil, err
+	}
+	return txscript.PayToAddrScript(addr)
+}
+
+// bondOutputType determines whether the bond output txHash:vout is P2WSH
+// (segwitBond = true) or legacy P2SH, and returns its pkScript. The bond
+// transaction's output script is checked against the bond script when the
+// wallet has the bond transaction. A bond's type does not necessarily match the
+// wallet's current segwit setting. For example, LBC bonds created before LBC
+// SegWit was enabled are P2SH, but the LBC wallet is now segwit. If the bond
+// transaction is not available, the wallet's segwit setting is assumed.
+func (btc *baseWallet) bondOutputType(txHash *chainhash.Hash, vout uint32, bondScript []byte) (segwitBond bool, pkScript []byte, err error) {
+	p2shScript, err := btc.bondPkScript(bondScript, false)
+	if err != nil {
+		return false, nil, fmt.Errorf("error constructing p2sh script: %w", err)
+	}
+	var p2wshScript []byte
+	if btc.segwit {
+		if p2wshScript, err = btc.bondPkScript(bondScript, true); err != nil {
+			return false, nil, fmt.Errorf("error constructing p2wsh script: %w", err)
+		}
+	}
+	fallback := func(reason string) (bool, []byte, error) {
+		if !btc.segwit {
+			return false, p2shScript, nil
+		}
+		// The wallet doesn't have the bond tx (e.g. restored from seed). Ask
+		// the node for the unspent output. A full node returns the actual
+		// output script. An SPV wallet only finds the output if the script we
+		// supply is right, so try both types.
+		if lockTime, _, err := dexbtc.ExtractBondDetailsV0(0, bondScript); err == nil {
+			startTime := time.Unix(int64(lockTime), 0).Add(-maxBondLifetime)
+			for _, pkScript := range [][]byte{p2wshScript, p2shScript} {
+				txOut, _, err := btc.node.GetTxOut(txHash, vout, pkScript, startTime)
+				if err != nil || txOut == nil {
+					continue
+				}
+				switch {
+				case bytes.Equal(txOut.PkScript, p2wshScript):
+					return true, p2wshScript, nil
+				case bytes.Equal(txOut.PkScript, p2shScript):
+					return false, p2shScript, nil
+				}
+			}
+		}
+		btc.log.Warnf("Unable to inspect bond transaction %s (%s). Assuming a P2WSH bond output.", txHash, reason)
+		return true, p2wshScript, nil
+	}
+	tx, err := btc.node.GetWalletTransaction(txHash)
+	if err != nil {
+		return fallback(err.Error())
+	}
+	msgTx, err := btc.deserializeTx(tx.Bytes)
+	if err != nil {
+		return fallback(err.Error())
+	}
+	if int(vout) >= len(msgTx.TxOut) {
+		return false, nil, fmt.Errorf("bond transaction %s has no output %d", txHash, vout)
+	}
+	switch pk := msgTx.TxOut[vout].PkScript; {
+	case len(p2wshScript) > 0 && bytes.Equal(pk, p2wshScript):
+		return true, p2wshScript, nil
+	case bytes.Equal(pk, p2shScript):
+		return false, p2shScript, nil
+	default:
+		return false, nil, fmt.Errorf("bond output %s:%d script %x does not pay to the bond script %x",
+			txHash, vout, pk, bondScript)
+	}
+}
+
+// verifyBondRefund executes the bond spending input of a refund transaction
+// with the script engine against the bond output being spent. Signatures made
+// with a custom non-segwit signature hash algorithm (e.g. BCH) cannot be
+// verified by txscript, so they are not checked.
+func (btc *baseWallet) verifyBondRefund(msgTx *wire.MsgTx, bondHash *chainhash.Hash, vout uint32,
+	prevPkScript []byte, amt uint64, segwitBond bool) error {
+
+	inIdx := -1
+	for i, txIn := range msgTx.TxIn {
+		if txIn.PreviousOutPoint.Hash == *bondHash && txIn.PreviousOutPoint.Index == vout {
+			inIdx = i
+			break
+		}
+	}
+	if inIdx < 0 {
+		return fmt.Errorf("transaction does not spend bond output %s:%d", bondHash, vout)
+	}
+	if !segwitBond && !btc.stdSigHash {
+		return nil
+	}
+	prevOuts := txscript.NewCannedPrevOutputFetcher(prevPkScript, int64(amt))
+	sigHashes := txscript.NewTxSigHashes(msgTx, prevOuts)
+	vm, err := txscript.NewEngine(prevPkScript, msgTx, inIdx, txscript.StandardVerifyFlags,
+		nil, sigHashes, int64(amt), prevOuts)
+	if err != nil {
+		return fmt.Errorf("error creating script engine: %w", err)
+	}
+	if err := vm.Execute(); err != nil {
+		return fmt.Errorf("script verification failed: %w", err)
+	}
+	return nil
+}
+
+// priorBondRefund looks for a refund of the bond output txHash:vout that was
+// already broadcast and is still unconfirmed, and returns it if it is valid.
+// Rebroadcasting the same transaction avoids creating conflicting refunds.
+// Invalid prior refunds (e.g. a segwit-style spend of a P2SH bond created by an
+// older version) are ignored, so that a valid refund will be created.
+func (btc *baseWallet) priorBondRefund(txHash *chainhash.Hash, vout uint32, bondPKH []byte, lockTime uint32,
+	prevPkScript []byte, amt uint64, segwitBond bool) *wire.MsgTx {
+
+	btc.pendingTxsMtx.RLock()
+	var candidates []chainhash.Hash
+	for h, wt := range btc.pendingTxs {
+		if wt.WalletTransaction == nil || wt.Type != asset.RedeemBond || wt.BondInfo == nil {
+			continue
+		}
+		if bytes.Equal(wt.BondInfo.BondID, bondPKH) && wt.BondInfo.LockTime == uint64(lockTime) {
+			candidates = append(candidates, h)
+		}
+	}
+	btc.pendingTxsMtx.RUnlock()
+
+	for _, h := range candidates {
+		tx, err := btc.node.GetWalletTransaction(&h)
+		if err != nil {
+			continue
+		}
+		msgTx, err := btc.deserializeTx(tx.Bytes)
+		if err != nil {
+			continue
+		}
+		if err := btc.verifyBondRefund(msgTx, txHash, vout, prevPkScript, amt, segwitBond); err != nil {
+			btc.log.Warnf("Ignoring invalid prior refund %s of bond %s:%d: %v", h, txHash, vout, err)
+			continue
+		}
+		return msgTx
+	}
+	return nil
+}
+
 // RefundBond refunds a bond output to a new wallet address given the redeem
 // script and private key. After broadcasting, the output paying to the wallet
-// is returned.
+// is returned. If a valid refund of this bond was already broadcast and is not
+// yet confirmed, that transaction is rebroadcast instead of creating a new one.
 func (btc *baseWallet) RefundBond(ctx context.Context, ver uint16, coinID, script []byte, amt uint64, privKey *btcec.PrivateKey) (asset.Coin, error) {
 	if ver != 0 {
 		return nil, errors.New("only version 0 bonds supported")
@@ -6627,37 +6850,117 @@ func (btc *baseWallet) RefundBond(ctx context.Context, ver uint16, coinID, scrip
 	if err != nil {
 		return nil, err
 	}
-	feeRate := btc.targetFeeRateWithFallback(2, 0)
 
-	msgTx, err := btc.makeBondRefundTxV0(txHash, vout, amt, script, privKey, feeRate)
+	segwitBond, prevPkScript, err := btc.bondOutputType(txHash, vout, script)
 	if err != nil {
 		return nil, err
 	}
 
+	msgTx := btc.priorBondRefund(txHash, vout, pkhPush, lockTime, prevPkScript, amt, segwitBond)
+	rebroadcast := msgTx != nil
+	if !rebroadcast {
+		feeRate := btc.targetFeeRateWithFallback(2, 0)
+		msgTx, err = btc.makeBondRefundTxV0(txHash, vout, amt, script, privKey, feeRate, segwitBond)
+		if err != nil {
+			return nil, err
+		}
+		if err := btc.verifyBondRefund(msgTx, txHash, vout, prevPkScript, amt, segwitBond); err != nil {
+			return nil, fmt.Errorf("refusing to broadcast invalid refund %s of bond %s:%d (segwit bond = %v): %w",
+				btc.hashTx(msgTx), txHash, vout, segwitBond, err)
+		}
+	}
+	txID := btc.hashTx(msgTx)
+	if len(msgTx.TxOut) == 0 {
+		return nil, fmt.Errorf("bond refund %s has no outputs", txID)
+	}
+
 	_, err = btc.node.SendRawTransaction(ctx, msgTx)
 	if err != nil {
-		return nil, fmt.Errorf("error sending refund bond transaction: %w", err)
+		if !rebroadcast || !isTxAlreadyKnownErr(err) {
+			return nil, fmt.Errorf("error sending refund bond transaction: %w", err)
+		}
+		btc.log.Debugf("Bond refund %s already known to the network: %v", txID, err)
+	}
+	if rebroadcast {
+		btc.log.Infof("Rebroadcast refund %s of bond %s:%d", txID, txHash, vout)
+	} else {
+		btc.log.Infof("Broadcast refund %s of bond %s:%d (segwit bond = %v)", txID, txHash, vout, segwitBond)
 	}
 
-	txID := btc.hashTx(msgTx)
-	var fees uint64
-	if len(msgTx.TxOut) == 1 {
-		fees = amt - uint64(msgTx.TxOut[0].Value)
+	if !rebroadcast {
+		var fees uint64
+		if len(msgTx.TxOut) == 1 {
+			fees = amt - uint64(msgTx.TxOut[0].Value)
+		}
+		btc.addTxToHistory(&asset.WalletTransaction{
+			Type:   asset.RedeemBond,
+			ID:     txID.String(),
+			Amount: amt,
+			Fees:   fees,
+			BondInfo: &asset.BondTxInfo{
+				LockTime: uint64(lockTime),
+				BondID:   pkhPush,
+			},
+			Timestamp: uint64(time.Now().Unix()),
+			Confirms:  &asset.Confirms{Target: confTxFinality},
+		}, txID, true)
 	}
-	btc.addTxToHistory(&asset.WalletTransaction{
-		Type:   asset.RedeemBond,
-		ID:     txID.String(),
-		Amount: amt,
-		Fees:   fees,
-		BondInfo: &asset.BondTxInfo{
-			LockTime: uint64(lockTime),
-			BondID:   pkhPush,
-		},
-		Timestamp: uint64(time.Now().Unix()),
-		Confirms:  &asset.Confirms{Target: confTxFinality},
-	}, txID, true)
 
-	return NewOutput(txHash, 0, uint64(msgTx.TxOut[0].Value)), nil
+	return NewOutput(txID, 0, uint64(msgTx.TxOut[0].Value)), nil
+}
+
+// isTxAlreadyKnownErr checks if a broadcast error indicates that the
+// transaction is already in the mempool or a block.
+func isTxAlreadyKnownErr(err error) bool {
+	msg := strings.ToLower(err.Error())
+	for _, s := range []string{"already have", "already in", "already-in", "already known",
+		"already-known", "already exists", "txn-already"} {
+		if strings.Contains(msg, s) {
+			return true
+		}
+	}
+	return false
+}
+
+// BondRefundConfirmations returns the number of confirmations of a bond refund
+// transaction broadcast by this wallet. This is part of the
+// asset.BondRefundChecker interface.
+func (btc *baseWallet) BondRefundConfirmations(_ context.Context, refundCoinID []byte) (uint32, error) {
+	txHash, _, err := decodeCoinID(refundCoinID)
+	if err != nil {
+		return 0, err
+	}
+	tx, err := btc.node.GetWalletTransaction(txHash)
+	if err != nil {
+		return 0, err // asset.CoinNotFoundError if unknown
+	}
+	return uint32(tx.Confirmations), nil
+}
+
+// BondSpent reports whether the bond output has been spent. This is part of
+// the asset.BondRefundChecker interface.
+func (btc *baseWallet) BondSpent(_ context.Context, ver uint16, bondCoinID, bondScript []byte) (bool, error) {
+	if ver != 0 {
+		return false, errors.New("only version 0 bonds supported")
+	}
+	lockTime, _, err := dexbtc.ExtractBondDetailsV0(0, bondScript)
+	if err != nil {
+		return false, err
+	}
+	txHash, vout, err := decodeCoinID(bondCoinID)
+	if err != nil {
+		return false, err
+	}
+	_, pkScript, err := btc.bondOutputType(txHash, vout, bondScript)
+	if err != nil {
+		return false, err
+	}
+	startTime := time.Unix(int64(lockTime), 0).Add(-maxBondLifetime)
+	utxo, _, err := btc.node.GetTxOut(txHash, vout, pkScript, startTime)
+	if err != nil {
+		return false, err
+	}
+	return utxo == nil, nil
 }
 
 func (btc *baseWallet) decodeV0BondTx(msgTx *wire.MsgTx, txHash *chainhash.Hash, coinID []byte) (*asset.BondDetails, error) {
@@ -6673,11 +6976,21 @@ func (btc *baseWallet) decodeV0BondTx(msgTx *wire.MsgTx, txHash *chainhash.Hash,
 	if err != nil {
 		return nil, fmt.Errorf("failed to build bond output redeem script: %w", err)
 	}
-	pkScript, err := btc.scriptHashScript(bondScript)
+	// Accept either a P2SH or (for segwit wallets) a P2WSH bond output. Bonds
+	// created before a wallet was switched to segwit are P2SH.
+	p2shScript, err := btc.bondPkScript(bondScript, false)
 	if err != nil {
 		return nil, fmt.Errorf("error constructing p2sh script: %v", err)
 	}
-	if !bytes.Equal(pkScript, msgTx.TxOut[0].PkScript) {
+	match := bytes.Equal(p2shScript, msgTx.TxOut[0].PkScript)
+	if !match && btc.segwit {
+		p2wshScript, err := btc.bondPkScript(bondScript, true)
+		if err != nil {
+			return nil, fmt.Errorf("error constructing p2wsh script: %v", err)
+		}
+		match = bytes.Equal(p2wshScript, msgTx.TxOut[0].PkScript)
+	}
+	if !match {
 		return nil, fmt.Errorf("bond script does not match commit data for %s: %x != %x",
 			txHash, bondScript, msgTx.TxOut[0].PkScript)
 	}

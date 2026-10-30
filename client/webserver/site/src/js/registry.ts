@@ -64,6 +64,7 @@ export interface Exchange {
   viewOnly: boolean
   bondAssets: Record<string, BondAsset>
   candleDurs: string[]
+  candlePageSize: number // 0 if the server has no candle history support
   maxScore: number
   penaltyThreshold: number
   disabled: boolean
@@ -795,6 +796,10 @@ export interface BasicMarketMakingConfig {
   sellPlacements: OrderPlacement[]
   buyPlacements: OrderPlacement[]
   driftTolerance: number
+  inventorySkew?: number
+  inventorySkewCap?: number
+  doNotCross?: boolean
+  bidAnchorFadeHours?: number
 }
 
 export interface ArbMarketMakingPlacement {
@@ -984,6 +989,7 @@ export interface BotProblems {
   oracleFiatMismatch: boolean
   cexOrderbookUnsynced: boolean
   causesSelfMatch: boolean
+  insufficientBalance?: Record<number, boolean>
   unknownError: string
 }
 

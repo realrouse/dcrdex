@@ -3,7 +3,7 @@
 # Manual Bison Wallet UI simnet for LBC on DCRDEX
 #
 # Starts the same infrastructure as run-full-simnet-test.sh:
-#   DCR harness + LBC harness + dcrdex (dcr_lbc market)
+#   DCR harness + LBC harness + dcrdex (lbc_dcr market)
 # then builds and launches one or two bisonw instances with short simnet
 # swap lock times so YOU can open the web UI in a browser and place
 # orders / complete swaps yourself while chains mine in the background.
@@ -205,7 +205,7 @@ except Exception:
 }
 
 start_dcrdex() {
-  log "Building and starting dcrdex server (simnet DCR/LBC)..."
+  log "Building and starting dcrdex server (simnet LBC/DCR)..."
   local app="${HOME}/dextest/dcrdex"
   mkdir -p "${app}"
   sudo -u postgres psql -c "DROP DATABASE IF EXISTS dcrdex_simnet_ui;" \
@@ -247,8 +247,8 @@ EOF
 {
   "markets": [
     {
-      "base": "DCR_simnet",
-      "quote": "LBC_simnet",
+      "base": "LBC_simnet",
+      "quote": "DCR_simnet",
       "lotSize": 100000000,
       "rateStep": 1000000,
       "epochDuration": 20000,
@@ -297,8 +297,8 @@ EOF
   echo $! > "${app}/dcrdex.pid"
 
   for i in $(seq 1 60); do
-    if grep -q 'Market dcr_lbc now accepting orders' "${app}/dcrdex-stdout.log" 2>/dev/null; then
-      log "dcrdex: market dcr_lbc accepting orders"
+    if grep -q 'Market lbc_dcr now accepting orders' "${app}/dcrdex-stdout.log" 2>/dev/null; then
+      log "dcrdex: market lbc_dcr accepting orders"
       return 0
     fi
     if ! kill -0 "$(cat "${app}/dcrdex.pid")" 2>/dev/null; then
@@ -308,7 +308,7 @@ EOF
     sleep 1
   done
   tail -50 "${app}/dcrdex-stdout.log" || true
-  die "timeout waiting for dcr_lbc market"
+  die "timeout waiting for lbc_dcr market"
 }
 
 start_background_miners() {
@@ -568,7 +568,7 @@ DEX server
 ----------
   Host:   127.0.0.1:17273
   Cert:   ${HOME}/dextest/dcrdex/rpc.cert
-  Market: dcr_lbc (lot size 1 DCR)
+  Market: lbc_dcr (lot size 1 LBC, priced in DCR)
   Admin:  https://127.0.0.1:16542  (user u / pass adminpass)
 
 Connect wallets in the UI (simnet / external RPC)
@@ -597,7 +597,7 @@ Suggested flow
   2. Create/connect DCR + LBC wallets as above for each instance.
   3. Add DEX server 127.0.0.1:17273 — paste/select rpc.cert above.
   4. Post bond with DCR (server bondAmt is 0.5 DCR, 1 conf).
-  5. Place orders on market dcr_lbc (e.g. sell 2 DCR @ 1.5 LBC/DCR).
+  5. Place orders on market lbc_dcr (e.g. buy/sell LBC priced in DCR).
   6. Background miners confirm swaps; or run:
        ${CTL_DIR}/mine-dcr 1
        ${CTL_DIR}/mine-lbc 1
@@ -712,7 +712,7 @@ print_banner() {
 ║                                                                      ║
 ║  DEX:     127.0.0.1:17273                                            ║
 ║  Cert:    ${HOME}/dextest/dcrdex/rpc.cert
-║  Market:  dcr_lbc                                                    ║
+║  Market:  lbc_dcr                                                    ║
 ║                                                                      ║
 ║  Miners are running in the background (unless NO_MINER=1).           ║
 ║  Manual mine:  ${CTL_DIR}/mine-dcr 1

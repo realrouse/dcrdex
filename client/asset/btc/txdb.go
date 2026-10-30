@@ -114,15 +114,27 @@ func NewBadgerTxDB(filePath string, log dex.Logger) *BadgerTxDB {
 }
 
 func (db *BadgerTxDB) Connect(ctx context.Context) (*sync.WaitGroup, error) {
-	// If memory use is a concern, could try
-	//   .WithValueLogLoadingMode(options.FileIO) // default options.MemoryMap
-	//   .WithMaxTableSize(sz int64); // bytes, default 6MB
-	//   .WithValueLogFileSize(sz int64), bytes, default 1 GB, must be 1MB <= sz <= 1GB
+	// lexi.DefaultOptions keeps the memory mapped files small. See there.
 	v4Path, needs, err := lexi.NeedsV1toV4Update(db.filePath)
 	if err != nil {
 		return nil, err
 	}
-	opts := badger.DefaultOptions(v4Path).WithLogger(&badgerLoggerWrapper{db.log})
+	if !needs {
+		// A zero-filled or truncated table file makes badger panic in a
+		// background goroutine, crashing the app. The tx history is only a
+		// cache, so move a corrupt DB aside and start a fresh one instead.
+		movedTo, err := lexi.MoveAsideIfCorrupt(v4Path, db.log)
+		if err != nil {
+			return nil, err
+		}
+		if movedTo != "" {
+			db.log.Warnf("The transaction history DB is a cache. Wallet keys and funds are not stored in "+
+				"it, and the history will be rebuilt from the wallet's transactions. The old DB was kept "+
+				"at %s. Do not delete it if a private (MuSig2) swap was in progress, since it holds "+
+				"that swap's secret nonces.", movedTo)
+		}
+	}
+	opts := lexi.DefaultOptions(v4Path).WithLogger(&badgerLoggerWrapper{db.log})
 	if needs {
 		db.DB, err = lexi.BadgerV1Update(db.filePath, v4Path, db.log, opts)
 		if err != nil {

@@ -4,10 +4,14 @@ import BasePage from './basepage'
 import OrderBook from './orderbook'
 import { ReputationMeter, tradingLimits, strongTier } from './account'
 import {
-  CandleChart,
+  PriceChart,
+  PriceChartSettings,
+  chartTFs,
+  normalizeCandles,
+  aggregateCandles,
+  fillGaps,
   DepthChart,
   DepthLine,
-  CandleReporters,
   MouseReport,
   VolumeReport,
   DepthMarker,
@@ -86,6 +90,25 @@ const epochMatchSummaryRoute = 'epoch_match_summary'
 const anHour = 60 * 60 * 1000 // milliseconds
 const maxUserOrdersShown = 10
 
+interface UserOrdersView {
+  showCancelled: boolean
+  showFilled: boolean
+  side: 'both' | 'buy' | 'sell'
+}
+
+/* loadUserOrdersView reads the persisted Your Orders view options. Recently
+ * cancelled orders are hidden by default. */
+function loadUserOrdersView (): UserOrdersView {
+  const v: UserOrdersView = { showCancelled: false, showFilled: true, side: 'both' }
+  const stored = State.fetchLocal(State.userOrdersViewLK)
+  if (stored && typeof stored === 'object') {
+    if (typeof stored.showCancelled === 'boolean') v.showCancelled = stored.showCancelled
+    if (typeof stored.showFilled === 'boolean') v.showFilled = stored.showFilled
+    if (stored.side === 'buy' || stored.side === 'sell') v.side = stored.side
+  }
+  return v
+}
+
 const buyBtnClass = 'buygreen-bg'
 const sellBtnClass = 'sellred-bg'
 
@@ -129,10 +152,41 @@ interface CurrentMarket {
   buyBalance: number
   maxBuys: Record<number, MaxOrderEstimate>
   candleCaches: Record<string, CandlesPayload>
+  candleHist: Record<string, CandleHistory>
   baseCfg: Asset
   quoteCfg: Asset
   rateConversionFactor: number
   bookLoaded: boolean
+}
+
+// CandleHistory is older candles paged from the server for one bin size.
+interface CandleHistory {
+  cs: Candle[]
+  done: boolean
+  busy: boolean
+  pages: number
+  next: number // earliest time for the next request, unix ms
+}
+
+const DAY = 864e5
+
+// Chart range presets and the timeframe each one picks.
+const chartRanges: Record<string, [number, string]> = {
+  '1D': [DAY, '15m'],
+  '5D': [5 * DAY, '1h'],
+  '1M': [30 * DAY, '4h'],
+  '3M': [90 * DAY, '1D'],
+  'All': [0, '1D']
+}
+
+const chartDefaults: PriceChartSettings = {
+  type: 'candle',
+  scale: 'lin',
+  auto: true,
+  vol: true,
+  ma: { 7: true, 25: true, 99: false },
+  ema: false,
+  skip: true // no gaps by default
 }
 
 interface LoadTracker {
@@ -174,8 +228,10 @@ export default class MarketsPage extends BasePage {
   hovers: HTMLElement[]
   ogTitle: string
   depthChart: DepthChart
-  candleChart: CandleChart
-  candleDur: string
+  candleChart: PriceChart
+  candleDur: string // server bin size the chart timeframe is built from
+  chartTF: string
+  chartRange: string | null // range preset waiting for enough history
   balanceWgt: BalanceWidget
   mm: RunningMarketMakerDisplay
   marketList: MarketList
@@ -194,6 +250,15 @@ export default class MarketsPage extends BasePage {
   loadingAnimations: { candles?: Wave, depth?: Wave }
   mmRunning: boolean | undefined
   forms: Forms
+  obView: 'both' | 'buy' | 'sell'
+  obCumulative: boolean
+  obGroupConv: number
+  obShowUsd: boolean
+  uoView: UserOrdersView
+  uoSelected: Set<string>
+  uoHidden: number
+  batchCancelOrders: Order[]
+  batchCancelRunning: boolean
   constructor (main: HTMLElement, pageParams: MarketsPageParams) {
     super()
 
@@ -203,7 +268,16 @@ export default class MarketsPage extends BasePage {
     // There may be multiple pending updates to the max order. This makes sure
     // that the screen is updated with the most recent one.
     this.maxOrderUpdateCounter = 0
+    this.obView = 'both'
+    this.obCumulative = !!State.fetchLocal(State.obCumulativeLK)
+    this.obGroupConv = 0
+    this.obShowUsd = !!State.fetchLocal(State.obShowUsdLK)
     this.metaOrders = {}
+    this.uoView = loadUserOrdersView()
+    this.uoSelected = new Set()
+    this.uoHidden = 0
+    this.batchCancelOrders = []
+    this.batchCancelRunning = false
     this.recentMatches = []
     this.preorderCache = {}
     this.depthLines = {
@@ -232,10 +306,7 @@ export default class MarketsPage extends BasePage {
     }
     this.depthChart = new DepthChart(page.depthChart, depthReporters, State.fetchLocal(State.depthZoomLK))
 
-    const candleReporters: CandleReporters = {
-      mouse: c => { this.reportMouseCandle(c) }
-    }
-    this.candleChart = new CandleChart(page.candlesChart, candleReporters)
+    this.setupPriceChart()
 
     const success = () => { /* do nothing */ }
     // Do not call cleanTemplates before creating the AccelerateOrderForm
@@ -243,8 +314,11 @@ export default class MarketsPage extends BasePage {
 
     this.approveTokenForm = new TokenApprovalForm(page.approveTokenForm)
 
-    // Set user's last known candle duration.
-    this.candleDur = State.fetchLocal(State.lastCandleDurationLK) || oneHrBinKey
+    // Set user's last known chart timeframe.
+    const oldDur = State.fetchLocal(State.lastCandleDurationLK)
+    this.chartTF = State.fetchLocal(State.chartTFLK) || (oldDur === '24h' ? '1D' : oldDur) || '1h'
+    if (!chartTFs[this.chartTF]) this.chartTF = '1h'
+    this.candleDur = chartTFs[this.chartTF].src
 
     // Setup the register to trade button.
     // TODO: Use dexsettings page?
@@ -297,9 +371,11 @@ export default class MarketsPage extends BasePage {
     setOptionTemplates(page)
 
     Doc.cleanTemplates(
-      page.orderRowTmpl, page.durBttnTemplate, page.booleanOptTmpl, page.rangeOptTmpl,
+      page.orderRowTmpl, page.pcTFTmpl, page.booleanOptTmpl, page.rangeOptTmpl,
       page.orderOptTmpl, page.userOrderTmpl, page.recentMatchesTemplate
     )
+    this.bindOrderBookModes()
+    this.bindOrderBookViewControls()
 
     // Buttons to show token approval form
     bind(page.approveBaseBttn, 'click', () => { this.showTokenApprovalForm(true) })
@@ -473,6 +549,7 @@ export default class MarketsPage extends BasePage {
       this.activeMarkerRate = null
       this.setDepthMarkers()
     })
+    this.bindUserOrdersControls()
 
     const stats0 = page.marketStats
     const stats1 = stats0.cloneNode(true) as PageElement
@@ -525,6 +602,7 @@ export default class MarketsPage extends BasePage {
       balance: (note: BalanceNote) => { this.handleBalanceNote(note) },
       bondpost: (note: BondNote) => { this.handleBondUpdate(note) },
       spots: (note: SpotPriceNote) => { this.handlePriceUpdate(note) },
+      fiatrateupdate: () => { this.handleFiatRateUpdate() },
       walletstate: (note: WalletStateNote) => { this.handleWalletState(note) },
       reputation: () => { this.updateReputation() },
       feepayment: () => { this.updateReputation() },
@@ -661,12 +739,26 @@ export default class MarketsPage extends BasePage {
         s.tmpl.volume.textContent = Doc.formatFourSigFigs(mkt.spot.vol24 / cFactor)
         s.tmpl.volUnit.textContent = unit
       }
-      setPriceAndChange(s.tmpl, xc, mkt)
+      setPriceAndChange(s.tmpl, xc, mkt, true)
     }
 
-    this.page.obPrice.textContent = Doc.formatFourSigFigs(mkt.spot.rate / this.market.rateConversionFactor)
+    const convSpot = mkt.spot.rate / this.market.rateConversionFactor
+    const convBook = this.midGapConventional() || 0
+    const convPrice = convSpot > 0 ? convSpot : convBook
+    const usd = pairToUsd(convPrice, mkt.quoteid)
+    const quoteUnit = this.market.quoteUnitInfo.conventional.unit
+    const pairTxt = convPrice > 0 ? `${Doc.formatFourSigFigs(convPrice)} ${quoteUnit}` : '-'
+    const usdTxt = usd ? formatUsd(usd) : ''
+    if (this.obShowUsd && usdTxt) {
+      this.page.obPrice.textContent = usdTxt
+      if (this.page.obPriceAlt) this.page.obPriceAlt.textContent = pairTxt
+    } else {
+      this.page.obPrice.textContent = pairTxt
+      if (this.page.obPriceAlt) this.page.obPriceAlt.textContent = usdTxt
+    }
     this.page.obPrice.classList.remove('sellcolor', 'buycolor')
     this.page.obPrice.classList.add(mkt.spot.change24 >= 0 ? 'buycolor' : 'sellcolor')
+    this.setOrderBookColumnUnits()
     Doc.setVis(mkt.spot.change24 >= 0, this.page.obUp)
     Doc.setVis(mkt.spot.change24 < 0, this.page.obDown)
   }
@@ -682,6 +774,194 @@ export default class MarketsPage extends BasePage {
       s.tmpl.baseSymbol.appendChild(Doc.symbolize(ba, true))
       s.tmpl.quoteSymbol.appendChild(Doc.symbolize(qa, true))
     }
+    this.setOrderBookColumnUnits()
+  }
+
+  /* setOrderBookColumnUnits labels MEXC-style Price / Amount / Total headers. */
+  setOrderBookColumnUnits () {
+    const page = this.page
+    if (!page.obHeadPriceUnit || !this.market) return
+    const base = this.market.baseUnitInfo.conventional.unit
+    const quote = this.market.quoteUnitInfo.conventional.unit
+    page.obHeadPriceUnit.textContent = this.obShowUsd ? '($)' : `(${quote})`
+    page.obHeadAmtUnit.textContent = `(${base})`
+    page.obHeadTotalUnit.textContent = this.obShowUsd ? '($)' : `(${quote})`
+  }
+
+  bindOrderBookModes () {
+    const page = this.page
+    if (!page.obModeBoth) return
+    bind(page.obModeBoth, 'click', () => { this.setOrderBookView('both') })
+    bind(page.obModeBuy, 'click', () => { this.setOrderBookView('buy') })
+    bind(page.obModeSell, 'click', () => { this.setOrderBookView('sell') })
+    this.setOrderBookView(this.obView)
+  }
+
+  setOrderBookView (view: 'both' | 'buy' | 'sell') {
+    this.obView = view
+    const book = this.page.orderBook
+    if (book) {
+      book.classList.remove('ob-view-both', 'ob-view-buy', 'ob-view-sell')
+      book.classList.add(`ob-view-${view}`)
+    }
+    const modes: Array<['both' | 'buy' | 'sell', PageElement]> = [
+      ['both', this.page.obModeBoth],
+      ['buy', this.page.obModeBuy],
+      ['sell', this.page.obModeSell]
+    ]
+    for (const [v, el] of modes) {
+      if (el) el.classList.toggle('active', v === view)
+    }
+  }
+
+  bindOrderBookViewControls () {
+    const page = this.page
+    if (page.obShowUsd) {
+      const usdBox = page.obShowUsd as HTMLInputElement
+      usdBox.checked = this.obShowUsd
+      bind(usdBox, 'change', () => {
+        this.obShowUsd = !!usdBox.checked
+        State.storeLocal(State.obShowUsdLK, this.obShowUsd)
+        this.setCurrMarketPrice()
+        this.updateTitle()
+        this.loadTable()
+      })
+    }
+    if (page.obCumulative) {
+      const cumBox = page.obCumulative as HTMLInputElement
+      cumBox.checked = this.obCumulative
+      bind(cumBox, 'change', () => {
+        this.obCumulative = !!cumBox.checked
+        State.storeLocal(State.obCumulativeLK, this.obCumulative)
+        this.applyOrderBookDisplay()
+      })
+    }
+    if (page.obGroupSelect) {
+      bind(page.obGroupSelect, 'change', () => {
+        const v = parseFloat((page.obGroupSelect as unknown as HTMLSelectElement).value)
+        if (!Number.isFinite(v) || v <= 0) return
+        this.obGroupConv = v
+        State.storeLocal(State.obGroupConvLK, v)
+        this.loadTable()
+      })
+    }
+  }
+
+  nativeGroupConv (): number {
+    if (!this.market) return 0
+    const step = this.market.cfg.ratestep / this.market.rateConversionFactor
+    return step > 0 && Number.isFinite(step) ? step : 0
+  }
+
+  obGroupingActive (): boolean {
+    const native = this.nativeGroupConv()
+    return this.obGroupConv > native * 1.0000001
+  }
+
+  obGroupDecimals (): number | null {
+    if (!this.obGroupingActive()) return null
+    const d = Math.round(-Math.log10(this.obGroupConv))
+    return Number.isFinite(d) && d > 0 ? d : 0
+  }
+
+  syncOrderBookGroupSelect () {
+    const sel = this.page.obGroupSelect as unknown as HTMLSelectElement
+    if (!sel || !this.market) return
+    const native = this.nativeGroupConv()
+    const opts: number[] = []
+    // Powers of 10 from native step up to 0.01 (same ladder as MEXC / staging).
+    let v = 1
+    while (v > native * 1.001 && v > 1e-12) v /= 10
+    while (v < native * 0.999 && v < 0.01) v *= 10
+    while (v <= 0.01 + 1e-15) {
+      opts.push(v)
+      v *= 10
+    }
+    if (!opts.length && native > 0) opts.push(native)
+    const stored = Number(State.fetchLocal(State.obGroupConvLK))
+    let current = native
+    if (Number.isFinite(stored) && stored > 0) {
+      const match = opts.find(o => Math.abs(o - stored) / stored < 1e-6)
+      if (match) current = match
+    }
+    this.obGroupConv = current
+    Doc.empty(sel)
+    for (const g of opts) {
+      const opt = document.createElement('option')
+      const decimals = Math.max(0, Math.round(-Math.log10(g)))
+      opt.value = String(g)
+      opt.textContent = g.toFixed(decimals)
+      if (Math.abs(g - current) / current < 1e-6) opt.selected = true
+      sel.appendChild(opt)
+    }
+  }
+
+  groupedMsgRate (order: MiniOrder): number {
+    if (!order.msgRate || !this.obGroupingActive()) return order.msgRate
+    const g = this.obGroupConv
+    const conv = order.msgRate / this.market.rateConversionFactor
+    const grouped = order.sell
+      ? Math.ceil(conv / g - 1e-12) * g
+      : Math.floor(conv / g + 1e-12) * g
+    return Math.round(grouped * this.market.rateConversionFactor)
+  }
+
+  viewOrderBins (orders: MiniOrder[], sell: boolean): MiniOrder[][] {
+    if (!orders || !orders.length) return []
+    if (!this.obGroupingActive()) return this.binOrdersByRateAndEpoch(orders)
+    const markets: MiniOrder[] = []
+    const buckets = new Map<number, MiniOrder[]>()
+    for (const o of orders) {
+      if (!o.msgRate) {
+        markets.push(o)
+        continue
+      }
+      const key = this.groupedMsgRate(o)
+      const bin = buckets.get(key)
+      if (bin) bin.push(o)
+      else buckets.set(key, [o])
+    }
+    const keys = Array.from(buckets.keys()).sort((a, b) => sell ? a - b : b - a)
+    const bins: MiniOrder[][] = []
+    if (markets.length) bins.push(markets)
+    for (const k of keys) bins.push(buckets.get(k) as MiniOrder[])
+    return bins
+  }
+
+  /* applyOrderBookDisplay sets Amount/Total and depth bars, optionally cumulative from the spread. */
+  applyOrderBookDisplay () {
+    const cum = this.obCumulative
+    for (const side of [this.page.sellRows, this.page.buyRows]) {
+      if (!side) continue
+      const rows = Array.from(side.children) as OrderRow[]
+      let runQty = 0
+      let runQuote = 0
+      let maxQty = 0
+      const levels: Array<{ row: OrderRow, qty: number, quote: number }> = []
+      for (const row of rows) {
+        if (!row.manager) continue
+        const qty = row.manager.baseQty()
+        const quote = row.manager.quoteQty()
+        if (cum) {
+          runQty += qty
+          runQuote += quote
+          levels.push({ row, qty: runQty, quote: runQuote })
+          maxQty = Math.max(maxQty, runQty)
+        } else {
+          levels.push({ row, qty, quote })
+          maxQty = Math.max(maxQty, qty)
+        }
+      }
+      if (maxQty <= 0) maxQty = 1
+      for (const { row, qty, quote } of levels) {
+        row.manager.setView(qty, quote, qty / maxQty)
+      }
+    }
+  }
+
+  /* refreshOrderBookDepth sizes MEXC depth bars relative to the largest level. */
+  refreshOrderBookDepth () {
+    this.applyOrderBookDisplay()
   }
 
   /* setHighLow calculates the high and low rates over the last 24 hours. */
@@ -1086,15 +1366,17 @@ export default class MarketsPage extends BasePage {
 
   setCandleDurBttns () {
     const { page, market } = this
-    Doc.empty(page.durBttnBox)
-    for (const dur of market.dex.candleDurs) {
-      const bttn = page.durBttnTemplate.cloneNode(true)
-      bttn.textContent = dur
-      Doc.bind(bttn, 'click', () => this.candleDurationSelected(dur))
-      page.durBttnBox.appendChild(bttn)
+    Doc.empty(page.pcTFs)
+    for (const tf in chartTFs) {
+      if (!market.dex.candleDurs.includes(chartTFs[tf].src)) continue
+      const bttn = page.pcTFTmpl.cloneNode(true) as PageElement
+      bttn.textContent = bttn.dataset.pcTf = tf
+      Doc.bind(bttn, 'click', () => this.chartTFSelected(tf))
+      page.pcTFs.appendChild(bttn)
     }
+    this.chartRange = null
 
-    // load candlesticks here since we are resetting page.durBttnBox above.
+    // load candlesticks here since we are resetting page.pcTFs above.
     this.loadCandles()
   }
 
@@ -1177,6 +1459,7 @@ export default class MarketsPage extends BasePage {
       maxBuys: {},
       maxSellRequested: false,
       candleCaches: {},
+      candleHist: {},
       baseCfg,
       quoteCfg,
       rateConversionFactor,
@@ -1186,6 +1469,7 @@ export default class MarketsPage extends BasePage {
     }
 
     this.market = mkt
+    this.syncOrderBookGroupSelect()
     this.mm.setMarket(host, baseID, quoteID)
     this.mmRunning = undefined
     page.lotSize.textContent = Doc.formatCoinValue(mkt.cfg.lotsize, mkt.baseUnitInfo)
@@ -1303,20 +1587,6 @@ export default class MarketsPage extends BasePage {
     State.storeLocal(State.depthZoomLK, zoom)
   }
 
-  reportMouseCandle (candle: Candle | null) {
-    const page = this.page
-    if (!candle) {
-      Doc.hide(page.candlesLegend)
-      return
-    }
-    Doc.show(page.candlesLegend)
-    page.candleStart.textContent = Doc.formatCoinValue(candle.startRate / this.market.rateConversionFactor)
-    page.candleEnd.textContent = Doc.formatCoinValue(candle.endRate / this.market.rateConversionFactor)
-    page.candleHigh.textContent = Doc.formatCoinValue(candle.highRate / this.market.rateConversionFactor)
-    page.candleLow.textContent = Doc.formatCoinValue(candle.lowRate / this.market.rateConversionFactor)
-    page.candleVol.textContent = Doc.formatCoinValue(candle.matchVolume, this.market.baseUnitInfo)
-  }
-
   /*
    * parseOrder pulls the order information from the form fields. Data is not
    * validated in any way.
@@ -1366,6 +1636,7 @@ export default class MarketsPage extends BasePage {
       }]
     }
     this.drawChartLines()
+    this.updateOrderUsd()
     if (!show || !adjusted || !order.qty) {
       page.orderPreview.textContent = ''
       Doc.hide(page.orderPreviewFiat)
@@ -1377,7 +1648,10 @@ export default class MarketsPage extends BasePage {
     const total = Doc.formatCoinValue(quoteQty, this.market.quoteUnitInfo)
 
     page.orderPreview.textContent = intl.prep(intl.ID_ORDER_PREVIEW, { total, asset: unit })
-    this.showFiatValue(this.market.quote.id, quoteQty, page.orderPreviewFiatValue)
+    const quoteUSD = this.usdRate(this.market.quote.id)
+    const totalUSD = quoteQty / this.market.quoteUnitInfo.conventional.conversionFactor * quoteUSD
+    page.orderPreviewFiatValue.textContent = formatOrderUsd(totalUSD)
+    Doc.setVis(Boolean(page.orderPreviewFiatValue.textContent), page.orderPreviewFiat)
     if (this.isSell()) this.preSell()
     else this.preBuy()
   }
@@ -1592,6 +1866,7 @@ export default class MarketsPage extends BasePage {
     this.depthChart.set(this.book, cfg.lotsize, cfg.ratestep, baseUnitInfo, quoteUnitInfo)
     this.recentMatches = data.book.recentMatches ?? []
     this.refreshRecentMatchesTable()
+    this.setCurrMarketPrice()
   }
 
   /*
@@ -1689,6 +1964,15 @@ export default class MarketsPage extends BasePage {
       else if (!aActive && bActive) return 1
       return b.ord.submitTime - a.ord.submitTime
     })
+    // Apply the "Your Orders" view options (hide recently cancelled orders,
+    // filled orders, or one side) before trimming to the display limit.
+    let hidden = 0
+    sortedOrders = sortedOrders.filter((mord: MetaOrder) => {
+      if (this.userOrderVisible(mord.ord)) return true
+      hidden++
+      return false
+    })
+    this.uoHidden = hidden
     const n = this.maxUserOrderCount()
     if (sortedOrders.length > n) { sortedOrders = sortedOrders.slice(0, n) }
 
@@ -1699,6 +1983,7 @@ export default class MarketsPage extends BasePage {
     Doc.setVis(!sortedOrders?.length, page.userNoOrders)
 
     let unreadyOrders = false
+    let anySelectable = false
     for (const mord of sortedOrders) {
       const div = page.userOrderTmpl.cloneNode(true) as HTMLElement
       page.userOrders.appendChild(div)
@@ -1749,6 +2034,23 @@ export default class MarketsPage extends BasePage {
       const showAccelerate = (e: Event) => {
         e.stopPropagation()
         this.showAccelerate(ord)
+      }
+
+      // Every row gets a checkbox slot so the columns line up; the box is
+      // only visible for orders that can be cancelled.
+      Doc.show(header.selector)
+      header.selector.style.visibility = 'hidden'
+      if (orderID && this.orderSelectable(ord)) {
+        const cb = header.selector as HTMLInputElement
+        cb.style.visibility = ''
+        anySelectable = true
+        cb.checked = this.uoSelected.has(orderID)
+        bind(cb, 'click', (e: Event) => { e.stopPropagation() })
+        bind(cb, 'change', () => {
+          if (cb.checked) this.uoSelected.add(orderID)
+          else this.uoSelected.delete(orderID)
+          this.updateUserOrdersControls()
+        })
       }
 
       if (!orderID) {
@@ -1833,8 +2135,232 @@ export default class MarketsPage extends BasePage {
       })
       app().bindTooltips(div)
     }
+    if (!anySelectable) for (const { header } of Object.values(metaOrders)) Doc.hide(header.selector)
     Doc.setVis(unreadyOrders, page.unreadyOrdersMsg)
+    this.updateUserOrdersControls()
     this.setDepthMarkers()
+  }
+
+  /* bindUserOrdersControls sets up the Your Orders view options and batch
+   * cancel controls. */
+  bindUserOrdersControls () {
+    const page = this.page
+    const v = this.uoView
+    const cancelled = page.uoShowCancelled as HTMLInputElement
+    const filled = page.uoShowFilled as HTMLInputElement
+    const side = page.uoSideFilter as unknown as HTMLSelectElement
+    cancelled.checked = v.showCancelled
+    filled.checked = v.showFilled
+    side.value = v.side
+    const viewChanged = () => {
+      v.showCancelled = cancelled.checked
+      v.showFilled = filled.checked
+      v.side = side.value === 'buy' || side.value === 'sell' ? side.value : 'both'
+      State.storeLocal(State.userOrdersViewLK, v)
+      this.updateViewBttn()
+      // Reload from the DB so newly un-hidden inactive orders appear.
+      if (this.market) this.loadUserOrders()
+    }
+    bind(cancelled, 'change', viewChanged)
+    bind(filled, 'change', viewChanged)
+    bind(side, 'change', viewChanged)
+    bind(page.uoViewBttn, 'click', () => {
+      Doc.setVis(!Doc.isDisplayed(page.uoViewMenu), page.uoViewMenu)
+    })
+    bind(page.uoHiddenCount, 'click', () => { Doc.show(page.uoViewMenu) })
+    this.updateViewBttn()
+
+    for (const bttn of [page.uoCancelSelected, page.uoCancelAll, page.uoCancelBuys, page.uoCancelSells]) {
+      bttn.dataset.label = (bttn.textContent || '').trim()
+    }
+    bind(page.uoSelectAll, 'change', () => {
+      const selectable = this.selectableShownOrders()
+      const allSelected = selectable.length > 0 && selectable.every((o: Order) => this.uoSelected.has(o.id))
+      if (allSelected) this.uoSelected.clear()
+      else for (const o of selectable) this.uoSelected.add(o.id)
+      for (const mord of Object.values(this.metaOrders)) {
+        if (mord.header?.selector) (mord.header.selector as HTMLInputElement).checked = this.uoSelected.has(mord.ord.id)
+      }
+      this.updateUserOrdersControls()
+    })
+    bind(page.uoCancelSelected, 'click', () => { this.showBatchCancel('selected') })
+    bind(page.uoCancelAll, 'click', () => { this.showBatchCancel('all') })
+    bind(page.uoCancelBuys, 'click', () => { this.showBatchCancel('buy') })
+    bind(page.uoCancelSells, 'click', () => { this.showBatchCancel('sell') })
+    bind(page.batchCancelSubmit, 'click', () => { this.submitBatchCancel() })
+    bind(page.batchCancelDone, 'click', () => { this.forms.close() })
+  }
+
+  /* updateViewBttn highlights the view options gear when anything is hidden
+   * beyond the defaults. */
+  updateViewBttn () {
+    const v = this.uoView
+    const custom = v.showCancelled || !v.showFilled || v.side !== 'both'
+    this.page.uoViewBttn.classList.toggle('uo-custom', custom)
+  }
+
+  /* userOrderVisible applies the Your Orders view options to an order. */
+  userOrderVisible (ord: Order): boolean {
+    const { showCancelled, showFilled, side } = this.uoView
+    if (side === 'buy' && ord.sell) return false
+    if (side === 'sell' && !ord.sell) return false
+    if (ord.status < OrderUtil.StatusExecuted || OrderUtil.hasActiveMatches(ord)) return true
+    if (ord.status === OrderUtil.StatusCanceled || ord.status === OrderUtil.StatusRevoked) return showCancelled
+    // Executed with nothing filled, e.g. an immediate order that did not match.
+    if (OrderUtil.filled(ord) === 0) return showCancelled
+    return showFilled
+  }
+
+  /* orderSelectable is true for a booked/epoch standing limit order that does
+   * not already have a cancel in flight. */
+  orderSelectable (ord: Order): boolean {
+    return Boolean(ord.id) && OrderUtil.isCancellable(ord) && !ord.cancelling
+  }
+
+  /* cancellableOrders lists every cancellable order on the current market,
+   * whether or not it is shown by the view options. */
+  cancellableOrders (): Order[] {
+    if (!this.market?.dex) return []
+    const { dex: { host }, cfg: { name: mktID } } = this.market
+    let orders: Order[] = []
+    try { orders = app().orders(host, mktID) } catch { return [] }
+    return orders.filter((o: Order) => this.orderSelectable(o))
+  }
+
+  /* selectableShownOrders lists the cancellable orders that have a row. */
+  selectableShownOrders (): Order[] {
+    return Object.values(this.metaOrders).map((m: MetaOrder) => m.ord).filter((o: Order) => this.orderSelectable(o))
+  }
+
+  /* updateUserOrdersControls refreshes the batch cancel bar. */
+  updateUserOrdersControls () {
+    const page = this.page
+    const all = this.cancellableOrders()
+    const ids = new Set(all.map((o: Order) => o.id))
+    for (const oid of Array.from(this.uoSelected)) if (!ids.has(oid)) this.uoSelected.delete(oid)
+    const buys = all.filter((o: Order) => !o.sell).length
+    const sells = all.length - buys
+    const nSel = this.uoSelected.size
+    const label = (bttn: PageElement, n: number) => {
+      bttn.textContent = `${bttn.dataset.label} (${n})`;
+      (bttn as HTMLButtonElement).disabled = n === 0 || this.batchCancelRunning
+    }
+    label(page.uoCancelSelected, nSel)
+    label(page.uoCancelAll, all.length)
+    label(page.uoCancelBuys, buys)
+    label(page.uoCancelSells, sells)
+    const selectable = this.selectableShownOrders()
+    const nShownSel = selectable.filter((o: Order) => this.uoSelected.has(o.id)).length
+    const selAll = page.uoSelectAll as HTMLInputElement
+    selAll.checked = selectable.length > 0 && nShownSel === selectable.length
+    selAll.indeterminate = nShownSel > 0 && nShownSel < selectable.length
+    selAll.disabled = selectable.length === 0
+    page.uoSelCount.textContent = nSel ? `${nSel} selected` : ''
+    const hiddenTxt = this.uoHidden ? `${this.uoHidden} hidden by view options` : ''
+    page.uoHiddenCount.textContent = hiddenTxt
+    page.uoHiddenCount.classList.toggle('pointer', this.uoHidden > 0)
+    page.uoNoOrdersHidden.textContent = hiddenTxt
+    Doc.setVis(this.uoHidden > 0, page.uoNoOrdersHidden)
+    Doc.setVis(all.length > 0 || this.batchCancelRunning || Doc.isDisplayed(page.uoBatchStatus), page.uoBatch)
+  }
+
+  /* showBatchCancel opens the confirmation form for a batch cancel. */
+  showBatchCancel (kind: 'selected' | 'all' | 'buy' | 'sell') {
+    if (this.batchCancelRunning) return
+    const page = this.page
+    let orders = this.cancellableOrders()
+    if (kind === 'selected') orders = orders.filter((o: Order) => this.uoSelected.has(o.id))
+    else if (kind === 'buy') orders = orders.filter((o: Order) => !o.sell)
+    else if (kind === 'sell') orders = orders.filter((o: Order) => o.sell)
+    if (!orders.length) return
+    this.batchCancelOrders = orders
+    const n = orders.length
+    const sideTxt = kind === 'buy' ? 'buy ' : kind === 'sell' ? 'sell ' : kind === 'selected' ? 'selected ' : ''
+    const mkt = `${this.market.baseUnitInfo.conventional.unit}-${this.market.quoteUnitInfo.conventional.unit}`
+    page.batchCancelMsg.textContent = `Cancel ${kind === 'all' ? 'all ' : ''}${n} ${sideTxt}order${n === 1 ? '' : 's'} on ${mkt} at ${this.market.dex.host}?`
+    page.batchCancelProgress.textContent = ''
+    page.batchCancelErrs.textContent = ''
+    Doc.hide(page.batchCancelProgress, page.batchCancelErrs, page.batchCancelDone)
+    Doc.show(page.batchCancelSubmit)
+    this.forms.show(page.batchCancelForm)
+  }
+
+  /*
+   * submitBatchCancel cancels the confirmed orders through /api/cancel, two at
+   * a time so the server isn't flooded, and reports the results.
+   */
+  async submitBatchCancel () {
+    if (this.batchCancelRunning) return
+    const page = this.page
+    const orders = this.batchCancelOrders.slice()
+    if (!orders.length) return
+    this.batchCancelRunning = true
+    Doc.hide(page.batchCancelSubmit, page.batchCancelErrs)
+    Doc.show(page.batchCancelProgress, page.uoBatchStatus)
+    page.uoBatchStatus.className = 'grey'
+    this.updateUserOrdersControls()
+    const total = orders.length
+    let ok = 0
+    let skipped = 0
+    const errs: string[] = []
+    const report = (done: boolean) => {
+      const failed = errs.length
+      let txt = `${done ? 'Cancel submitted for' : 'Submitting cancels…'} ${ok} of ${total}`
+      if (skipped) txt += `, ${skipped} already closed`
+      if (failed) txt += `, ${failed} failed`
+      page.batchCancelProgress.textContent = txt
+      page.uoBatchStatus.textContent = txt
+    }
+    report(false)
+    const queue = orders.slice()
+    const worker = async () => {
+      for (;;) {
+        const ord = queue.shift()
+        if (!ord) return
+        const current = app().order(ord.id) || ord
+        if (!this.orderSelectable(current)) {
+          skipped++
+          this.uoSelected.delete(ord.id)
+          report(false)
+          continue
+        }
+        let res: any
+        try {
+          res = await postJSON('/api/cancel', { orderID: ord.id })
+        } catch (e) {
+          res = { msg: String(e) }
+        }
+        if (app().checkResponse(res)) {
+          ok++
+          current.cancelling = true
+          ord.cancelling = true
+          this.uoSelected.delete(ord.id)
+          const mord = this.metaOrders[ord.id]
+          if (mord) {
+            mord.ord.cancelling = true
+            Doc.hide(mord.details.cancelBttn)
+            mord.header.selector.style.visibility = 'hidden'
+          }
+        } else {
+          errs.push(`${ord.sell ? 'sell' : 'buy'} ${ord.id.slice(0, 8)}…: ${res?.msg || 'unknown error'}`)
+        }
+        report(false)
+        this.updateUserOrdersControls()
+      }
+    }
+    await Promise.all([worker(), worker()])
+    this.batchCancelRunning = false
+    report(true)
+    page.uoBatchStatus.className = errs.length ? 'text-danger' : 'grey'
+    if (errs.length) {
+      const shown = errs.slice(0, 10)
+      if (errs.length > shown.length) shown.push(`…and ${errs.length - shown.length} more`)
+      page.batchCancelErrs.textContent = shown.join('\n')
+      page.batchCancelErrs.style.whiteSpace = 'pre-line'
+      Doc.show(page.batchCancelErrs)
+    }
+    Doc.show(page.batchCancelDone)
+    this.updateUserOrdersControls()
   }
 
   /*
@@ -1894,9 +2420,15 @@ export default class MarketsPage extends BasePage {
     // gets first price value from buy or from sell, so we can show it on
     // title.
     const midGapValue = this.midGapConventional()
-    const { baseUnitInfo: { conventional: { unit: bUnit } }, quoteUnitInfo: { conventional: { unit: qUnit } } } = this.market
-    if (!midGapValue) document.title = `${bUnit}${qUnit} | ${this.ogTitle}`
-    else document.title = `${Doc.formatCoinValue(midGapValue)} | ${bUnit}${qUnit} | ${this.ogTitle}` // more than 6 numbers it gets too big for the title.
+    const { baseUnitInfo: { conventional: { unit: bUnit } }, quoteUnitInfo: { conventional: { unit: qUnit } }, quoteCfg } = this.market
+    if (!midGapValue) {
+      document.title = `${bUnit}-${qUnit} | ${this.ogTitle}`
+      return
+    }
+    const usd = pairToUsd(midGapValue, quoteCfg.id)
+    const pairTxt = Doc.formatFourSigFigs(midGapValue)
+    if (usd) document.title = `${formatUsd(usd)} | ${bUnit}-${qUnit} | ${this.ogTitle}`
+    else document.title = `${pairTxt} | ${bUnit}-${qUnit} | ${this.ogTitle}`
   }
 
   /* handleBookRoute is the handler for the 'book' notification, which is sent
@@ -1912,6 +2444,7 @@ export default class MarketsPage extends BasePage {
     this.market.bookLoaded = true
     this.updateTitle()
     this.setMarketBuyOrderEstimate()
+    this.updateOrderUsd()
   }
 
   /* handleBookOrderRoute is the handler for 'book_order' notifications. */
@@ -1923,6 +2456,7 @@ export default class MarketsPage extends BasePage {
     this.addTableOrder(order)
     this.updateTitle()
     this.depthChart.draw()
+    this.updateOrderUsd()
   }
 
   /* handleUnbookOrderRoute is the handler for 'unbook_order' notifications. */
@@ -1934,6 +2468,7 @@ export default class MarketsPage extends BasePage {
     this.removeTableOrder(order)
     this.updateTitle()
     this.depthChart.draw()
+    this.updateOrderUsd()
   }
 
   /*
@@ -1973,7 +2508,8 @@ export default class MarketsPage extends BasePage {
     if (this.candleDur !== dur) return
     if (this.loadingAnimations.candles) this.loadingAnimations.candles.stop()
     this.candleChart.canvas.classList.remove('invisible')
-    this.candleChart.setCandles(data.payload, this.market.cfg, this.market.baseUnitInfo, this.market.quoteUnitInfo)
+    this.showCandles()
+    this.applyChartRange()
   }
 
   handleEpochMatchSummary (data: BookUpdate) {
@@ -1995,7 +2531,7 @@ export default class MarketsPage extends BasePage {
       else candles.push(candle)
     }
     if (this.candleDur !== dur) return
-    this.candleChart.draw()
+    this.showCandles(true)
   }
 
   /*
@@ -2232,11 +2768,58 @@ export default class MarketsPage extends BasePage {
   // showFiatValue displays the fiat equivalent for an order quantity.
   showFiatValue (assetID: number, qty: number, display: PageElement) {
     if (display) {
-      const rate = app().fiatRatesMap[assetID]
+      const rate = this.usdRate(assetID)
       display.textContent = Doc.formatFiatConversion(qty, rate, app().unitInfo(assetID))
       if (rate) Doc.show(display.parentElement as Element)
       else Doc.hide(display.parentElement as Element)
     }
+  }
+
+  /*
+   * usdRate returns the USD rate for an asset of the current market. If the
+   * fiat rate sources have no rate for one side of the market, the rate is
+   * derived from the other side's USD rate and the market's current mid-gap
+   * (or the server's spot) rate. Returns 0 if no rate can be determined.
+   */
+  usdRate (assetID: number): number {
+    const direct = app().fiatRatesMap[assetID]
+    if (direct > 0 && Number.isFinite(direct)) return direct
+    const mkt = this.market
+    if (!mkt || !mkt.base || !mkt.quote) return 0
+    const { base: { id: baseID }, quote: { id: quoteID } } = mkt
+    if (assetID !== baseID && assetID !== quoteID) return 0
+    let conventionalRate = mkt.bookLoaded ? this.midGapConventional() || 0 : 0
+    if (!conventionalRate && mkt.cfg.spot && mkt.cfg.spot.rate) conventionalRate = mkt.cfg.spot.rate / mkt.rateConversionFactor
+    if (!conventionalRate) return 0
+    if (assetID === baseID) {
+      const quoteUSD = app().fiatRatesMap[quoteID]
+      return quoteUSD > 0 ? conventionalRate * quoteUSD : 0
+    }
+    const baseUSD = app().fiatRatesMap[baseID]
+    return baseUSD > 0 ? baseUSD / conventionalRate : 0
+  }
+
+  /*
+   * updateOrderUsd updates the USD equivalents shown under the order form's
+   * price, quantity and market buy inputs. A USD line is hidden when there is
+   * no input or no USD rate is available.
+   */
+  updateOrderUsd () {
+    const { page, market: mkt } = this
+    if (!mkt || !mkt.base || !mkt.quote) return
+    const [baseUSD, quoteUSD] = [this.usdRate(mkt.base.id), this.usdRate(mkt.quote.id)]
+    const setUsd = (box: PageElement, valueEl: PageElement, inputValue: string | undefined, usdRate: number) => {
+      const v = parseFloat(inputValue || '')
+      const txt = v > 0 ? formatOrderUsd(v * usdRate) : ''
+      valueEl.textContent = txt
+      Doc.setVis(Boolean(txt), box)
+    }
+    setUsd(page.rateFiat, page.rateFiatValue, page.rateField.value, quoteUSD)
+    // Use the lot-adjusted quantity, which is what will actually be ordered.
+    const lots = parseInt(page.lotField.value || '0')
+    const qty = lots > 0 ? String(lots * mkt.cfg.lotsize / mkt.baseUnitInfo.conventional.conversionFactor) : ''
+    setUsd(page.qtyFiat, page.qtyFiatValue, qty, baseUSD)
+    setUsd(page.mktBuyFiat, page.mktBuyFiatValue, page.mktBuyField.value, quoteUSD)
   }
 
   /* showVerifyForm displays form to verify an order */
@@ -2557,6 +3140,17 @@ export default class MarketsPage extends BasePage {
   }
 
   /*
+   * handleFiatRateUpdate is the handler for the 'fiatrateupdate' notification.
+   * It redraws the USD lines in the stats display and the market list.
+   */
+  handleFiatRateUpdate () {
+    if (!this.market) return
+    this.setCurrMarketPrice()
+    this.marketList.refreshPrices()
+    this.updateOrderUsd()
+  }
+
+  /*
    * handlePriceUpdate is the handler for the 'spots' notification.
    */
   handlePriceUpdate (note: SpotPriceNote) {
@@ -2683,6 +3277,21 @@ export default class MarketsPage extends BasePage {
     if (app().canAccelerateOrder(ord)) Doc.show(mord.details.accelerateBttn)
     else Doc.hide(mord.details.accelerateBttn)
     this.updateMetaOrder(mord)
+    if (!this.orderSelectable(ord)) {
+      mord.header.selector.style.visibility = 'hidden'
+      this.uoSelected.delete(ord.id)
+    }
+    // Hide orders that just became cancelled/revoked etc. if the view
+    // options say so, instead of leaving them lingering in the list.
+    if (!this.userOrderVisible(ord)) {
+      mord.div.remove()
+      delete this.metaOrders[ord.id]
+      this.uoHidden++
+      const any = Object.keys(this.metaOrders).length > 0
+      Doc.setVis(any, this.page.userOrders)
+      Doc.setVis(!any, this.page.userNoOrders)
+    }
+    this.updateUserOrdersControls()
     // Only reset markers if there is a change, since the chart is redrawn.
     if (
       (oldStatus === OrderUtil.StatusEpoch && ord.status === OrderUtil.StatusBooked) ||
@@ -2912,6 +3521,7 @@ export default class MarketsPage extends BasePage {
     const page = this.page
     const qty = convertToAtoms(page.mktBuyField.value || '', this.market.quoteUnitInfo.conventional.conversionFactor)
     const gap = this.midGap()
+    this.updateOrderUsd()
     if (qty > 0) {
       const quoteWallet = app().assets[this.market.quote.id].wallet
       this.setOrderBttnEnabled(qty <= quoteWallet.balance.available, intl.prep(intl.ID_ORDER_BUTTON_BUY_BALANCE_ERROR))
@@ -2971,8 +3581,10 @@ export default class MarketsPage extends BasePage {
 
   /* loadTable reloads the table from the current order book information. */
   loadTable () {
+    if (!this.book) return
     this.loadTableSide(true)
     this.loadTableSide(false)
+    this.refreshOrderBookDepth()
   }
 
   /* binOrdersByRateAndEpoch takes a list of sorted orders and returns the
@@ -3009,12 +3621,17 @@ export default class MarketsPage extends BasePage {
     const tbody = sell ? this.page.sellRows : this.page.buyRows
     Doc.empty(tbody)
     if (!bookSide || !bookSide.length) return
-    const orderBins = this.binOrdersByRateAndEpoch(bookSide)
+    const orderBins = this.viewOrderBins(bookSide, sell)
     orderBins.forEach(bin => { tbody.appendChild(this.orderTableRow(bin)) })
   }
 
   /* addTableOrder adds a single order to the appropriate table. */
   addTableOrder (order: MiniOrder) {
+    if (order.rate === 0 && order.qtyAtomic === 0) return // cancel
+    if (this.obGroupingActive()) {
+      this.loadTable()
+      return
+    }
     const tbody = order.sell ? this.page.sellRows : this.page.buyRows
     let row = tbody.firstChild as OrderRow
     // Handle market order differently.
@@ -3027,6 +3644,7 @@ export default class MarketsPage extends BasePage {
         row = this.orderTableRow([order])
         tbody.insertBefore(row, tbody.firstChild)
       }
+      this.refreshOrderBookDepth()
       return
     }
     // Must be a limit order. Sort by rate. Skip the market order row.
@@ -3034,24 +3652,32 @@ export default class MarketsPage extends BasePage {
     while (row) {
       if (row.manager.compare(order) === 0) {
         row.manager.insertOrder(order)
+        this.refreshOrderBookDepth()
         return
       } else if (row.manager.compare(order) > 0) {
         const tr = this.orderTableRow([order])
         tbody.insertBefore(tr, row)
+        this.refreshOrderBookDepth()
         return
       }
       row = row.nextSibling as OrderRow
     }
     const tr = this.orderTableRow([order])
     tbody.appendChild(tr)
+    this.refreshOrderBookDepth()
   }
 
   /* removeTableOrder removes a single order from its table. */
   removeTableOrder (order: MiniOrder) {
+    if (this.obGroupingActive()) {
+      this.loadTable()
+      return
+    }
     const token = order.token
     for (const tbody of [this.page.sellRows, this.page.buyRows]) {
       for (const tr of (Array.from(tbody.children) as OrderRow[])) {
         if (tr.manager.removeOrder(token)) {
+          this.refreshOrderBookDepth()
           return
         }
       }
@@ -3060,9 +3686,14 @@ export default class MarketsPage extends BasePage {
 
   /* updateTableOrder looks for the order in the table and updates the qty */
   updateTableOrder (u: RemainderUpdate) {
+    if (this.obGroupingActive()) {
+      this.loadTable()
+      return
+    }
     for (const tbody of [this.page.sellRows, this.page.buyRows]) {
       for (const tr of (Array.from(tbody.children) as OrderRow[])) {
         if (tr.manager.updateOrderQty(u)) {
+          this.refreshOrderBookDepth()
           return
         }
       }
@@ -3075,6 +3706,7 @@ export default class MarketsPage extends BasePage {
   clearOrderTableEpochs () {
     this.clearOrderTableEpochSide(this.page.sellRows)
     this.clearOrderTableEpochSide(this.page.buyRows)
+    this.refreshOrderBookDepth()
   }
 
   /*
@@ -3088,13 +3720,15 @@ export default class MarketsPage extends BasePage {
   }
 
   /*
-   * orderTableRow creates a new <tr> element to insert into an order table.
+   * orderTableRow creates a new row element to insert into an order table.
      Takes a bin of orders with the same rate, and displays the total quantity.
    */
   orderTableRow (orderBin: MiniOrder[]): OrderRow {
     const tr = this.page.orderRowTmpl.cloneNode(true) as OrderRow
     const { baseUnitInfo, quoteUnitInfo, rateConversionFactor, cfg: { ratestep: rateStep } } = this.market
-    const manager = new OrderTableRowManager(tr, orderBin, baseUnitInfo, quoteUnitInfo, rateStep)
+    const displayRate = this.groupedMsgRate(orderBin[0])
+    const quoteFiat = app().fiatRatesMap[this.market.quoteCfg.id] || 0
+    const manager = new OrderTableRowManager(tr, orderBin, baseUnitInfo, quoteUnitInfo, rateStep, displayRate, this.obGroupDecimals(), this.obShowUsd, quoteFiat)
     tr.manager = manager
     bind(tr, 'click', () => {
       this.reportDepthClick(tr.manager.getRate() / rateConversionFactor)
@@ -3141,33 +3775,179 @@ export default class MarketsPage extends BasePage {
     this.depthChart.draw()
   }
 
-  /* candleDurationSelected sets the candleDur and loads the candles. It will
-  default to the oneHrBinKey if dur is not valid. */
-  candleDurationSelected (dur: string) {
-    if (!this.market?.dex?.candleDurs.includes(dur)) dur = oneHrBinKey
-    this.candleDur = dur
+  /* chartTFSelected sets the chart timeframe and loads its candles. */
+  chartTFSelected (tf: string, keepRange?: boolean) {
+    const durs = this.market?.dex?.candleDurs || []
+    if (!chartTFs[tf] || !durs.includes(chartTFs[tf].src)) tf = durs.includes(oneHrBinKey) ? '1h' : '5m'
+    this.chartTF = tf
+    this.candleDur = chartTFs[tf].src
+    State.storeLocal(State.chartTFLK, tf)
+    if (!keepRange) this.setChartRange(null)
     this.loadCandles()
-    State.storeLocal(State.lastCandleDurationLK, dur)
   }
 
   /*
-   * loadCandles loads the candles for the current candleDur. If a cache is already
-   * active, the cache will be used without a loadcandles request.
+   * loadCandles loads the candles for the current timeframe. If a cache is
+   * already active, the cache will be used without a loadcandles request.
    */
   loadCandles () {
-    for (const bttn of Doc.kids(this.page.durBttnBox)) {
-      if (bttn.textContent === this.candleDur) bttn.classList.add('selected')
-      else bttn.classList.remove('selected')
-    }
-    const { candleCaches, cfg, baseUnitInfo, quoteUnitInfo } = this.market
-    const cache = candleCaches[this.candleDur]
-    if (cache) {
-      // this.depthChart.hide()
-      // this.candleChart.show()
-      this.candleChart.setCandles(cache, cfg, baseUnitInfo, quoteUnitInfo)
+    this.syncChartBttns()
+    if (this.market.candleCaches[this.candleDur]) {
+      this.showCandles()
       return
     }
     this.requestCandles()
+  }
+
+  /*
+   * showCandles builds the current timeframe from the live candles and any
+   * older history, and passes it to the chart. keepView keeps the user's view.
+   */
+  showCandles (keepView?: boolean) {
+    const mkt = this.market
+    const cache = mkt.candleCaches[this.candleDur]
+    if (!cache) return
+    const hist = mkt.candleHist[this.candleDur]
+    const raw = hist ? hist.cs.concat(cache.candles || []) : cache.candles || []
+    const { ms } = chartTFs[this.chartTF]
+    let cs = normalizeCandles(raw, cache.ms)
+    if (ms !== cache.ms) cs = aggregateCandles(cs, ms)
+    cs = fillGaps(cs, ms)
+    this.candleChart.setData(cs, ms, mkt.rateConversionFactor, mkt.baseUnitInfo.conventional.conversionFactor, keepView)
+  }
+
+  /*
+   * loadOlderCandles fetches the page of candles before the oldest one loaded,
+   * when the chart is scrolled or zoomed out to it. Only one request runs at a
+   * time, with a pause between requests, so the server's rate limits are
+   * respected. Paging stops at the first empty page, or right away for servers
+   * without candle history.
+   */
+  async loadOlderCandles () {
+    const mkt = this.market
+    const dur = this.candleDur
+    const cache = mkt?.candleCaches[dur]
+    if (!mkt.dex.candlePageSize || !cache?.candles?.length) return
+    const h = mkt.candleHist[dur] = mkt.candleHist[dur] || { cs: [], done: false, busy: false, pages: 0, next: 0 }
+    if (h.done || h.busy || Date.now() < h.next) return
+    const oldest = h.cs[0] || cache.candles[0]
+    h.busy = true
+    let res
+    try {
+      res = await postJSON('/api/candlehistory', {
+        host: mkt.dex.host,
+        baseID: mkt.base.id,
+        quoteID: mkt.quote.id,
+        binSize: dur,
+        before: oldest.startStamp + 1,
+        n: mkt.dex.candlePageSize
+      })
+    } finally {
+      h.busy = false
+    }
+    if (!res?.ok) {
+      h.next = Date.now() + 15000
+      return
+    }
+    h.next = Date.now() + 1000
+    const got = res.supported && res.candles?.length > 0
+    if (got) h.cs = res.candles.concat(h.cs)
+    // Stop at the start of the market, or after 100 pages per bin size.
+    if (!got || ++h.pages >= 100) h.done = true
+    if (this.market !== mkt || this.candleDur !== dur) return
+    if (got) this.showCandles(true)
+    this.applyChartRange()
+  }
+
+  /* setChartRange selects a range preset, or none. */
+  setChartRange (k: string | null) {
+    this.chartRange = k
+    Doc.hide(this.page.pcNote)
+    for (const b of Doc.kids(this.page.pcRanges)) b.classList.toggle('on', b.dataset.pcRange === k)
+  }
+
+  /*
+   * applyChartRange shows the selected range preset. If the timeframe doesn't
+   * have enough history yet, it tries again as older candles arrive.
+   */
+  applyChartRange () {
+    const k = this.chartRange
+    const mkt = this.market
+    const cache = mkt.candleCaches[this.candleDur]
+    if (!k || !cache?.candles?.length) return
+    const [dur] = chartRanges[k]
+    const h = mkt.candleHist[this.candleDur]
+    const more = mkt.dex.candlePageSize > 0 && !h?.done
+    const chart = this.candleChart
+    const ok = dur ? chart.setRange(dur) : (chart.fit(), !more)
+    if (ok || !more) this.chartRange = null
+    if (ok) return
+    if (more) {
+      this.loadOlderCandles()
+      return
+    }
+    const v = chart.all
+    const days = String(Math.max(1, Math.round((v[v.length - 1].t - v[0].t) / DAY)))
+    this.page.pcNote.textContent = intl.prep(intl.ID_CHART_HISTORY_LIMIT, { days, tf: this.chartTF })
+    Doc.show(this.page.pcNote)
+  }
+
+  /* setupPriceChart creates the price chart and binds its toolbar. */
+  setupPriceChart () {
+    const page = this.page
+    const saved = State.fetchLocal(State.priceChartLK) || {}
+    const chart = this.candleChart = new PriceChart(page.candlesChart, { ...chartDefaults, ...saved, auto: true })
+    chart.onChange = (s: PriceChartSettings) => {
+      const { type, scale, vol, ma, ema, skip } = s
+      State.storeLocal(State.priceChartLK, { type, scale, vol, ma, ema, skip })
+      this.syncChartBttns()
+    }
+    chart.onOlder = () => { this.loadOlderCandles() }
+    const all = (sel: string, f: (b: PageElement) => void) => {
+      page.pcPanel.querySelectorAll(sel).forEach((b: Element) => {
+        Doc.bind(b as PageElement, 'click', () => f(b as PageElement))
+      })
+    }
+    all('[data-pc-type]', b => chart.set({ type: b.dataset.pcType }))
+    all('[data-pc-ma]', b => chart.set({ ma: { ...chart.s.ma, [b.dataset.pcMa as string]: !chart.s.ma[b.dataset.pcMa as string] } }))
+    all('[data-pc-scale]', b => chart.set({ scale: chart.s.scale === b.dataset.pcScale ? 'lin' : b.dataset.pcScale }))
+    all('[data-pc-range]', b => {
+      const k = b.dataset.pcRange as string
+      this.chartTFSelected(chartRanges[k][1], true)
+      this.setChartRange(k)
+      this.applyChartRange()
+    })
+    Doc.bind(page.pcEMA, 'click', () => chart.set({ ema: !chart.s.ema }))
+    Doc.bind(page.pcVol, 'click', () => chart.set({ vol: !chart.s.vol }))
+    Doc.bind(page.pcAuto, 'click', () => chart.set({ auto: true }))
+    Doc.bind(page.pcSkip, 'click', () => chart.set({ skip: !chart.s.skip }))
+    Doc.bind(page.pcFit, 'click', () => chart.fit())
+    Doc.bind(page.pcReset, 'click', () => chart.reset())
+    Doc.bind(page.pcFS, 'click', () => {
+      const p = page.pcPanel
+      if (document.fullscreenElement) document.exitFullscreen()
+      else if (p.requestFullscreen) p.requestFullscreen().catch(() => p.classList.toggle('pc-fs'))
+      else p.classList.toggle('pc-fs')
+    })
+    const tz = -new Date().getTimezoneOffset() / 60
+    page.pcTZ.textContent = 'UTC' + (tz >= 0 ? '+' : '') + tz
+    this.syncChartBttns()
+  }
+
+  /* syncChartBttns highlights the active chart toolbar buttons. */
+  syncChartBttns () {
+    const { page, candleChart: { s } } = this
+    const on = (b: Element, v: boolean) => b.classList.toggle('on', v)
+    page.pcPanel.querySelectorAll('[data-pc-tf]').forEach((b: Element) => on(b, (b as PageElement).dataset.pcTf === this.chartTF))
+    page.pcPanel.querySelectorAll('[data-pc-type]').forEach((b: Element) => on(b, (b as PageElement).dataset.pcType === s.type))
+    page.pcPanel.querySelectorAll('[data-pc-ma]').forEach((b: Element) => on(b, !!s.ma[(b as PageElement).dataset.pcMa as string]))
+    page.pcPanel.querySelectorAll('[data-pc-scale]').forEach((b: Element) => on(b, (b as PageElement).dataset.pcScale === s.scale))
+    on(page.pcEMA, s.ema)
+    on(page.pcVol, s.vol)
+    on(page.pcAuto, s.auto)
+    on(page.pcSkip, s.skip)
+    // No gaps only applies to 1D and longer timeframes.
+    page.pcSkip.classList.toggle('pc-na', chartTFs[this.chartTF]?.ms < 864e5)
   }
 
   /* requestCandles sends the loadcandles request. It accepts an optional candle
@@ -3232,6 +4012,16 @@ class MarketList {
       const xc = app().exchanges[row.mkt.xc.host]
       const mkt = xc.markets[row.mkt.name]
       setPriceAndChange(row.tmpl, xc, mkt)
+    }
+  }
+
+  /* refreshPrices redraws the pair and USD prices of every row, e.g. after a
+   * fiat rate update. */
+  refreshPrices () {
+    for (const row of this.markets) {
+      const xc = app().exchanges[row.mkt.xc.host]
+      const mkt = xc?.markets?.[row.mkt.name]
+      if (mkt) setPriceAndChange(row.tmpl, xc, mkt)
     }
   }
 
@@ -3567,38 +4357,117 @@ class OrderTableRowManager {
   msgRate: number
   epoch: boolean
   baseUnitInfo: UnitInfo
+  quoteUnitInfo: UnitInfo
+  priceDecimals: number | null
+  usdMode: boolean
+  quoteFiat: number
 
-  constructor (tableRow: HTMLElement, orderBin: MiniOrder[], baseUnitInfo: UnitInfo, quoteUnitInfo: UnitInfo, rateStep: number) {
+  constructor (tableRow: HTMLElement, orderBin: MiniOrder[], baseUnitInfo: UnitInfo, quoteUnitInfo: UnitInfo, rateStep: number, displayMsgRate?: number, priceDecimals?: number | null, usdMode?: boolean, quoteFiat?: number) {
     this.tableRow = tableRow
     const page = this.page = Doc.parseTemplate(tableRow)
     this.orderBin = orderBin
     this.sell = orderBin[0].sell
-    this.msgRate = orderBin[0].msgRate
-    this.epoch = !!orderBin[0].epoch
+    this.msgRate = displayMsgRate ?? orderBin[0].msgRate
+    this.epoch = orderBin.some(o => !!o.epoch)
     this.baseUnitInfo = baseUnitInfo
-    const rateText = Doc.formatRateFullPrecision(this.msgRate, baseUnitInfo, quoteUnitInfo, rateStep)
+    this.quoteUnitInfo = quoteUnitInfo
+    this.priceDecimals = priceDecimals ?? null
+    this.usdMode = !!usdMode
+    this.quoteFiat = quoteFiat || 0
+    tableRow.classList.add(this.sell ? 'ob-ask' : 'ob-bid')
+    if (page.bar) page.bar.classList.add(this.sell ? 'ob-ask-bar' : 'ob-bid-bar')
+    let rateText = Doc.formatRateFullPrecision(this.msgRate, baseUnitInfo, quoteUnitInfo, rateStep)
+    const conv = this.msgRate * baseUnitInfo.conventional.conversionFactor / quoteUnitInfo.conventional.conversionFactor / OrderUtil.RateEncodingFactor
+    if (this.priceDecimals !== null && this.msgRate !== 0) {
+      rateText = conv.toLocaleString(undefined, {
+        minimumFractionDigits: this.priceDecimals,
+        maximumFractionDigits: this.priceDecimals
+      })
+    }
+    const usdTxt = this.msgRate !== 0 && this.quoteFiat ? formatUsd(conv * this.quoteFiat) : ''
     Doc.setVis(this.isEpoch(), this.page.epoch)
     if (this.msgRate === 0) {
-      page.rate.innerText = 'market'
+      page.rate.textContent = 'market'
     } else {
       const cssClass = this.isSell() ? 'sellcolor' : 'buycolor'
-      page.rate.innerText = rateText
+      if (this.usdMode && usdTxt) {
+        page.rate.textContent = usdTxt
+        page.rate.title = `${usdTxt}  ${rateText}`
+        if (page.rateAlt) page.rateAlt.textContent = rateText
+      } else {
+        page.rate.textContent = rateText
+        page.rate.title = usdTxt ? `${rateText}  ${usdTxt}` : rateText
+        if (page.rateAlt) page.rateAlt.textContent = usdTxt
+      }
       page.rate.classList.add(cssClass)
     }
     this.updateQtyNumOrdersEl()
+  }
+
+  baseQty (): number {
+    return this.orderBin.reduce((total, curr) => total + curr.qtyAtomic, 0)
+  }
+
+  quoteQty (): number {
+    return this.orderBin.reduce((total, curr) => {
+      if (!curr.msgRate) return total
+      return total + Math.round(curr.qtyAtomic * curr.msgRate / OrderUtil.RateEncodingFactor)
+    }, 0)
+  }
+
+  setDepthBar (maxQty: number) {
+    const bar = this.page.bar
+    if (!bar) return
+    const ratio = maxQty > 0 ? Math.min(1, this.baseQty() / maxQty) : 0
+    bar.style.transform = `scaleX(${ratio})`
+  }
+
+  setView (qty: number, quote: number, barRatio: number) {
+    const { page } = this
+    page.qty.textContent = Doc.formatCoinValue(qty, this.baseUnitInfo)
+    const totalEl = page.total || this.tableRow.querySelector('[data-tmpl="total"]') as PageElement
+    if (totalEl) {
+      if (this.msgRate === 0) {
+        totalEl.textContent = '—'
+      } else if (this.usdMode && this.quoteFiat) {
+        const conv = quote / this.quoteUnitInfo.conventional.conversionFactor
+        totalEl.textContent = formatUsd(conv * this.quoteFiat) || Doc.formatCoinValue(quote, this.quoteUnitInfo)
+      } else {
+        totalEl.textContent = Doc.formatCoinValue(quote, this.quoteUnitInfo)
+      }
+    }
+    if (page.bar) page.bar.style.transform = `scaleX(${Math.min(1, Math.max(0, barRatio))})`
   }
 
   // updateQtyNumOrdersEl populates the quantity element in the row, and also
   // displays the number of orders if there is more than one order in the order
   // bin.
   updateQtyNumOrdersEl () {
-    const { page, orderBin } = this
-    const qty = orderBin.reduce((total, curr) => total + curr.qtyAtomic, 0)
-    const numOrders = orderBin.length
-    page.qty.innerText = Doc.formatFullPrecision(qty, this.baseUnitInfo)
+    const { page } = this
+    const qty = this.baseQty()
+    const numOrders = this.orderBin.length
+    page.qty.textContent = Doc.formatCoinValue(qty, this.baseUnitInfo)
+    // Quote notional at this price level (MEXC "Total" column). Bind via the
+    // inner [data-tmpl=total] span — a td[data-tmpl] was not reliably found.
+    const totalEl = page.total || this.tableRow.querySelector('[data-tmpl="total"]') as PageElement
+    if (totalEl) {
+      if (this.msgRate === 0) {
+        totalEl.textContent = '—'
+      } else {
+        const quoteAtomic = Math.round(qty * this.msgRate / OrderUtil.RateEncodingFactor)
+        if (!Number.isFinite(quoteAtomic)) {
+          totalEl.textContent = '—'
+        } else if (this.usdMode && this.quoteFiat) {
+          const conv = quoteAtomic / this.quoteUnitInfo.conventional.conversionFactor
+          totalEl.textContent = formatUsd(conv * this.quoteFiat) || Doc.formatCoinValue(quoteAtomic, this.quoteUnitInfo)
+        } else {
+          totalEl.textContent = Doc.formatCoinValue(quoteAtomic, this.quoteUnitInfo)
+        }
+      }
+    }
     if (numOrders > 1) {
       page.numOrders.removeAttribute('hidden')
-      page.numOrders.innerText = String(numOrders)
+      page.numOrders.textContent = String(numOrders)
       page.numOrders.title = `quantity is comprised of ${numOrders} orders`
     } else {
       page.numOrders.setAttribute('hidden', 'true')
@@ -3713,9 +4582,43 @@ function sortedMarkets (): ExchangeMarket[] {
   return mkts
 }
 
-function setPriceAndChange (tmpl: Record<string, PageElement>, xc: Exchange, mkt: Market) {
+function formatUsd (n: number): string {
+  if (!n || !Number.isFinite(n)) return ''
+  return '$' + Doc.formatFourSigFigs(n)
+}
+
+/*
+ * formatOrderUsd formats a USD order value: cents for values of a dollar or
+ * more, four significant figures below that. Returns '' if there is no value.
+ */
+function formatOrderUsd (n: number): string {
+  if (!n || !Number.isFinite(n)) return ''
+  return '$' + (n >= 1 ? Doc.formatFiatValue(n) : Doc.formatFourSigFigs(n))
+}
+
+function pairToUsd (convPairRate: number, quoteID: number): number {
+  const qf = app().fiatRatesMap[quoteID]
+  if (!qf || !convPairRate) return 0
+  return convPairRate * qf
+}
+
+function setPriceAndChange (tmpl: Record<string, PageElement>, xc: Exchange, mkt: Market, withQuoteUnit?: boolean) {
   if (!mkt.spot) return
-  tmpl.price.textContent = Doc.formatFourSigFigs(app().conventionalRate(mkt.baseid, mkt.quoteid, mkt.spot.rate, xc))
+  const pair = app().conventionalRate(mkt.baseid, mkt.quoteid, mkt.spot.rate, xc)
+  const pairTxt = Doc.formatFourSigFigs(pair)
+  // The pair price is the primary value. The USD equivalent, when a fiat rate
+  // is available, is shown as a smaller secondary line under it.
+  if (withQuoteUnit && pairTxt) {
+    const qUnit = app().unitInfo(mkt.quoteid, xc).conventional.unit
+    tmpl.price.textContent = `${pairTxt} ${qUnit}`
+  } else {
+    tmpl.price.textContent = pairTxt || '-'
+  }
+  if (tmpl.priceUsd) {
+    const usdTxt = formatUsd(pairToUsd(pair, mkt.quoteid))
+    tmpl.priceUsd.textContent = usdTxt
+    Doc.setVis(Boolean(usdTxt), tmpl.priceUsd)
+  }
   const sign = mkt.spot.change24 > 0 ? '+' : ''
   tmpl.change.classList.remove('buycolor', 'sellcolor')
   tmpl.change.classList.add(mkt.spot.change24 >= 0 ? 'buycolor' : 'sellcolor')

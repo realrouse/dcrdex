@@ -463,6 +463,11 @@ type unifiedExchangeAdaptor struct {
 
 	autoRebalanceCfgV atomic.Value // *AutoRebalanceConfig
 
+	// shortfallLog is the last logged out-of-funds state per side
+	// (index 0 buy, 1 sell). It keeps the out-of-funds Info log to one
+	// line per state change instead of one per epoch.
+	shortfallLog [2]atomic.Value // string
+
 	subscriptionIDMtx sync.RWMutex
 	subscriptionID    *int
 
@@ -998,7 +1003,7 @@ func withinTolerance(rate, target uint64, driftTolerance float64) bool {
 	return rate >= lowerBound && rate <= upperBound
 }
 
-func (u *unifiedExchangeAdaptor) placeMultiTrade(placements []*dexOrderInfo, sell bool) []*core.MultiTradeResult {
+func (u *unifiedExchangeAdaptor) placeMultiTrade(placements []*dexOrderInfo, sell bool, currEpoch uint64) []*core.MultiTradeResult {
 	corePlacements := make([]*core.QtyRate, 0, len(placements))
 	for _, p := range placements {
 		corePlacements = append(corePlacements, p.placement)
@@ -1048,6 +1053,9 @@ func (u *unifiedExchangeAdaptor) placeMultiTrade(placements []*dexOrderInfo, sel
 		}
 
 		o := res.Order
+		if o.Epoch == 0 {
+			o.Epoch = currEpoch
+		}
 		var orderID order.OrderID
 		copy(orderID[:], o.ID)
 
@@ -1219,6 +1227,20 @@ func (u *unifiedExchangeAdaptor) multiTrade(
 	sell bool,
 	driftTolerance float64,
 	currEpoch uint64,
+) (map[order.OrderID]*dexOrderInfo, *OrderReport) {
+	return u.multiTradeN(placements, sell, driftTolerance, currEpoch, 0)
+}
+
+// multiTradeN is multiTrade with a cap on how many new orders this call
+// may submit. maxNewOrders == 0 means no cap. Standing-order cancels
+// still consider every placement. Hitting the cap is not treated as
+// insufficient balance (lower-priority standing orders are kept).
+func (u *unifiedExchangeAdaptor) multiTradeN(
+	placements []*TradePlacement,
+	sell bool,
+	driftTolerance float64,
+	currEpoch uint64,
+	maxNewOrders uint64,
 ) (_ map[order.OrderID]*dexOrderInfo, or *OrderReport) {
 	or = newOrderReport(placements)
 
@@ -1259,8 +1281,31 @@ func (u *unifiedExchangeAdaptor) multiTrade(
 	cancels := make([]dex.Bytes, 0, len(placements))
 
 	addCancel := func(o *core.Order) {
-		if currEpoch-o.Epoch < 2 { // TODO: check epoch
+		if o.Cancelling {
+			u.log.Debugf("multiTrade: order %s already has a cancel pending", o.ID)
+			return
+		}
+		// Never cancel an epoch-status order: the server revokes it
+		// (score hit) instead of booking a cancel. core.Order.Epoch is
+		// often 0, so the old currEpoch-o.Epoch < 2 guard never fired.
+		if o.Status == order.OrderStatusEpoch {
+			u.log.Debugf("multiTrade: skipping cancel of epoch-status order %s", o.ID)
+			return
+		}
+		if o.Epoch != 0 && currEpoch >= o.Epoch && currEpoch-o.Epoch < 2 {
 			u.log.Debugf("multiTrade: skipping cancel not past free cancel threshold")
+			return
+		}
+		if o.Epoch == 0 && o.Stamp > 0 {
+			placed := time.UnixMilli(int64(o.Stamp))
+			if time.Since(placed) < 12*time.Second {
+				u.log.Debugf("multiTrade: skipping cancel of recently placed order %s", o.ID)
+				return
+			}
+		}
+		const maxCancelsPerCall = 8
+		if len(cancels) >= maxCancelsPerCall {
+			u.log.Debugf("multiTrade: skipping further cancels this epoch (cap %d)", maxCancelsPerCall)
 			return
 		}
 		cancels = append(cancels, o.ID)
@@ -1341,6 +1386,15 @@ func (u *unifiedExchangeAdaptor) multiTrade(
 	}
 
 	orderInfos := make([]*dexOrderInfo, 0, len(or.Placements))
+	var shortfall string
+	var capped bool
+	defer func() {
+		// A call that stopped at the new-order cap did not look at every
+		// placement, so it cannot clear a previously logged shortfall.
+		if shortfall != "" || !capped {
+			u.logShortfall(sell, shortfall)
+		}
+	}()
 
 	// Calculate required balances for each placement and the total required.
 	placementRequired := false
@@ -1365,6 +1419,11 @@ func (u *unifiedExchangeAdaptor) multiTrade(
 	for i, placement := range or.Placements {
 		if placement.requiredLots() == 0 {
 			continue
+		}
+
+		if maxNewOrders > 0 && uint64(len(orderInfos)) >= maxNewOrders {
+			capped = true
+			break
 		}
 
 		if rateCausesSelfMatch(placement.Rate) {
@@ -1406,6 +1465,20 @@ func (u *unifiedExchangeAdaptor) multiTrade(
 		if lotsToPlace < placement.requiredLots() {
 			u.log.Tracef("multiTrade(%s,%d) out of funds for more placements. %d of %d lots for rate %s",
 				sellStr(sell), i, lotsToPlace, placement.requiredLots(), u.fmtRate(placement.Rate))
+			shortAssets, shortMsg := u.fundingShortfall(fundingReq, placement, lotsToPlace, or)
+			if len(shortAssets) > 0 {
+				shortfall = fmt.Sprintf("placement #%d: %d of %d lots at %s: %s",
+					i, lotsToPlace, placement.requiredLots(), u.fmtRate(placement.Rate), shortMsg)
+				if or.Error == nil {
+					or.Error = &BotProblems{}
+				}
+				if or.Error.InsufficientBalance == nil {
+					or.Error.InsufficientBalance = make(map[uint32]bool)
+				}
+				for _, assetID := range shortAssets {
+					or.Error.InsufficientBalance[assetID] = true
+				}
+			}
 			for _, o := range keptOrders {
 				if o.placementIndex > uint64(i) {
 					order := o.currentState().order
@@ -1422,6 +1495,21 @@ func (u *unifiedExchangeAdaptor) multiTrade(
 	}
 
 	for _, cancel := range cancels {
+		// The order state the bot has may be stale, e.g. if a cancel
+		// was submitted last epoch or a note was missed. Check core's
+		// current state so we don't send a cancel the server will
+		// reject.
+		if latest, err := u.clientCore.Order(cancel); err == nil {
+			if latest.Status > order.OrderStatusBooked {
+				u.log.Debugf("multiTrade: order %s is already %s, not canceling", cancel, latest.Status)
+				u.handleDEXOrderUpdate(latest) // prunes it if complete
+				continue
+			}
+			if latest.Cancelling {
+				u.log.Debugf("multiTrade: order %s already has a cancel pending", cancel)
+				continue
+			}
+		}
 		if err := u.Cancel(cancel); err != nil {
 			u.log.Errorf("multiTrade: error canceling order %s: %v", cancel, err)
 			// If the server doesn't know the order, it's already
@@ -1437,11 +1525,14 @@ func (u *unifiedExchangeAdaptor) multiTrade(
 	}
 
 	if len(orderInfos) > 0 {
-		results := u.placeMultiTrade(orderInfos, sell)
+		results := u.placeMultiTrade(orderInfos, sell, currEpoch)
 		ordered := make(map[order.OrderID]*dexOrderInfo, len(placements))
 		for i, res := range results {
 			if res.Error != nil {
-				or.Placements[orderInfos[i].placementIndex].setError(res.Error)
+				oi := orderInfos[i]
+				u.log.Warnf("multiTrade(%s): placing %s at %s (placement #%d) failed: %v",
+					sellStr(sell), u.fmtBase(oi.placement.Qty), u.fmtRate(oi.placement.Rate), oi.placementIndex, res.Error)
+				or.Placements[oi.placementIndex].setError(res.Error)
 				continue
 			}
 			var orderID order.OrderID
@@ -1453,6 +1544,67 @@ func (u *unifiedExchangeAdaptor) multiTrade(
 	}
 
 	return nil, or
+}
+
+// fmtAssetAmt formats atoms of any asset in conventional units with its
+// ticker.
+func fmtAssetAmt(assetID uint32, atoms uint64) string {
+	ui, err := asset.UnitInfo(assetID)
+	if err != nil {
+		return fmt.Sprintf("%d atoms of asset %d", atoms, assetID)
+	}
+	return ui.FormatAtoms(atoms) + " " + ui.Conventional.Unit
+}
+
+// fundingShortfall reports which assets are short for one more lot of the
+// placement beyond lotsToPlace, and a human readable need/have summary.
+func (u *unifiedExchangeAdaptor) fundingShortfall(
+	fundingReq func(rate, lots, counterTradeRate uint64) (map[uint32]uint64, uint64),
+	placement *TradePlacement, lotsToPlace uint64, or *OrderReport,
+) ([]uint32, string) {
+	dexReq, cexReq := fundingReq(placement.Rate, lotsToPlace+1, placement.CounterTradeRate)
+	assetIDs := make([]uint32, 0, len(dexReq))
+	for assetID := range dexReq {
+		assetIDs = append(assetIDs, assetID)
+	}
+	sort.Slice(assetIDs, func(i, j int) bool { return assetIDs[i] < assetIDs[j] })
+	// RemainingDEXBals already has the lots placed so far in this call
+	// removed, so add them back to compare against the total need.
+	used, _ := fundingReq(placement.Rate, lotsToPlace, placement.CounterTradeRate)
+	var short []uint32
+	var parts []string
+	for _, assetID := range assetIDs {
+		need := dexReq[assetID]
+		have := or.RemainingDEXBals[assetID] + used[assetID]
+		if have < need {
+			short = append(short, assetID)
+			parts = append(parts, fmt.Sprintf("need %s, have %s", fmtAssetAmt(assetID, need), fmtAssetAmt(assetID, have)))
+		}
+	}
+	if cexReq > or.RemainingCEXBal+placement.UsedCEX {
+		parts = append(parts, fmt.Sprintf("CEX balance short: need %d, have %d atoms", cexReq, or.RemainingCEXBal+placement.UsedCEX))
+	}
+	return short, strings.Join(parts, "; ")
+}
+
+// logShortfall logs an out-of-funds state for a side at Info when it
+// changes, so a side that silently stops placing orders is visible in the
+// log without repeating every epoch.
+func (u *unifiedExchangeAdaptor) logShortfall(sell bool, shortfall string) {
+	idx := 0
+	if sell {
+		idx = 1
+	}
+	prev, _ := u.shortfallLog[idx].Load().(string)
+	if prev == shortfall {
+		return
+	}
+	u.shortfallLog[idx].Store(shortfall)
+	if shortfall == "" {
+		u.log.Infof("multiTrade(%s): funds sufficient again, placing orders on this side", sellStr(sell))
+		return
+	}
+	u.log.Infof("multiTrade(%s): insufficient balance, side not fully placed: %s", sellStr(sell), shortfall)
 }
 
 // DEXTrade places a single order on the DEX order book.
@@ -1474,7 +1626,7 @@ func (u *unifiedExchangeAdaptor) DEXTrade(rate, qty uint64, sell bool) (*core.Or
 
 	// multiTrade is used instead of Trade because Trade does not support
 	// maxLock.
-	results := u.placeMultiTrade(placements, sell)
+	results := u.placeMultiTrade(placements, sell, 0)
 	if len(results) == 0 {
 		return nil, fmt.Errorf("no orders placed")
 	}
@@ -2785,6 +2937,7 @@ func (u *unifiedExchangeAdaptor) tryCancelOrders(ctx context.Context, epoch *uin
 	}
 
 	// Cancel DEX orders first.
+	var delayed int
 	for _, pendingOrder := range u.pendingDEXOrders {
 		o := pendingOrder.currentState().order
 
@@ -2803,7 +2956,12 @@ func (u *unifiedExchangeAdaptor) tryCancelOrders(ctx context.Context, epoch *uin
 			if err != nil {
 				u.log.Errorf("Error canceling order %s: %v", o.ID, err)
 			}
+		} else {
+			delayed++
 		}
+	}
+	if delayed > 0 {
+		u.log.Infof("Waiting 2 epochs before canceling %d order(s) (free-cancel rule)", delayed)
 	}
 
 	if !cancelCEXOrders {
@@ -2839,10 +2997,20 @@ func (u *unifiedExchangeAdaptor) tryCancelOrders(ctx context.Context, epoch *uin
 }
 
 func (u *unifiedExchangeAdaptor) cancelAllOrders(ctx context.Context) {
+	// The bot run context is already canceled when we get here. A detached
+	// context is required so SyncBook and epoch waits still work, and so we
+	// keep draining when the server only accepts a few cancels per epoch.
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 15*time.Minute)
+	defer cancel()
+
+	forceCancel := func() {
+		u.tryCancelOrders(context.Background(), nil, true)
+	}
+
 	book, bookFeed, err := u.clientCore.SyncBook(u.host, u.dexBaseID, u.dexQuoteID)
 	if err != nil {
 		u.log.Errorf("Error syncing book for cancellations: %v", err)
-		u.tryCancelOrders(ctx, nil, true)
+		forceCancel()
 		return
 	}
 	defer bookFeed.Close()
@@ -2850,8 +3018,13 @@ func (u *unifiedExchangeAdaptor) cancelAllOrders(ctx context.Context) {
 	mktCfg, err := u.clientCore.ExchangeMarket(u.host, u.dexBaseID, u.dexQuoteID)
 	if err != nil {
 		u.log.Errorf("Error getting market configuration: %v", err)
-		u.tryCancelOrders(ctx, nil, true)
+		forceCancel()
 		return
+	}
+
+	epochLen := time.Millisecond * time.Duration(mktCfg.EpochLen)
+	if epochLen <= 0 {
+		epochLen = 20 * time.Second
 	}
 
 	currentEpoch := book.CurrentEpoch()
@@ -2859,17 +3032,28 @@ func (u *unifiedExchangeAdaptor) cancelAllOrders(ctx context.Context) {
 		return
 	}
 
-	timeout := time.Millisecond * time.Duration(3*mktCfg.EpochLen)
-	timer := time.NewTimer(timeout)
+	timer := time.NewTimer(2 * epochLen)
 	defer timer.Stop()
+	resetTimer := func(d time.Duration) {
+		if !timer.Stop() {
+			select {
+			case <-timer.C:
+			default:
+			}
+		}
+		timer.Reset(d)
+	}
 
-	i := 0
 	for {
 		select {
+		case <-ctx.Done():
+			u.log.Warnf("Giving up waiting to cancel remaining orders: %v", ctx.Err())
+			forceCancel()
+			return
 		case ni, ok := <-bookFeed.Next():
 			if !ok {
-				u.log.Error("Stopping bot due to nil book feed.")
-				u.kill()
+				u.log.Error("Book feed closed while canceling orders")
+				forceCancel()
 				return
 			}
 			switch epoch := ni.Payload.(type) {
@@ -2877,16 +3061,14 @@ func (u *unifiedExchangeAdaptor) cancelAllOrders(ctx context.Context) {
 				if u.tryCancelOrders(ctx, &epoch.Current, true) {
 					return
 				}
-				timer.Reset(timeout)
-				i++
+				resetTimer(2 * epochLen)
 			}
 		case <-timer.C:
-			u.tryCancelOrders(ctx, nil, true)
-			return
-		}
-
-		if i >= 3 {
-			return
+			// Force remaining cancels even if they count against cancel rate.
+			if u.tryCancelOrders(ctx, nil, true) {
+				return
+			}
+			resetTimer(epochLen)
 		}
 	}
 }
@@ -3249,9 +3431,67 @@ func (u *unifiedExchangeAdaptor) handleServerConfigUpdate() {
 	}
 }
 
+// lateOrderCancelRetry is the delay between attempts to cancel an adopted
+// late order. var for testing.
+var lateOrderCancelRetry = 15 * time.Second
+
+// handleLateOrderAdopted handles an order on the bot's market that the server
+// accepted after core had already reported the order request to the bot as
+// timed out. The order is not in the bot's books, so it would sit unmanaged
+// with funds the bot believes are free. Core has kept it so its preimage gets
+// sent; cancel it here so the bot can place orders it tracks instead.
+func (u *unifiedExchangeAdaptor) handleLateOrderAdopted(o *core.Order) {
+	if o == nil {
+		return
+	}
+	if o.Host != u.host || o.BaseID != u.dexBaseID || o.QuoteID != u.dexQuoteID {
+		return
+	}
+	var oid order.OrderID
+	copy(oid[:], o.ID)
+	u.balancesMtx.RLock()
+	_, tracked := u.pendingDEXOrders[oid]
+	u.balancesMtx.RUnlock()
+	if tracked {
+		return
+	}
+	u.log.Warnf("The server accepted order %s after its order request timed out. "+
+		"The bot does not track it, so it will be canceled.", oid)
+	u.wg.Add(1)
+	go func() {
+		defer u.wg.Done()
+		const maxTries = 5
+		for i := 1; ; i++ {
+			err := u.clientCore.Cancel(o.ID)
+			if err == nil {
+				u.log.Infof("Cancel submitted for untracked late order %s", oid)
+				return
+			}
+			if i == maxTries {
+				u.log.Warnf("Giving up canceling untracked late order %s: %v", oid, err)
+				return
+			}
+			u.log.Debugf("Cancel of untracked late order %s failed (attempt %d): %v", oid, i, err)
+			var done <-chan struct{}
+			if u.ctx != nil {
+				done = u.ctx.Done()
+			}
+			select {
+			case <-time.After(lateOrderCancelRetry):
+			case <-done:
+				return
+			}
+		}
+	}()
+}
+
 func (u *unifiedExchangeAdaptor) handleDEXNotification(n core.Notification) {
 	switch note := n.(type) {
 	case *core.OrderNote:
+		if note.Topic() == core.TopicLateOrderAdopted {
+			u.handleLateOrderAdopted(note.Order)
+			return
+		}
 		u.handleDEXOrderUpdate(note.Order)
 	case *core.MatchNote:
 		o, err := u.clientCore.Order(note.OrderID)

@@ -25,7 +25,7 @@ var (
 	tLogger = dex.StdOutLogger("db_TEST", dex.LevelTrace)
 )
 
-func newTestDB(t *testing.T) (*BoltDB, func()) {
+func newTestDB(t testing.TB) (*BoltDB, func()) {
 	t.Helper()
 	dbPath := filepath.Join(t.TempDir(), "db.db")
 	dbi, err := NewDB(dbPath, tLogger)
@@ -1936,4 +1936,110 @@ func TestPruneMMEpochSnapshots(t *testing.T) {
 	if n != 0 {
 		t.Fatalf("expected 0 pruned on missing host, got %d", n)
 	}
+}
+
+// fillMatchesForOrders stores nMatches matches spread over nOrders random
+// order IDs, archiving every other match, and returns the order IDs and the
+// expected match IDs for each order.
+func fillMatchesForOrders(t testing.TB, boltdb *BoltDB, nOrders, nMatches int) ([]order.OrderID, map[order.OrderID]map[order.MatchID]bool) {
+	t.Helper()
+	acct := dbtest.RandomAccountInfo()
+	base, quote := randU32(), randU32()
+	oids := make([]order.OrderID, nOrders)
+	for i := range oids {
+		oids[i] = ordertest.RandomOrderID()
+	}
+	expected := make(map[order.OrderID]map[order.MatchID]bool, nOrders)
+	boltdb.NoSync = true
+	defer func() { boltdb.NoSync = false }()
+	for i := 0; i < nMatches; i++ {
+		m := &db.MetaMatch{
+			MetaData: &db.MatchMetaData{
+				Proof: *dbtest.RandomMatchProof(0.5),
+				DEX:   acct.Host,
+				Base:  base,
+				Quote: quote,
+				Stamp: rand.Uint64(),
+			},
+			UserMatch: ordertest.RandomUserMatch(),
+		}
+		oid := oids[i%nOrders]
+		m.OrderID = oid
+		if i%2 == 0 {
+			m.Status = order.MatchConfirmed             // inactive -> archived
+			m.MetaData.Proof.Auth.RedeemSig = []byte{0} // required to be considered inactive
+		} else {
+			m.Status = order.MatchStatus(rand.Intn(4))
+		}
+		if err := boltdb.UpdateMatch(m); err != nil {
+			t.Fatalf("UpdateMatch error: %v", err)
+		}
+		if expected[oid] == nil {
+			expected[oid] = make(map[order.MatchID]bool)
+		}
+		expected[oid][m.MatchID] = true
+	}
+	return oids, expected
+}
+
+func TestMatchesForOrders(t *testing.T) {
+	boltdb, shutdown := newTestDB(t)
+	defer shutdown()
+
+	oids, expected := fillMatchesForOrders(t, boltdb, 30, 300)
+	// Request a subset of the orders plus one unknown order.
+	req := append([]order.OrderID{ordertest.RandomOrderID()}, oids[:20]...)
+	matches, err := boltdb.MatchesForOrders(req, false)
+	if err != nil {
+		t.Fatalf("MatchesForOrders error: %v", err)
+	}
+	if len(matches) != 20 {
+		t.Fatalf("expected matches for 20 orders, got %d", len(matches))
+	}
+	for _, oid := range oids[:20] {
+		single, err := boltdb.MatchesForOrder(oid, false)
+		if err != nil {
+			t.Fatalf("MatchesForOrder error: %v", err)
+		}
+		batch := matches[oid]
+		if len(batch) != len(single) || len(batch) != len(expected[oid]) {
+			t.Fatalf("order %s: batch has %d matches, single has %d, expected %d", oid, len(batch), len(single), len(expected[oid]))
+		}
+		for _, m := range batch {
+			if m.OrderID != oid || !expected[oid][m.MatchID] {
+				t.Fatalf("unexpected match %s for order %s", m.MatchID, oid)
+			}
+		}
+	}
+	empty, err := boltdb.MatchesForOrders(nil, false)
+	if err != nil || len(empty) != 0 {
+		t.Fatalf("expected empty result for no orders, got %d, %v", len(empty), err)
+	}
+}
+
+// BenchmarkOrderMatches compares loading the matches for a page of 20 orders
+// (as the wallets page's recent activity and the orders page do) one order at
+// a time versus in a single pass, with a large match history.
+func BenchmarkOrderMatches(b *testing.B) {
+	boltdb, shutdown := newTestDB(b)
+	defer shutdown()
+	oids, _ := fillMatchesForOrders(b, boltdb, 5000, 20000)
+	page := oids[:20]
+
+	b.Run("MatchesForOrder-x20", func(b *testing.B) {
+		for i := 0; i < b.N; i++ {
+			for _, oid := range page {
+				if _, err := boltdb.MatchesForOrder(oid, false); err != nil {
+					b.Fatal(err)
+				}
+			}
+		}
+	})
+	b.Run("MatchesForOrders", func(b *testing.B) {
+		for i := 0; i < b.N; i++ {
+			if _, err := boltdb.MatchesForOrders(page, false); err != nil {
+				b.Fatal(err)
+			}
+		}
+	})
 }

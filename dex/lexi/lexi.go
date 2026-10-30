@@ -94,6 +94,27 @@ func BadgerV1Update(path string, v4Path string, logger dex.Logger, opts badger.O
 
 const version4Suffix = "_v4"
 
+// DefaultOptions returns badger options sized for the small DBs that lexi
+// and the wallets' transaction history use (kilobytes to a few megabytes).
+//
+// badger's defaults are meant for big servers: every open DB memory maps a
+// 2 GB value log file (2 x the 1 GB ValueLogFileSize) and a 128 MB
+// memtable file, and gets a 256 MB block cache. Bison Wallet opens one DB
+// per wallet plus a few more, so that is 15+ GB of mapped files. On
+// Windows those mappings were seen fully resident in bisonw's working set
+// (~18.5 GB with 7 DBs open, the value logs nearly empty). Values over the
+// 1 MB ValueThreshold go in the value log, so a 16 MB value log file still
+// holds any value these DBs store. Existing DBs open fine with these
+// options: badger maps an existing file at its own size, and new files
+// are created at the new size.
+func DefaultOptions(path string) badger.Options {
+	return badger.DefaultOptions(path).
+		WithValueLogFileSize(16 << 20). // mapped at 2x: 32 MB
+		WithMemTableSize(16 << 20).     // memtable file 32 MB, max batch 2.4 MB
+		WithNumMemtables(3).
+		WithBlockCacheSize(16 << 20)
+}
+
 // NeedsV1toV4Update returns whether the database needs an upgrade from v1 to
 // v4. Works by searching for a directory with the v4 suffix.
 func NeedsV1toV4Update(path string) (string, bool, error) {
@@ -135,7 +156,7 @@ func New(cfg *Config) (*DB, error) {
 		return nil, err
 	}
 	logger := cfg.Log.SubLogger("BADG")
-	opts := badger.DefaultOptions(v4Path).WithLogger(&badgerLoggerWrapper{logger})
+	opts := DefaultOptions(v4Path).WithLogger(&badgerLoggerWrapper{logger})
 	var bdb *badger.DB
 	if needs {
 		bdb, err = BadgerV1Update(cfg.Path, v4Path, logger, opts)
