@@ -1,3 +1,5 @@
+//go:build !spvlive && !harness
+
 package btc
 
 import (
