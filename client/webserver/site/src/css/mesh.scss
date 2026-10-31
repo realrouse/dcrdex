@@ -1,0 +1,218 @@
+// Tatanka mesh trading page.
+.mesh-page {
+  max-width: 1500px;
+  margin: 0 auto;
+
+  .mesh-grid {
+    display: grid;
+    grid-template-columns: minmax(340px, 1.15fr) minmax(340px, 1fr);
+    grid-template-areas:
+      "conn trade"
+      "conn activity";
+    gap: 12px;
+
+    @media (max-width: 900px) {
+      grid-template-columns: 1fr;
+      grid-template-areas: "conn" "trade" "activity";
+    }
+  }
+
+  .mesh-card {
+    background-color: var(--section-bg);
+    border: 1px solid var(--border-color);
+    border-radius: 6px;
+  }
+
+  .mesh-conn { grid-area: conn; }
+  .mesh-trade { grid-area: trade; }
+  .mesh-activity { grid-area: activity; }
+
+  .mesh-canvas-wrap {
+    position: relative;
+    height: 380px;
+
+    canvas {
+      width: 100%;
+      height: 100%;
+      display: block;
+    }
+  }
+
+  .mesh-tip {
+    position: absolute;
+    max-width: 320px;
+    padding: 4px 8px;
+    font-size: 12px;
+    border-radius: 4px;
+    background-color: var(--body-bg);
+    border: 1px solid var(--border-color);
+    word-break: break-all;
+    pointer-events: none;
+  }
+
+  .mesh-legend {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 10px;
+
+    .lg {
+      display: inline-block;
+      width: 10px;
+      height: 10px;
+      border-radius: 50%;
+      margin-right: 4px;
+      vertical-align: -1px;
+    }
+
+    .lg-self { background-color: #2dd4bf; }
+    .lg-node { background-color: #8b5cf6; border-radius: 2px; }
+    .lg-peer { background-color: #38bdf8; }
+    .lg-bad { background-color: #f97316; }
+    .lg-unk { background-color: #94a3b8; }
+    .lg-coin { background-color: #fde68a; }
+    .lg-match { background-color: #fbbf24; border-radius: 2px; height: 4px; width: 14px; vertical-align: 2px; }
+  }
+
+  .mesh-pill {
+    font-size: 13px;
+    padding: 2px 10px;
+    border-radius: 12px;
+    color: #fff;
+
+    &.good { background-color: #16a34a; }
+    &.degraded { background-color: #ca8a04; }
+    &.offline { background-color: #dc2626; }
+  }
+
+  .mesh-badge {
+    font-size: 11px;
+    padding: 1px 6px;
+    border-radius: 8px;
+    border: 1px solid var(--border-color);
+
+    &.ok { background-color: rgb(34 197 94 / 15%); }
+    &.bad { background-color: #f97316; color: #fff; }
+    &.unk { color: var(--text-grey); }
+  }
+
+  .mesh-table {
+    th {
+      font-weight: normal;
+      color: var(--text-grey);
+      padding: 2px 4px;
+    }
+
+    td {
+      padding: 3px 4px;
+    }
+
+    tr.offline td { opacity: 0.5; }
+
+    tbody.sells tr:hover,
+    tbody.buys tr:hover {
+      background-color: var(--tertiary-bg);
+    }
+
+    tr.mesh-mid td {
+      border-top: 1px solid var(--border-color);
+      border-bottom: 1px solid var(--border-color);
+    }
+  }
+
+  .mesh-trade-body {
+    display: grid;
+    grid-template-columns: 1.3fr 1fr;
+    gap: 16px;
+
+    @media (max-width: 1200px) {
+      grid-template-columns: 1fr;
+    }
+  }
+
+  .mesh-mkt {
+    font-size: 14px;
+    padding: 4px 10px;
+    border-radius: 4px;
+    border: 1px solid var(--border-color);
+    background: none;
+    color: var(--text-color);
+
+    &.selected {
+      background-color: var(--form-opt-selected-bg, var(--tertiary-bg));
+      border-color: var(--link-color);
+    }
+  }
+
+  .mesh-sides button {
+    border-radius: 0;
+    background: none;
+    color: var(--text-color);
+    border: 1px solid var(--border-color);
+
+    &.buy.selected { background-color: var(--market-buygreen-bg); color: #fff; }
+    &.sell.selected { background-color: var(--market-sellred-bg); color: #fff; }
+  }
+
+  .mesh-take {
+    border: 1px solid #fbbf24;
+    border-radius: 6px;
+    padding: 10px;
+  }
+
+  .mesh-num { width: 80px; }
+
+  .mesh-take-btn,
+  .mesh-cancel-btn {
+    font-size: 12px;
+    padding: 1px 8px;
+    line-height: 1.4;
+
+    &.warn { border-color: #f97316; }
+  }
+
+  .mesh-hidden {
+    border-top: 1px dashed var(--border-color);
+    padding-top: 6px;
+  }
+
+  .mesh-swap {
+    border: 1px solid var(--border-color);
+    border-radius: 6px;
+    padding: 8px;
+    margin-bottom: 8px;
+    font-size: 14px;
+  }
+
+  .mesh-status {
+    font-size: 12px;
+    padding: 1px 8px;
+    border-radius: 8px;
+
+    &.ok { background-color: #16a34a; color: #fff; }
+    &.bad { background-color: #dc2626; color: #fff; }
+    &.run { background-color: #ca8a04; color: #fff; }
+  }
+
+  .mesh-steps {
+    display: flex;
+    gap: 4px;
+  }
+
+  .mesh-step {
+    flex: 1;
+    text-align: center;
+    font-size: 11px;
+    padding: 2px 0;
+    border-radius: 3px;
+    background-color: var(--tertiary-bg);
+    color: var(--text-grey);
+
+    &.done { background-color: #16a34a; color: #fff; }
+    &.now { background-color: #fbbf24; color: #111; }
+    &.failed.done { background-color: #dc2626; }
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    * { transition: none !important; }
+  }
+}

@@ -578,6 +578,9 @@ func (ob *OrderBooks) setSwapStatus(sw *swapper, s *swapState, status, format st
 	s.rec.Status, s.rec.Reason = status, ""
 	ob.swapEvent(s, status+": "+format, args...)
 	ob.persist(sw, s)
+	m := &s.rec.Match
+	ob.emit(&Event{Kind: EventSwap, Market: marketName(m.Market), MatchID: m.ID.String(), OrderID: m.MakerOrderID.String(),
+		Status: status, Side: s.rec.Side, Sell: m.MakerSell, Qty: m.Qty, Rate: m.Rate, Maker: m.Maker, Taker: m.Taker})
 }
 
 func (sw *swapper) wallet(assetID uint32) (SwapWallet, error) {

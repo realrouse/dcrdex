@@ -32,6 +32,7 @@ import (
 	"decred.org/dcrdex/client/comms"
 	"decred.org/dcrdex/client/core"
 	"decred.org/dcrdex/client/db"
+	"decred.org/dcrdex/client/mesh"
 	"decred.org/dcrdex/client/mm"
 	"decred.org/dcrdex/client/mm/libxc"
 	"decred.org/dcrdex/client/mnemonic"
@@ -2765,3 +2766,16 @@ func TestServer(t *testing.T) {
 
 	cm.Wait()
 }
+
+func (*TCore) MeshStatus() *core.MeshStatus { return &core.MeshStatus{} }
+func (*TCore) MeshBook(market string) (*mesh.BookView, error) {
+	return &mesh.BookView{Market: market}, nil
+}
+func (*TCore) MeshPostOrder(form *core.MeshOrderForm) (*mesh.ViewOrder, error) {
+	return nil, core.ErrMeshDisabled
+}
+func (*TCore) MeshTakeOrder(market, orderID string, lots uint64) (string, error) {
+	return "", core.ErrMeshDisabled
+}
+func (*TCore) MeshCancelOrder(orderID string) error      { return core.ErrMeshDisabled }
+func (*TCore) MeshActivity() (*core.MeshActivity, error) { return &core.MeshActivity{}, nil }

@@ -15,6 +15,7 @@ import MarketMakerLogsPage from './mmlogs'
 import InitPage from './init'
 import ProposalPage from './proposal'
 import ProposalsPage from './proposals'
+import MeshPage from './mesh'
 import { MM } from './mmutil'
 import { RateEncodingFactor, StatusExecuted, hasActiveMatches } from './orderutil'
 import { getJSON, postJSON, Errors } from './http'
@@ -106,6 +107,7 @@ const constructors: Record<string, PageClass> = {
   login: LoginPage,
   register: RegistrationPage,
   markets: MarketsPage,
+  mesh: MeshPage,
   wallets: WalletsPage,
   settings: SettingsPage,
   orders: OrdersPage,
@@ -976,6 +978,20 @@ export default class Application {
 
     page.profileBox.classList.add('authed')
     Doc.show(page.noteBell, page.walletsMenuEntry, page.marketsMenuEntry)
+    // With the Tatanka mesh running (simnet --mesh), Trade opens peer-to-peer
+    // mesh trading. Server markets stay reachable from that page.
+    const entry = page.marketsMenuEntry as HTMLAnchorElement
+    if (this.user && this.user.mesh && entry.getAttribute('href') !== '/mesh') {
+      // Replace the link to drop the internal navigation handler bound to /markets.
+      const meshEntry = entry.cloneNode(true) as HTMLAnchorElement
+      meshEntry.setAttribute('href', '/mesh')
+      entry.replaceWith(meshEntry)
+      page.marketsMenuEntry = meshEntry
+      Doc.bind(meshEntry, 'click', (e: Event) => {
+        e.preventDefault()
+        this.loadPage('mesh')
+      })
+    }
     Doc.setVis(mmStatus, page.mmLink)
   }
 

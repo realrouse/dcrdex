@@ -1671,6 +1671,13 @@ type Config struct {
 	TheOneHost string
 
 	Mesh bool
+	// MeshName is the display name announced to other mesh peers.
+	MeshName string
+	// MeshBootstrap are mesh node multiaddrs (simnet only). If empty, the
+	// TATANKA_SIMNET_ADDR environment variable (comma-separated) is used.
+	MeshBootstrap []string
+	// AppVersion is the app version announced to mesh peers.
+	AppVersion string
 	// MaxActiveMatches is the maximum number of active swap matches allowed
 	// per DEX connection before new orders are deferred. Zero means use the
 	// default (48).
@@ -4908,17 +4915,22 @@ func (c *Core) Login(pw []byte) error {
 				return false, fmt.Errorf("error deriving multisig private key: %w", err)
 			}
 
+			var meshBootstrap []string
 			if c.cfg.Mesh && c.net == dex.Simnet {
-				simnetMeshAddr := "/ip4/127.0.0.1/tcp/12347"
-				if a := os.Getenv("TATANKA_SIMNET_ADDR"); a != "" {
-					simnetMeshAddr = a
+				if meshBootstrap, err = c.meshBootstrap(); err != nil {
+					// Don't block login; the mesh just stays off.
+					c.log.Errorf("Mesh disabled: %v", err)
 				}
+			}
+			if bootstrap := meshBootstrap; len(bootstrap) > 0 {
 				todoBonds := []*bond.BondParams{}
 				mesh, err := mesh.NewClient(&mesh.ClientConfig{
-					Seed:          seed,
-					BootstrapPeer: simnetMeshAddr,
-					Bonds:         todoBonds,
-					Log:           c.log.SubLogger("MC"),
+					Seed:           seed,
+					BootstrapPeers: bootstrap,
+					Name:           c.cfg.MeshName,
+					AppVersion:     c.cfg.AppVersion,
+					Bonds:          todoBonds,
+					Log:            c.log.SubLogger("MC"),
 				})
 				if err != nil {
 					return false, err

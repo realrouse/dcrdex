@@ -34,6 +34,8 @@ import (
 //	POST /mesh/adversary/flood {"peer":"<id>","mode":"replay|junk","n":500,"size":512}
 //	GET  /mesh/inbox/dropped          -> {"dropped": n}  (rate-limited or replayed inbox messages)
 //	GET  /mesh/policy?market=dcr_btc  -> {"makerLockSec":...,"takerLockSec":...}
+//	POST /mesh/presence/fakeproto {"proto":9,"minProto":9}  (announce fake versions; 0,0 restores)
+//	GET  /mesh/peers                  -> {"peers":[...]}
 type DebugServer struct {
 	ob     *OrderBooks
 	peerID func() string
@@ -315,6 +317,21 @@ func (s *DebugServer) Handler(ctx context.Context) http.Handler {
 		}
 		p := s.ob.LockPolicy(m)
 		writeJSON(w, http.StatusOK, map[string]int64{"makerLockSec": int64(p.Maker / time.Second), "takerLockSec": int64(p.Taker / time.Second)})
+	})
+	mux.HandleFunc("POST /mesh/presence/fakeproto", func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			Proto    uint32 `json:"proto"`
+			MinProto uint32 `json:"minProto"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			writeErr(w, http.StatusBadRequest, err)
+			return
+		}
+		s.ob.SetFakeProtocol(ctx, req.Proto, req.MinProto)
+		writeJSON(w, http.StatusOK, req)
+	})
+	mux.HandleFunc("GET /mesh/peers", func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, http.StatusOK, map[string]any{"peers": s.ob.Peers()})
 	})
 	mux.HandleFunc("GET /mesh/matches", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]any{"matches": s.ob.Matches()})

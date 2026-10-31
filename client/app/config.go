@@ -111,7 +111,9 @@ type CoreConfig struct {
 
 	ExtensionModeFile string `long:"extension-mode-file" description:"path to a file that specifies options for running core as an extension."`
 
-	Mesh bool `long:"mesh" description:"Enable Tatanka Mesh for peer-to-peer trading. This is experimental and not recommended for production use."`
+	Mesh          bool   `long:"mesh" description:"Enable Tatanka Mesh for peer-to-peer trading. This is experimental and not recommended for production use."`
+	MeshName      string `long:"meshname" description:"Display name shown to other Tatanka Mesh peers (max 32 bytes). Default: a short peer ID."`
+	MeshBootstrap string `long:"meshbootstrap" description:"Comma-separated Tatanka Mesh node multiaddrs to connect to, each ending in /p2p/<peer ID> (simnet only). Overrides TATANKA_SIMNET_ADDR."`
 
 	MaxActiveMatches int `long:"max-active-matches" description:"Maximum number of active swap matches per DEX connection before deferring new orders. Default 48."`
 }
@@ -228,6 +230,9 @@ func (cfg *Config) Core(log dex.Logger) *core.Config {
 		ExtensionModeFile:  cfg.ExtensionModeFile,
 		TheOneHost:         cfg.TheOneHost,
 		Mesh:               cfg.Mesh,
+		MeshName:           cfg.MeshName,
+		MeshBootstrap:      splitList(cfg.MeshBootstrap),
+		AppVersion:         Version,
 		MaxActiveMatches:   cfg.MaxActiveMatches,
 	}
 }
@@ -399,4 +404,15 @@ func DefaultHostByNetwork(network dex.Network) string {
 	default:
 		return defaultMainnetHost
 	}
+}
+
+// splitList splits a comma-separated list, dropping empty entries.
+func splitList(s string) []string {
+	var out []string
+	for _, v := range strings.Split(s, ",") {
+		if v = strings.TrimSpace(v); v != "" {
+			out = append(out, v)
+		}
+	}
+	return out
 }

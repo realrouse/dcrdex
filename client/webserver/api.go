@@ -18,6 +18,7 @@ import (
 	"decred.org/dcrdex/client/asset"
 	"decred.org/dcrdex/client/core"
 	"decred.org/dcrdex/client/db"
+	"decred.org/dcrdex/client/mesh"
 	"decred.org/dcrdex/client/mm"
 	"decred.org/dcrdex/client/mm/libxc"
 	"decred.org/dcrdex/dex"
@@ -2618,4 +2619,97 @@ func (s *WebServer) apiCastVote(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, simpleAck())
+}
+
+// apiMeshStatus is the handler for the '/mesh/status' API request.
+func (s *WebServer) apiMeshStatus(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, &struct {
+		OK     bool             `json:"ok"`
+		Status *core.MeshStatus `json:"status"`
+	}{OK: true, Status: s.core.MeshStatus()})
+}
+
+// apiMeshBook is the handler for the '/mesh/book' API request.
+func (s *WebServer) apiMeshBook(w http.ResponseWriter, r *http.Request) {
+	form := &struct {
+		Market string `json:"market"`
+	}{}
+	if !readPost(w, r, form) {
+		return
+	}
+	book, err := s.core.MeshBook(form.Market)
+	if err != nil {
+		s.writeAPIError(w, fmt.Errorf("mesh book error: %w", err))
+		return
+	}
+	writeJSON(w, &struct {
+		OK   bool           `json:"ok"`
+		Book *mesh.BookView `json:"book"`
+	}{OK: true, Book: book})
+}
+
+// apiMeshOrder is the handler for the '/mesh/order' API request.
+func (s *WebServer) apiMeshOrder(w http.ResponseWriter, r *http.Request) {
+	form := new(core.MeshOrderForm)
+	if !readPost(w, r, form) {
+		return
+	}
+	ord, err := s.core.MeshPostOrder(form)
+	if err != nil {
+		s.writeAPIError(w, fmt.Errorf("mesh order error: %w", err))
+		return
+	}
+	writeJSON(w, &struct {
+		OK    bool            `json:"ok"`
+		Order *mesh.ViewOrder `json:"order"`
+	}{OK: true, Order: ord})
+}
+
+// apiMeshTake is the handler for the '/mesh/take' API request.
+func (s *WebServer) apiMeshTake(w http.ResponseWriter, r *http.Request) {
+	form := &struct {
+		Market  string `json:"market"`
+		OrderID string `json:"orderID"`
+		Lots    uint64 `json:"lots"`
+	}{}
+	if !readPost(w, r, form) {
+		return
+	}
+	mid, err := s.core.MeshTakeOrder(form.Market, form.OrderID, form.Lots)
+	if err != nil {
+		s.writeAPIError(w, fmt.Errorf("mesh take error: %w", err))
+		return
+	}
+	writeJSON(w, &struct {
+		OK      bool   `json:"ok"`
+		MatchID string `json:"matchID"`
+	}{OK: true, MatchID: mid})
+}
+
+// apiMeshCancel is the handler for the '/mesh/cancel' API request.
+func (s *WebServer) apiMeshCancel(w http.ResponseWriter, r *http.Request) {
+	form := &struct {
+		OrderID string `json:"orderID"`
+	}{}
+	if !readPost(w, r, form) {
+		return
+	}
+	if err := s.core.MeshCancelOrder(form.OrderID); err != nil {
+		s.writeAPIError(w, fmt.Errorf("mesh cancel error: %w", err))
+		return
+	}
+	writeJSON(w, simpleAck())
+}
+
+// apiMeshActivity is the handler for the '/mesh/activity' API request.
+func (s *WebServer) apiMeshActivity(w http.ResponseWriter, r *http.Request) {
+	act, err := s.core.MeshActivity()
+	if err != nil {
+		s.writeAPIError(w, fmt.Errorf("mesh activity error: %w", err))
+		return
+	}
+	writeJSON(w, &struct {
+		OK       bool               `json:"ok"`
+		Activity *core.MeshActivity `json:"activity"`
+	}{OK: true, Activity: act})
 }

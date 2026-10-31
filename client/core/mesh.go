@@ -21,7 +21,13 @@ func (c *Core) coreMesh() *Mesh {
 	if mesh == nil || !meshCM.On() {
 		return nil
 	}
-	return &Mesh{}
+	mkts := make(map[string]*MeshMarket, len(meshpkg.DefaultMarkets))
+	for _, d := range meshpkg.DefaultMarkets {
+		if m, err := meshpkg.ParseMarket(d.Name); err == nil {
+			mkts[d.Name] = &MeshMarket{BaseID: m.Base, QuoteID: m.Quote}
+		}
+	}
+	return &Mesh{Markets: mkts}
 
 }
 
@@ -81,6 +87,10 @@ func (c *Core) connectMesh(ctx context.Context, crypter encrypt.Crypter) {
 	}()
 
 	c.log.Infof("Connected to Mesh")
+
+	// Mesh activity goes to the UI as data notifications. The sink must not
+	// block; notify never does.
+	mesh.SetEventSink(func(e *meshpkg.Event) { c.notify(newMeshNote(e)) })
 
 	go func() {
 		for {

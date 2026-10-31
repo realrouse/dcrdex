@@ -22,6 +22,7 @@ import (
 	"decred.org/dcrdex/client/asset"
 	"decred.org/dcrdex/client/core"
 	"decred.org/dcrdex/client/db"
+	"decred.org/dcrdex/client/mesh"
 	"decred.org/dcrdex/client/mnemonic"
 	"decred.org/dcrdex/client/orderbook"
 	"decred.org/dcrdex/dex"
@@ -1265,3 +1266,16 @@ func TestAPICandleHistory(t *testing.T) {
 	want = `{"ok":false,"msg":"boom"}`
 	ensureResponse(t, s.apiCandleHistory, want, reader, writer, body, nil)
 }
+
+func (*TCore) MeshStatus() *core.MeshStatus { return &core.MeshStatus{} }
+func (*TCore) MeshBook(market string) (*mesh.BookView, error) {
+	return &mesh.BookView{Market: market}, nil
+}
+func (*TCore) MeshPostOrder(form *core.MeshOrderForm) (*mesh.ViewOrder, error) {
+	return nil, core.ErrMeshDisabled
+}
+func (*TCore) MeshTakeOrder(market, orderID string, lots uint64) (string, error) {
+	return "", core.ErrMeshDisabled
+}
+func (*TCore) MeshCancelOrder(orderID string) error      { return core.ErrMeshDisabled }
+func (*TCore) MeshActivity() (*core.MeshActivity, error) { return &core.MeshActivity{}, nil }

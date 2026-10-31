@@ -34,6 +34,7 @@ import (
 	"decred.org/dcrdex/client/asset"
 	"decred.org/dcrdex/client/core"
 	"decred.org/dcrdex/client/db"
+	"decred.org/dcrdex/client/mesh"
 	"decred.org/dcrdex/client/mm"
 	"decred.org/dcrdex/client/mm/libxc"
 	"decred.org/dcrdex/client/tor"
@@ -202,6 +203,12 @@ type clientCore interface {
 	Proposal(assetID uint32, token string) (*pi.Proposal, error)
 	ProposalsInProgress() ([]*pi.MiniProposal, error)
 	CastVote(assetID uint32, pw []byte, token, bit string) error
+	MeshStatus() *core.MeshStatus
+	MeshBook(market string) (*mesh.BookView, error)
+	MeshPostOrder(form *core.MeshOrderForm) (*mesh.ViewOrder, error)
+	MeshTakeOrder(market, orderID string, lots uint64) (string, error)
+	MeshCancelOrder(orderID string) error
+	MeshActivity() (*core.MeshActivity, error)
 }
 
 type MMCore interface {
@@ -542,6 +549,7 @@ func New(cfg *Config) (*WebServer, error) {
 					webAuth.With(proposalTokenCtx).Get("/proposal/{token}", s.handleProposal)
 					webAuth.Get(proposalsRoute, s.handleProposals)
 					webAuth.Get("/generatecompanionappqrcode", s.handleGenerateCompanionAppQRCode)
+					webAuth.Get(meshRoute, s.handleMesh)
 				})
 			})
 
@@ -673,6 +681,12 @@ func New(cfg *Config) (*WebServer, error) {
 			apiAuth.Post("/pendingbridges", s.apiPendingBridges)
 			apiAuth.Post("/bridgehistory", s.apiBridgeHistory)
 			apiAuth.Post("/castvote", s.apiCastVote)
+			apiAuth.Get("/mesh/status", s.apiMeshStatus)
+			apiAuth.Post("/mesh/book", s.apiMeshBook)
+			apiAuth.Post("/mesh/order", s.apiMeshOrder)
+			apiAuth.Post("/mesh/take", s.apiMeshTake)
+			apiAuth.Post("/mesh/cancel", s.apiMeshCancel)
+			apiAuth.Get("/mesh/activity", s.apiMeshActivity)
 			apiAuth.Post("/unpaircompanionapp", s.apiUnpairCompanionApp)
 		})
 	})
@@ -760,6 +774,7 @@ func (s *WebServer) buildTemplates(lang string) error {
 		addTemplate("login", bb, "forms").
 		addTemplate("register", bb, "forms").
 		addTemplate("markets", bb, "forms").
+		addTemplate("mesh", bb).
 		addTemplate("wallets", bb, "forms", "docs").
 		addTemplate("settings", bb, "forms").
 		addTemplate("orders", bb).

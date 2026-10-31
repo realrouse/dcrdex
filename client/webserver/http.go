@@ -30,6 +30,7 @@ const (
 	initRoute        = "/init"
 	loginRoute       = "/login"
 	marketsRoute     = "/markets"
+	meshRoute        = "/mesh"
 	walletsRoute     = "/wallets"
 	walletLogRoute   = "/wallets/logfile"
 	settingsRoute    = "/settings"
@@ -138,6 +139,12 @@ func (s *WebServer) knownUnregisteredExchanges(registeredExchanges map[string]*c
 // handleMarkets is the handler for the '/markets' page request.
 func (s *WebServer) handleMarkets(w http.ResponseWriter, r *http.Request) {
 	s.sendTemplate(w, "markets", s.commonArgs(r, "Markets | Bison Wallet"))
+}
+
+// handleMesh is the handler for the '/mesh' page request: peer-to-peer
+// trading on the Tatanka mesh (simnet).
+func (s *WebServer) handleMesh(w http.ResponseWriter, r *http.Request) {
+	s.sendTemplate(w, "mesh", s.commonArgs(r, "Mesh Trade | Bison Wallet"))
 }
 
 // handleMarketMaking is the handler for the '/mm' page request.

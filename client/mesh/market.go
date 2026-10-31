@@ -84,6 +84,8 @@ type OrderBooks struct {
 	// guard is the inbox replay cache and rate limit.
 	guard *inboxGuard
 	adv   advCapture // debug only (adversary.go)
+	// pres is the presence and peer registry (presence.go).
+	pres *presence
 }
 
 // NewOrderBooks constructs an OrderBooks.
@@ -103,6 +105,7 @@ func NewOrderBooks(ps pubSub, priv libp2pcrypto.PrivKey, encPriv *secp256k1.Priv
 		matches:  make(map[MatchID]*matchState),
 		policies: make(map[Market]LockPolicy),
 		guard:    newInboxGuard(),
+		pres:     newPresence(),
 	}
 }
 
@@ -145,6 +148,7 @@ func (ob *OrderBooks) handleEvent(ctx context.Context, m Market, topic string, b
 	switch ev.Type {
 	case mc.TopicEventPeerSubscribed:
 		ob.log.Debugf("Peer %s subscribed to %s. Sending own orders.", ev.Peer, topic)
+		ob.seenPeer(ev.Peer.String(), "topic")
 		ob.broadcastOwn(ctx, &m)
 		return
 	case mc.TopicEventData:
@@ -167,8 +171,10 @@ func (ob *OrderBooks) handleEvent(ctx context.Context, m Market, topic string, b
 			ob.log.Debugf("Rejected order from %s on %s: %v", ev.Peer, topic, err)
 			return
 		}
+		ob.seenPeer(msg.Order.Owner, "book")
 		if isNew {
 			ob.log.Infof("Mesh order %s added to %s (owner %s)", msg.Order.ID(), topic, msg.Order.Owner)
+			ob.emitOrder(EventOrder, msg.Order, msg.Order.Qty, false)
 		}
 	case msgTypeCancel:
 		removed, err := book.Cancel(msg.Cancel, ev.Peer, now)
@@ -178,6 +184,7 @@ func (ob *OrderBooks) handleEvent(ctx context.Context, m Market, topic string, b
 		}
 		if removed {
 			ob.log.Infof("Mesh order %s cancelled on %s", msg.Cancel.OrderID, topic)
+			ob.emit(&Event{Kind: EventCancel, Market: marketName(m), Peer: ev.Peer.String(), OrderID: msg.Cancel.OrderID.String()})
 		}
 	case msgTypeUpdate:
 		changed, err := book.Update(msg.Update, ev.Peer, now)
@@ -187,6 +194,7 @@ func (ob *OrderBooks) handleEvent(ctx context.Context, m Market, topic string, b
 		}
 		if changed {
 			ob.log.Infof("Mesh order %s on %s now has %d remaining", msg.Update.OrderID, topic, msg.Update.Remaining)
+			ob.emit(&Event{Kind: EventUpdate, Market: marketName(m), Peer: ev.Peer.String(), OrderID: msg.Update.OrderID.String(), Qty: msg.Update.Remaining})
 		}
 	}
 }
@@ -233,6 +241,7 @@ func (ob *OrderBooks) PostOrder(ctx context.Context, m Market, sell bool, qty, l
 	ob.own[ord.ID()] = &ownOrder{ord: ord, topic: topic, remaining: qty}
 	ob.mtx.Unlock()
 	ob.broadcast(ctx, topic, &bookMsg{Type: msgTypeOrder, Order: ord})
+	ob.emitOrder(EventOrder, ord, qty, true)
 	return ord, nil
 }
 
@@ -260,6 +269,7 @@ func (ob *OrderBooks) CancelOrder(ctx context.Context, id OrderID) error {
 		return err
 	}
 	ob.broadcast(ctx, oo.topic, &bookMsg{Type: msgTypeCancel, Cancel: c})
+	ob.emit(&Event{Kind: EventCancel, Market: marketName(oo.ord.Market), Peer: ob.self.String(), OrderID: id.String(), Own: true})
 	return nil
 }
 
@@ -296,9 +306,11 @@ func (ob *OrderBooks) fillOwn(ctx context.Context, id OrderID, qty uint64, wasRe
 		ob.log.Errorf("Error applying own order update: %v", err)
 	}
 	ob.broadcast(ctx, oo.topic, &bookMsg{Type: msgTypeUpdate, Update: upd})
+	ob.emit(&Event{Kind: EventUpdate, Market: marketName(oo.ord.Market), Peer: ob.self.String(), OrderID: id.String(), Qty: upd.Remaining, Own: true})
 }
 
-// Book returns the live orders seen on the market.
+// Book returns the live orders seen on the market, except those of peers
+// running an incompatible protocol version (see BookView).
 func (ob *OrderBooks) Book(m Market) ([]*BookOrder, error) {
 	ob.mtx.RLock()
 	book, found := ob.books[m]
@@ -306,7 +318,89 @@ func (ob *OrderBooks) Book(m Market) ([]*BookOrder, error) {
 	if !found {
 		return nil, errors.New("not subscribed to market")
 	}
-	return book.Orders(ob.now()), nil
+	all := book.Orders(ob.now())
+	ords := all[:0:0]
+	for _, o := range all {
+		if ob.orderBlock(o.Owner) == "" {
+			ords = append(ords, o)
+		}
+	}
+	return ords, nil
+}
+
+// ViewOrder is a book order with the owner's display name and, if it can't
+// be taken, the reason.
+type ViewOrder struct {
+	*BookOrder
+	ID        string `json:"id"`
+	OwnerName string `json:"ownerName,omitempty"`
+	Own       bool   `json:"own"`
+	// Hidden is why the order is not shown (incompatible protocol).
+	Hidden string `json:"hidden,omitempty"`
+	// Warning is why a take would likely fail (e.g. lock policy mismatch).
+	Warning string `json:"warning,omitempty"`
+}
+
+// BookView is a market's book split into visible orders and orders hidden
+// because their owners run an incompatible protocol version.
+type BookView struct {
+	Market     string       `json:"market"`
+	Orders     []*ViewOrder `json:"orders"`
+	Hidden     []*ViewOrder `json:"hidden"`
+	Subscribed bool         `json:"subscribed"`
+}
+
+// BookView returns the market's book for display.
+func (ob *OrderBooks) BookView(m Market) *BookView {
+	name, _ := m.Name()
+	bv := &BookView{Market: name, Orders: []*ViewOrder{}, Hidden: []*ViewOrder{}}
+	ob.mtx.RLock()
+	book, found := ob.books[m]
+	ob.mtx.RUnlock()
+	if !found {
+		return bv
+	}
+	bv.Subscribed = true
+	self := ob.self.String()
+	for _, o := range book.Orders(ob.now()) {
+		vo := &ViewOrder{BookOrder: o, ID: o.ID().String(), Own: o.Owner == self}
+		if vo.Own {
+			vo.OwnerName = ob.Name()
+		} else if pi, ok := ob.Peer(o.Owner); ok {
+			vo.OwnerName = pi.Name
+		}
+		if reason := ob.orderBlock(o.Owner); reason != "" {
+			vo.Hidden = reason
+			bv.Hidden = append(bv.Hidden, vo)
+			continue
+		}
+		if !vo.Own {
+			vo.Warning = ob.policyWarning(o.Owner, m)
+		}
+		bv.Orders = append(bv.Orders, vo)
+	}
+	return bv
+}
+
+// Markets returns the subscribed markets.
+func (ob *OrderBooks) Markets() []Market {
+	ob.mtx.RLock()
+	defer ob.mtx.RUnlock()
+	ms := make([]Market, 0, len(ob.books))
+	for m := range ob.books {
+		ms = append(ms, m)
+	}
+	return ms
+}
+
+func marketName(m Market) string {
+	name, _ := m.Name()
+	return name
+}
+
+func (ob *OrderBooks) emitOrder(kind string, o *MeshOrder, remaining uint64, own bool) {
+	ob.emit(&Event{Kind: kind, Market: marketName(o.Market), Peer: o.Owner, OrderID: o.ID().String(),
+		Sell: o.Sell, Qty: remaining, Rate: o.Rate, Own: own})
 }
 
 // OwnOrders returns this client's live standing orders.

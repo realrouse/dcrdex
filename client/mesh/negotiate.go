@@ -90,6 +90,9 @@ func (ob *OrderBooks) setStatus(st *matchState, status, reason string) {
 		}
 	}
 	ob.log.Infof("Match %s (%s): %s %s", st.match.ID, st.side, status, reason)
+	ob.emit(&Event{Kind: EventMatch, Market: marketName(st.match.Market), MatchID: st.match.ID.String(),
+		OrderID: st.match.MakerOrderID.String(), Status: status, Side: st.side, Sell: st.match.MakerSell,
+		Qty: st.match.Qty, Rate: st.match.Rate, Maker: st.match.Maker, Taker: st.match.Taker})
 }
 
 // Matches returns snapshots of all known matches, oldest first.
@@ -275,6 +278,7 @@ func (ob *OrderBooks) Propose(ctx context.Context, bo *BookOrder, qty, rate uint
 
 func (ob *OrderBooks) handleInboxMsg(ctx context.Context, msg *inboxMsg) {
 	from := msg.From
+	ob.seenPeer(from.String(), "inbox")
 	switch msg.Type {
 	case msgMatchPropose:
 		var p MatchProposal
@@ -524,4 +528,39 @@ func (ob *OrderBooks) handleReject(_ context.Context, from peer.ID, r *MatchReje
 		ob.releaseLocked(st)
 		ob.setStatus(st, MatchRejected, "taker: "+r.Reason)
 	}
+}
+
+// TakeOrder proposes a match for qty base atoms against one specific book
+// order at its rate, as when a user clicks an order on the book. Unlike
+// Propose, it checks that the order can be taken: it must be on the book,
+// not ours, from a compatible peer, and qty must be a whole number of the
+// order's lots no larger than what remains.
+func (ob *OrderBooks) TakeOrder(ctx context.Context, m Market, id OrderID, qty uint64) (MatchID, error) {
+	ob.mtx.RLock()
+	book := ob.books[m]
+	ob.mtx.RUnlock()
+	if book == nil {
+		return MatchID{}, errors.New("not subscribed to market")
+	}
+	bo, found := book.Order(id, ob.now())
+	if !found {
+		return MatchID{}, errors.New("order is no longer on the book")
+	}
+	if bo.Owner == ob.self.String() {
+		return MatchID{}, errors.New("can't take your own order")
+	}
+	if reason := ob.orderBlock(bo.Owner); reason != "" {
+		return MatchID{}, errors.New(reason)
+	}
+	if bo.LotSize == 0 || qty == 0 || qty%bo.LotSize != 0 {
+		return MatchID{}, fmt.Errorf("quantity must be a whole number of lots of %d", bo.LotSize)
+	}
+	if qty > bo.Remaining {
+		return MatchID{}, fmt.Errorf("only %d remaining on the order", bo.Remaining)
+	}
+	if ok, reason := OrderIsMatchable(qty, bo, &ob.cfg.Fees); !ok {
+		return MatchID{}, fmt.Errorf("order not matchable: %s", reason)
+	}
+	mid, _, err := ob.Propose(ctx, bo, qty, bo.Rate)
+	return mid, err
 }
