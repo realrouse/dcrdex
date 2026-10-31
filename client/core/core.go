@@ -1676,6 +1676,8 @@ type Config struct {
 	// MeshBootstrap are mesh node multiaddrs (simnet only). If empty, the
 	// TATANKA_SIMNET_ADDR environment variable (comma-separated) is used.
 	MeshBootstrap []string
+	// MeshPort is the mesh client's libp2p listen port (0: library default).
+	MeshPort int
 	// AppVersion is the app version announced to mesh peers.
 	AppVersion string
 	// MaxActiveMatches is the maximum number of active swap matches allowed
@@ -4929,6 +4931,7 @@ func (c *Core) Login(pw []byte) error {
 					BootstrapPeers: bootstrap,
 					Name:           c.cfg.MeshName,
 					AppVersion:     c.cfg.AppVersion,
+					ListenPort:     c.cfg.MeshPort,
 					Bonds:          todoBonds,
 					Log:            c.log.SubLogger("MC"),
 				})

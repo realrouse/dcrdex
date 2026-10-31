@@ -55,6 +55,9 @@ type ClientConfig struct {
 	Name string
 	// AppVersion is announced to other peers.
 	AppVersion string
+	// ListenPort is the libp2p TCP port of the mesh client (0: the mesh
+	// library's default, 7565).
+	ListenPort int
 	Bonds      []*bond.BondParams
 	Log        dex.Logger
 }
@@ -106,6 +109,7 @@ func NewClient(cfg *ClientConfig) (*Client, error) {
 	cl, err := mc.NewClient(&mc.Config{
 		PrivateKey:      meshPriv,
 		RemotePeerAddrs: cfg.BootstrapPeers,
+		Port:            cfg.ListenPort,
 		Logger:          cfg.Log.SubLogger("mc"),
 	})
 	if err != nil {
