@@ -160,6 +160,8 @@ type spvWallet struct {
 	bestSpvPeerHeight int32 // atomic
 	tipChan           chan *block
 	gapLimit          uint32
+	// connectPeers, if set, are the only peers the syncer connects to.
+	connectPeers []string
 
 	blockCache blockCache
 
@@ -1552,9 +1554,8 @@ func (w *spvWallet) newSpvSyncer() *spv.Syncer {
 	defer w.spvMtx.Unlock()
 	ew := w.dcrWallet.(*extendedWallet)
 	dcrw := ew.Wallet
-	var connectPeers []string
-	switch w.chainParams.Net {
-	case wire.SimNet:
+	connectPeers := w.connectPeers
+	if len(connectPeers) == 0 && w.chainParams.Net == wire.SimNet {
 		connectPeers = []string{"localhost:19560"}
 	}
 	// TODO: Route SPV peer connections through Tor when TorProxy is

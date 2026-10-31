@@ -142,6 +142,14 @@ var (
 	// be tried over and over with wallet in SPV mode.
 	maxMempoolAge = time.Hour * 2
 
+	// spvPeersOpt lets the native wallet use specific peers, e.g. a shared
+	// simnet test node instead of localhost:19560.
+	spvPeersOpt = &asset.ConfigOption{
+		Key:         "spvpeers",
+		DisplayName: "Connect only to these peers",
+		Description: "Comma-separated host:port list of Decred nodes the native wallet connects to " +
+			"exclusively. Leave empty for normal peer discovery (simnet: localhost:19560).",
+	}
 	WalletOpts = []*asset.ConfigOption{
 		{
 			Key:         "fallbackfee",
@@ -299,7 +307,7 @@ var (
 				Type:             walletTypeSPV,
 				Tab:              "Native",
 				Description:      "Use the built-in SPV wallet",
-				ConfigOpts:       WalletOpts,
+				ConfigOpts:       append(append([]*asset.ConfigOption{}, WalletOpts...), spvPeersOpt),
 				Seeded:           true,
 				MultiFundingOpts: multiFundingOpts,
 			},
@@ -802,10 +810,16 @@ func NewWallet(cfg *asset.WalletConfig, logger dex.Logger, network dex.Network) 
 			return nil, err
 		}
 	case walletTypeSPV:
-		dcr.wallet, err = openSPVWallet(cfg.DataDir, walletCfg.GapLimit, chainParams, logger)
+		spvPeers, err := parseSPVPeers(walletCfg.SPVPeers, chainParams.DefaultPort)
 		if err != nil {
 			return nil, err
 		}
+		spvW, err := openSPVWallet(cfg.DataDir, walletCfg.GapLimit, chainParams, logger)
+		if err != nil {
+			return nil, err
+		}
+		spvW.connectPeers = spvPeers
+		dcr.wallet = spvW
 		w, err = initNativeWallet(dcr)
 		if err != nil {
 			return nil, err

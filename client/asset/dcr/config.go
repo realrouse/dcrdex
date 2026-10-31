@@ -5,7 +5,10 @@ package dcr
 
 import (
 	"fmt"
+	"net"
 	"path/filepath"
+	"strconv"
+	"strings"
 
 	"decred.org/dcrdex/dex"
 	"decred.org/dcrdex/dex/config"
@@ -39,6 +42,34 @@ type walletConfig struct {
 	ApiFeeFallback   bool    `ini:"apifeefallback"`
 	GapLimit         uint32  `ini:"gaplimit"`
 	PoliteiaEnabled  bool    `ini:"politeiaenabled"`
+	// SPVPeers is a comma-separated list of host:port peers the native
+	// (SPV) wallet connects to exclusively. Empty: normal peer discovery
+	// (simnet: localhost:19560).
+	SPVPeers string `ini:"spvpeers"`
+}
+
+// parseSPVPeers splits the spvpeers setting into host:port entries. A
+// missing port gets the network's default P2P port.
+func parseSPVPeers(s, defaultPort string) ([]string, error) {
+	var peers []string
+	for _, p := range strings.Split(s, ",") {
+		p = strings.TrimSpace(p)
+		if p == "" {
+			continue
+		}
+		host, port, err := net.SplitHostPort(p)
+		if err != nil {
+			host, port = p, defaultPort
+		}
+		if host == "" {
+			return nil, fmt.Errorf("bad SPV peer %q", p)
+		}
+		if n, err := strconv.Atoi(port); err != nil || n <= 0 || n > 65535 {
+			return nil, fmt.Errorf("bad port in SPV peer %q", p)
+		}
+		peers = append(peers, net.JoinHostPort(host, port))
+	}
+	return peers, nil
 }
 
 type rpcConfig struct {
