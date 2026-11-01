@@ -305,7 +305,7 @@ func (s *NeutrinoClient) Rescan(startHash *chainhash.Hash, addrs []btcutil.Addre
 
 	s.clientMtx.Lock()
 	newRescan := neutrino.NewRescan(
-		&neutrino.RescanChainSource{ChainService: s.CS},
+		newRescanSource(s.CS, s.rescanQuit, s.quit),
 		neutrino.NotificationHandlers(rpcclient.NotificationHandlers{
 			OnBlockConnected:         s.onBlockConnected,
 			OnFilteredBlockConnected: s.onFilteredBlockConnected,
@@ -319,6 +319,7 @@ func (s *NeutrinoClient) Rescan(startHash *chainhash.Hash, addrs []btcutil.Addre
 	)
 	s.rescan = newRescan
 	s.rescanErr = s.rescan.Start()
+	s.watchRescanErr(s.rescanErr, s.rescanQuit)
 	s.clientMtx.Unlock()
 	return nil
 }
@@ -347,7 +348,7 @@ func (s *NeutrinoClient) NotifyReceived(addrs []btcutil.Address) error {
 	s.lastProgressSent = true
 	s.lastFilteredHeader = nil
 	newRescan := neutrino.NewRescan(
-		&neutrino.RescanChainSource{ChainService: s.CS},
+		newRescanSource(s.CS, s.rescanQuit, s.quit),
 		neutrino.NotificationHandlers(rpcclient.NotificationHandlers{
 			OnBlockConnected:         s.onBlockConnected,
 			OnFilteredBlockConnected: s.onFilteredBlockConnected,
@@ -359,8 +360,29 @@ func (s *NeutrinoClient) NotifyReceived(addrs []btcutil.Address) error {
 	)
 	s.rescan = newRescan
 	s.rescanErr = s.rescan.Start()
+	s.watchRescanErr(s.rescanErr, s.rescanQuit)
 	s.clientMtx.Unlock()
 	return nil
+}
+
+// watchRescanErr logs the result of a rescan as soon as it ends. The caller
+// holds clientMtx.
+func (s *NeutrinoClient) watchRescanErr(errChan <-chan error, rescanQuit <-chan struct{}) {
+	quit := s.quit
+	go func() {
+		select {
+		case err := <-errChan:
+			select {
+			case <-rescanQuit: // replaced or stopped
+			case <-quit:
+			default:
+				if err != nil {
+					nlog.Errorf("Neutrino rescan ended with error: %s", err)
+				}
+			}
+		case <-quit:
+		}
+	}()
 }
 
 // Notifications returns the notification queue.
@@ -503,9 +525,6 @@ func (s *NeutrinoClient) notificationHandler() {
 	var next interface{}
 out:
 	for {
-		s.clientMtx.Lock()
-		rescanErr := s.rescanErr
-		s.clientMtx.Unlock()
 		select {
 		case n, ok := <-enqueue:
 			if !ok {
@@ -534,11 +553,6 @@ out:
 					break out
 				}
 				dequeue = nil
-			}
-
-		case err := <-rescanErr:
-			if err != nil {
-				nlog.Errorf("Neutrino rescan ended with error: %s", err)
 			}
 
 		case s.currentBlock <- bs:
