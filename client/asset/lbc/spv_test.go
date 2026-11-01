@@ -5,8 +5,10 @@ package lbc
 
 import (
 	"bytes"
+	"net"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -152,5 +154,28 @@ func TestConvertAccountPubKey(t *testing.T) {
 	}
 	if !bytes.Equal(lbcPub.SerializeCompressed(), btcPub.SerializeCompressed()) {
 		t.Fatalf("public keys differ")
+	}
+}
+
+func TestMainnetFilterPeers(t *testing.T) {
+	if len(mainnetFilterPeers) < 2 {
+		t.Fatalf("want several mainnet filter peers, got %d", len(mainnetFilterPeers))
+	}
+	if mainnetFilterPeers[0] != foundationFilterPeer {
+		t.Fatalf("first mainnet peer should be the foundation peer, got %s", mainnetFilterPeers[0])
+	}
+	seen := make(map[string]bool)
+	for _, p := range mainnetFilterPeers {
+		host, port, err := net.SplitHostPort(p)
+		if err != nil || host == "" {
+			t.Fatalf("bad peer %q: %v", p, err)
+		}
+		if n, err := strconv.Atoi(port); err != nil || n <= 0 || n > 65535 {
+			t.Fatalf("bad port in %q", p)
+		}
+		if seen[p] {
+			t.Fatalf("duplicate peer %q", p)
+		}
+		seen[p] = true
 	}
 }
