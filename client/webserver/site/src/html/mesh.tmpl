@@ -5,7 +5,7 @@
 
   <div class="d-flex align-items-center justify-content-between flex-wrap mb-2">
     <div class="d-flex align-items-center">
-      <span class="fs22 demi me-3">Mesh Trade</span>
+      <span class="fs22 demi me-3">Mesh</span>
       <span id="healthPill" class="mesh-pill offline">offline</span>
       <span id="nodeInfo" class="fs14 grey ms-3"></span>
     </div>
@@ -13,7 +13,6 @@
       <span class="grey me-2">You:</span><span id="selfName" class="demi me-1"></span>
       <span id="selfID" class="grey mono me-3"></span>
       <span id="protoBadge" class="mesh-badge me-3"></span>
-      <a id="serverMarketsLink" href="/markets" class="d-hide subtlelink">Server markets</a>
     </div>
   </div>
 
@@ -52,75 +51,11 @@
       </div>
     </section>
 
-    <!-- Market, book and order form -->
-    <section class="mesh-card mesh-trade">
-      <div class="d-flex align-items-center flex-wrap px-3 pt-2 gap-2" id="marketBtns"></div>
-      <div class="mesh-trade-body p-3">
-        <div class="mesh-book">
-          <div class="d-flex justify-content-between demi fs14 mb-1">
-            <span>Order book <span id="bookMarket" class="grey"></span></span>
-            <span class="fs12 grey">click an order to take it</span>
-          </div>
-          <table class="mesh-table fs13 w-100">
-            <thead><tr><th>Rate (<span id="rateUnitHead"></span>)</th><th>Lots</th><th>Owner</th><th></th></tr></thead>
-            <tbody id="sellRows" class="sells"></tbody>
-            <tbody><tr class="mesh-mid"><td colspan="4" id="spread" class="text-center fs12 grey"></td></tr></tbody>
-            <tbody id="buyRows" class="buys"></tbody>
-          </table>
-          <div id="emptyBook" class="fs13 grey py-2 text-center">No orders on this market yet.</div>
-          <div id="hiddenBox" class="d-hide fs12 mt-2 mesh-hidden">
-            <div class="demi">Hidden orders</div>
-            <div id="hiddenRows"></div>
-          </div>
-        </div>
-
-        <div class="mesh-form">
-          <div id="takeBox" class="d-hide mesh-take mb-3">
-            <div class="demi mb-1">Take order</div>
-            <div id="takeDesc" class="fs13 mb-2"></div>
-            <div class="d-flex align-items-center gap-2 mb-2">
-              <label class="fs13" for="takeLots">Lots</label>
-              <input id="takeLots" type="number" min="1" step="1" value="1" class="form-control form-control-sm mesh-num">
-              <span id="takeMax" class="fs12 grey"></span>
-            </div>
-            <div id="takeTotals" class="fs13 mb-2"></div>
-            <div id="takeWarn" class="fs12 text-warning mb-2 d-hide"></div>
-            <div class="d-flex gap-2">
-              <button id="takeSubmit" class="go flex-grow-1">Take</button>
-              <button id="takeCancel" class="flex-grow-1">Close</button>
-            </div>
-            <div id="takeErr" class="fs13 text-danger mt-1 d-hide"></div>
-          </div>
-
-          <div class="d-flex mb-2 mesh-sides">
-            <button id="buyTab" class="selected buy flex-grow-1">Buy</button>
-            <button id="sellTab" class="sell flex-grow-1">Sell</button>
-          </div>
-          <label class="fs13" for="lotsInput">Quantity (lots)</label>
-          <input id="lotsInput" type="number" min="1" step="1" value="1" class="form-control form-control-sm mb-1">
-          <div class="fs12 grey mb-2">1 lot = <span id="lotSize"></span></div>
-          <label class="fs13" for="rateInput">Rate (<span id="rateUnit"></span>)</label>
-          <input id="rateInput" type="number" min="0" step="any" class="form-control form-control-sm mb-2">
-          <div class="fs13 mb-2" id="orderTotal"></div>
-          <div class="fs12 grey mb-2">Lock policy: maker <span id="makerLock"></span>, taker <span id="takerLock"></span>.
-            Your order stays on the book for an hour.</div>
-          <button id="submitOrder" class="go w-100">Place order</button>
-          <div id="orderErr" class="fs13 text-danger mt-1 d-hide"></div>
-          <div id="orderOK" class="fs13 text-success mt-1 d-hide"></div>
-        </div>
-      </div>
-    </section>
-
-    <!-- Own orders, matches and swaps -->
+    <!-- Matches and swaps -->
     <section class="mesh-card mesh-activity p-3">
-      <div class="demi mb-1">Your orders</div>
-      <table class="mesh-table fs13 w-100 mb-1">
-        <thead><tr><th>Market</th><th>Side</th><th>Rate</th><th>Lots left</th><th>Expires</th><th></th></tr></thead>
-        <tbody id="ownRows"></tbody>
-      </table>
-      <div id="noOwn" class="fs13 grey mb-3">No open orders.</div>
-
-      <div class="demi mb-1 mt-2">Matches and swaps</div>
+      <div class="demi mb-1">Matches and swaps</div>
+      <div class="fs12 grey mb-2">Mesh orders are placed and taken on the <a href="/markets" class="subtlelink">Trade</a> page.
+        Their swaps show here and light up the map.</div>
       <div id="swapList"></div>
       <div id="noSwaps" class="fs13 grey">No matches yet.</div>
     </section>

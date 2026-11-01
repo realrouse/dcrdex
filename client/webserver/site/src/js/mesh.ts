@@ -1,10 +1,10 @@
 import BasePage from './basepage'
 import Doc from './doc'
-import { postJSON, getJSON } from './http'
+import { getJSON } from './http'
 import { app, PageElement, CoreNote, UnitInfo } from './registry'
 import MeshViz, { VizPeer, Health } from './meshviz'
 
-interface MeshMarketInfo {
+export interface MeshMarketInfo {
   name: string
   baseID: number
   quoteID: number
@@ -17,7 +17,7 @@ interface MeshMarketInfo {
   subscribed: boolean
 }
 
-interface PeerInfo {
+export interface PeerInfo {
   id: string
   name?: string
   proto: number
@@ -32,14 +32,14 @@ interface PeerInfo {
   reason?: string
 }
 
-interface NodeInfo {
+export interface NodeInfo {
   id: string
   addr?: string
   source: string
   connected: boolean
 }
 
-interface MeshStatus {
+export interface MeshStatus {
   enabled: boolean
   connected: boolean
   peerID: string
@@ -54,7 +54,7 @@ interface MeshStatus {
   markets: MeshMarketInfo[] | null
 }
 
-interface ViewOrder {
+export interface ViewOrder {
   id: string
   base: number
   quote: number
@@ -72,14 +72,14 @@ interface ViewOrder {
   warning?: string
 }
 
-interface BookView {
+export interface BookView {
   market: string
   orders: ViewOrder[] | null
   hidden: ViewOrder[] | null
   subscribed: boolean
 }
 
-interface MeshMatch {
+export interface MeshMatch {
   id: string
   market: { base: number, quote: number }
   makerOrderID: string
@@ -94,7 +94,7 @@ interface MeshMatch {
   takerLockTime: number
 }
 
-interface MatchRecord {
+export interface MatchRecord {
   side: string
   status: string
   reason?: string
@@ -102,7 +102,7 @@ interface MatchRecord {
   match: MeshMatch
 }
 
-interface SwapView {
+export interface SwapView {
   match: MeshMatch
   side: string
   status: string
@@ -114,13 +114,13 @@ interface SwapView {
   peer: string
 }
 
-interface Activity {
+export interface Activity {
   orders: ViewOrder[] | null
   matches: MatchRecord[] | null
   swaps: SwapView[] | null
 }
 
-interface MeshEvent {
+export interface MeshEvent {
   kind: string
   market?: string
   peer?: string
@@ -138,7 +138,7 @@ interface MeshEvent {
   info?: PeerInfo
 }
 
-interface MeshNote extends CoreNote {
+export interface MeshNote extends CoreNote {
   event: MeshEvent
 }
 
@@ -180,12 +180,8 @@ export default class MeshPage extends BasePage {
   page: Record<string, PageElement>
   status: MeshStatus | null
   markets: MeshMarketInfo[]
-  market: MeshMarketInfo | null
-  sell: boolean
   viz: MeshViz | null
-  book: BookView | null
   activity: Activity | null
-  takeOrder: ViewOrder | null
   timers: number[]
   pending: Record<string, number>
   seenMatches: Set<string>
@@ -196,27 +192,12 @@ export default class MeshPage extends BasePage {
     const page = this.page = Doc.idDescendants(body)
     this.status = null
     this.markets = []
-    this.market = null
-    this.sell = false
     this.viz = null
-    this.book = null
     this.activity = null
-    this.takeOrder = null
     this.timers = []
     this.pending = {}
     this.seenMatches = new Set()
     Doc.cleanTemplates(page.swapTmpl)
-
-    Doc.bind(page.buyTab, 'click', () => this.setSide(false))
-    Doc.bind(page.sellTab, 'click', () => this.setSide(true))
-    Doc.bind(page.lotsInput, 'input', () => this.updateTotal())
-    Doc.bind(page.rateInput, 'input', () => this.updateTotal())
-    Doc.bind(page.submitOrder, 'click', () => this.submitOrder())
-    Doc.bind(page.takeCancel, 'click', () => this.closeTake())
-    Doc.bind(page.takeSubmit, 'click', () => this.submitTake())
-    Doc.bind(page.takeLots, 'input', () => this.updateTakeTotals())
-
-    Doc.setVis(Object.keys(app().exchanges || {}).length > 0, page.serverMarketsLink)
 
     app().registerNoteFeeder({
       mesh: (n: CoreNote) => { this.handleMeshNote(n as MeshNote) }
@@ -236,11 +217,9 @@ export default class MeshPage extends BasePage {
     this.updateViz()
     this.viz.start()
     this.markets = st.markets || []
-    this.renderMarketButtons()
-    if (this.markets.length) await this.selectMarket(this.markets[0])
     await this.refreshActivity()
     this.timers.push(window.setInterval(() => { this.refreshStatus() }, 5000))
-    this.timers.push(window.setInterval(() => { this.refreshBook(); this.refreshActivity() }, 7000))
+    this.timers.push(window.setInterval(() => { this.refreshActivity() }, 7000))
   }
 
   unload () {
@@ -392,206 +371,6 @@ export default class MeshPage extends BasePage {
     Doc.show(tip)
   }
 
-  renderMarketButtons () {
-    const { page } = this
-    Doc.empty(page.marketBtns)
-    for (const m of this.markets) {
-      const b = document.createElement('button')
-      b.className = 'mesh-mkt'
-      b.dataset.market = m.name
-      for (const sym of [m.baseSymbol, m.quoteSymbol]) {
-        const img = document.createElement('img')
-        img.src = Doc.logoPath(sym)
-        img.className = 'micro-icon me-1'
-        img.alt = ''
-        b.appendChild(img)
-      }
-      b.appendChild(document.createTextNode(`${m.baseSymbol.toUpperCase()}-${m.quoteSymbol.toUpperCase()}`))
-      Doc.bind(b, 'click', () => { this.selectMarket(m) })
-      page.marketBtns.appendChild(b)
-    }
-  }
-
-  async selectMarket (m: MeshMarketInfo) {
-    const { page } = this
-    this.market = m
-    this.closeTake()
-    for (const b of Doc.applySelector(page.marketBtns, 'button')) b.classList.toggle('selected', b.dataset.market === m.name)
-    const bu = this.unitInfo(m.baseID).conventional.unit
-    const qu = this.unitInfo(m.quoteID).conventional.unit
-    page.bookMarket.textContent = `${bu}-${qu}`
-    page.rateUnit.textContent = page.rateUnitHead.textContent = `${qu}/${bu}`
-    page.lotSize.textContent = this.fmtAmt(m.lotSize, m.baseID)
-    page.makerLock.textContent = Doc.formatDuration(m.makerLockSec * 1000)
-    page.takerLock.textContent = Doc.formatDuration(m.takerLockSec * 1000)
-    const rate = this.convRate(m.testRate, m)
-    ;(page.rateInput as HTMLInputElement).value = rate ? String(rate) : ''
-    Doc.hide(page.orderErr, page.orderOK)
-    this.updateTotal()
-    await this.refreshBook()
-  }
-
-  async refreshBook () {
-    const m = this.market
-    if (!m) return
-    const res = await postJSON('/api/mesh/book', { market: m.name })
-    if (!res || !res.ok || this.market !== m) return
-    this.book = res.book as BookView
-    this.renderBook()
-  }
-
-  renderBook () {
-    const { page, book, market: m } = this
-    if (!book || !m) return
-    const orders = book.orders || []
-    const sells = orders.filter(o => o.sell).sort((a, b) => b.rate - a.rate)
-    const buys = orders.filter(o => !o.sell).sort((a, b) => b.rate - a.rate)
-    Doc.empty(page.sellRows, page.buyRows, page.hiddenRows)
-    for (const o of sells) page.sellRows.appendChild(this.bookRow(o, m))
-    for (const o of buys) page.buyRows.appendChild(this.bookRow(o, m))
-    Doc.setVis(orders.length === 0, page.emptyBook)
-    if (sells.length && buys.length) {
-      const lo = sells[sells.length - 1].rate
-      const hi = buys[0].rate
-      page.spread.textContent = `spread ${this.fmtRate(Math.abs(lo - hi), m)}`
-    } else page.spread.textContent = ''
-    const hidden = book.hidden || []
-    Doc.setVis(hidden.length > 0, page.hiddenBox)
-    for (const o of hidden) {
-      const div = document.createElement('div')
-      div.className = 'grey'
-      div.textContent = `${o.sell ? 'sell' : 'buy'} ${o.remaining / o.lotSize} lot(s) @ ${this.fmtRate(o.rate, m)} from ${o.ownerName || shortID(o.owner)}: ${o.hidden}`
-      page.hiddenRows.appendChild(div)
-    }
-  }
-
-  bookRow (o: ViewOrder, m: MeshMarketInfo): HTMLElement {
-    const tr = document.createElement('tr')
-    tr.className = o.sell ? 'sell' : 'buy'
-    tr.dataset.id = o.id
-    tr.appendChild(this.td(this.fmtRate(o.rate, m), o.sell ? 'sellcolor' : 'buycolor'))
-    tr.appendChild(this.td(String(o.remaining / o.lotSize)))
-    tr.appendChild(this.td(o.own ? 'you' : (o.ownerName || shortID(o.owner))))
-    const act = document.createElement('td')
-    act.className = 'text-end'
-    if (o.own) {
-      act.textContent = 'yours'
-      act.classList.add('grey')
-    } else {
-      const btn = document.createElement('button')
-      btn.className = 'mesh-take-btn'
-      btn.textContent = o.sell ? 'Buy' : 'Sell'
-      if (o.warning) {
-        btn.title = o.warning
-        btn.classList.add('warn')
-      }
-      act.appendChild(btn)
-      Doc.bind(tr, 'click', () => this.openTake(o))
-      tr.classList.add('pointer')
-    }
-    tr.appendChild(act)
-    return tr
-  }
-
-  openTake (o: ViewOrder) {
-    const { page, market: m } = this
-    if (!m) return
-    this.takeOrder = o
-    const lots = o.remaining / o.lotSize
-    const bu = this.unitInfo(m.baseID).conventional.unit
-    const qu = this.unitInfo(m.quoteID).conventional.unit
-    page.takeDesc.textContent = `${o.sell ? 'Buy' : 'Sell'} ${bu} ${o.sell ? 'from' : 'to'} ${o.ownerName || shortID(o.owner)} at ${this.fmtRate(o.rate, m)} ${qu}/${bu}.`
-    const inp = page.takeLots as HTMLInputElement
-    inp.max = String(lots)
-    inp.value = '1'
-    page.takeMax.textContent = `of ${lots}`
-    Doc.setVis(Boolean(o.warning), page.takeWarn)
-    page.takeWarn.textContent = o.warning ? `Warning: ${o.warning}. The maker will probably reject this match.` : ''
-    Doc.hide(page.takeErr)
-    this.updateTakeTotals()
-    Doc.show(page.takeBox)
-  }
-
-  closeTake () {
-    this.takeOrder = null
-    Doc.hide(this.page.takeBox)
-  }
-
-  updateTakeTotals () {
-    const { page, market: m, takeOrder: o } = this
-    if (!m || !o) return
-    const lots = parseInt((page.takeLots as HTMLInputElement).value) || 0
-    const base = lots * o.lotSize
-    const quote = Math.floor(base * o.rate / 1e8)
-    // We take the other side: buying from a seller sends quote.
-    const send = o.sell ? this.fmtAmt(quote, m.quoteID) : this.fmtAmt(base, m.baseID)
-    const recv = o.sell ? this.fmtAmt(base, m.baseID) : this.fmtAmt(quote, m.quoteID)
-    page.takeTotals.textContent = `You send ${send} and receive ${recv} (plus network fees).`
-  }
-
-  async submitTake () {
-    const { page, market: m, takeOrder: o } = this
-    if (!m || !o) return
-    const lots = parseInt((page.takeLots as HTMLInputElement).value) || 0
-    Doc.hide(page.takeErr)
-    const res = await postJSON('/api/mesh/take', { market: m.name, orderID: o.id, lots })
-    if (!res || !res.ok) {
-      page.takeErr.textContent = (res && res.msg) || 'take failed'
-      Doc.show(page.takeErr)
-      return
-    }
-    this.closeTake()
-    page.orderOK.textContent = `Match ${res.matchID.slice(0, 8)} proposed. Watch the swap below.`
-    Doc.show(page.orderOK)
-    Doc.hide(page.orderErr)
-    if (this.viz && this.status) this.viz.setMatch(res.matchID, o.owner, this.status.peerID, 0, 'proposed')
-    this.refreshActivity()
-    this.refreshBook()
-  }
-
-  setSide (sell: boolean) {
-    this.sell = sell
-    this.page.buyTab.classList.toggle('selected', !sell)
-    this.page.sellTab.classList.toggle('selected', sell)
-    this.page.submitOrder.textContent = sell ? 'Place sell order' : 'Place buy order'
-    this.updateTotal()
-  }
-
-  updateTotal () {
-    const { page, market: m } = this
-    if (!m) return
-    const lots = parseInt((page.lotsInput as HTMLInputElement).value) || 0
-    const rate = parseFloat((page.rateInput as HTMLInputElement).value) || 0
-    const base = lots * m.lotSize
-    const quote = Math.floor(base * this.msgRate(rate, m) / 1e8)
-    page.orderTotal.textContent = this.sell
-      ? `Sell ${this.fmtAmt(base, m.baseID)} for ${this.fmtAmt(quote, m.quoteID)}`
-      : `Buy ${this.fmtAmt(base, m.baseID)} for ${this.fmtAmt(quote, m.quoteID)}`
-  }
-
-  async submitOrder () {
-    const { page, market: m } = this
-    if (!m) return
-    Doc.hide(page.orderErr, page.orderOK)
-    const lots = parseInt((page.lotsInput as HTMLInputElement).value) || 0
-    const rate = this.msgRate(parseFloat((page.rateInput as HTMLInputElement).value) || 0, m)
-    if (lots <= 0 || rate <= 0) {
-      page.orderErr.textContent = 'Enter a positive number of lots and a rate.'
-      Doc.show(page.orderErr)
-      return
-    }
-    const res = await postJSON('/api/mesh/order', { market: m.name, sell: this.sell, lots, rate, lifetimeSec: 3600 })
-    if (!res || !res.ok) {
-      page.orderErr.textContent = (res && res.msg) || 'order failed'
-      Doc.show(page.orderErr)
-      return
-    }
-    page.orderOK.textContent = `Order ${res.order.id.slice(0, 8)} posted to the mesh.`
-    Doc.show(page.orderOK)
-    this.refreshBook()
-    this.refreshActivity()
-  }
-
   async refreshActivity () {
     const res = await getJSON('/api/mesh/activity')
     if (!res || !res.ok) return
@@ -602,37 +381,6 @@ export default class MeshPage extends BasePage {
   renderActivity () {
     const { page, activity: act, status: st } = this
     if (!act || !st) return
-    Doc.empty(page.ownRows)
-    const own = (act.orders || []).sort((a, b) => b.stamp - a.stamp)
-    for (const o of own) {
-      const m = this.markets.find(mk => mk.baseID === o.base && mk.quoteID === o.quote)
-      const tr = document.createElement('tr')
-      tr.appendChild(this.td(m ? `${m.baseSymbol.toUpperCase()}-${m.quoteSymbol.toUpperCase()}` : `${o.base}-${o.quote}`))
-      tr.appendChild(this.td(o.sell ? 'sell' : 'buy', o.sell ? 'sellcolor' : 'buycolor'))
-      tr.appendChild(this.td(m ? this.fmtRate(o.rate, m) : String(o.rate)))
-      tr.appendChild(this.td(String(o.remaining / o.lotSize)))
-      tr.appendChild(this.td(Doc.formatDuration(Math.max(o.expiry - Date.now(), 0))))
-      const td = document.createElement('td')
-      td.className = 'text-end'
-      const btn = document.createElement('button')
-      btn.className = 'mesh-cancel-btn'
-      btn.textContent = 'Cancel'
-      Doc.bind(btn, 'click', async () => {
-        btn.setAttribute('disabled', '')
-        const res = await postJSON('/api/mesh/cancel', { orderID: o.id })
-        if (!res || !res.ok) {
-          page.orderErr.textContent = (res && res.msg) || 'cancel failed'
-          Doc.show(page.orderErr)
-        }
-        this.refreshActivity()
-        this.refreshBook()
-      })
-      td.appendChild(btn)
-      tr.appendChild(td)
-      page.ownRows.appendChild(tr)
-    }
-    Doc.setVis(own.length === 0, page.noOwn)
-
     // Matches without a swap (proposed, accepted, rejected, timed out) and swaps.
     const swaps = new Map<string, SwapView>()
     for (const s of act.swaps || []) swaps.set(s.match.id, s)
@@ -711,14 +459,12 @@ export default class MeshPage extends BasePage {
       case 'order': {
         const m = e.market ? this.marketByName(e.market) : undefined
         if (viz && e.peer) viz.broadcast(e.peer, m ? m.baseSymbol : 'dcr')
-        if (this.market && e.market === this.market.name) this.debounce('book', 300, () => this.refreshBook())
         if (e.own) this.debounce('act', 300, () => this.refreshActivity())
         break
       }
       case 'cancel':
       case 'update':
         if (viz && e.peer) viz.pulse(e.peer)
-        if (this.market && e.market === this.market.name) this.debounce('book', 300, () => this.refreshBook())
         if (e.own) this.debounce('act', 300, () => this.refreshActivity())
         break
       case 'match':
@@ -728,7 +474,6 @@ export default class MeshPage extends BasePage {
           this.seenMatches.add(e.matchID)
         }
         this.debounce('act', 200, () => this.refreshActivity())
-        this.debounce('book', 500, () => this.refreshBook())
         break
       case 'swap':
         if (viz && e.matchID && e.maker && e.taker) {

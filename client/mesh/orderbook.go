@@ -495,6 +495,22 @@ func (b *Book) Update(u *MeshOrderUpdate, sender peer.ID, now time.Time) (bool, 
 	return true, nil
 }
 
+// Drop removes an order owned by owner from the local book, as when its owner
+// rejected a match because it no longer has the order (e.g. after a restart).
+// A tombstone keeps stale re-broadcasts from adding it back. It returns true if
+// the order was on the book.
+func (b *Book) Drop(id OrderID, owner string) bool {
+	b.mtx.Lock()
+	defer b.mtx.Unlock()
+	e, found := b.orders[id]
+	if !found || e.ord.Owner != owner {
+		return false
+	}
+	delete(b.orders, id)
+	b.cancelled[id] = &tombstone{owner: owner, expiry: e.ord.Expiry}
+	return true
+}
+
 // Order returns the order with the given ID, if live.
 func (b *Book) Order(id OrderID, now time.Time) (*BookOrder, bool) {
 	b.mtx.Lock()

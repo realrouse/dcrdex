@@ -209,6 +209,8 @@ type ExtensionModeConfig struct {
 type MeshMarket struct {
 	BaseID  uint32 `json:"baseID"`
 	QuoteID uint32 `json:"quoteID"`
+	// LotSize is the market's lot size in base atoms, for the Trade page.
+	LotSize uint64 `json:"lotSize,omitempty"`
 }
 
 // Mesh is the core representation of the Mesh.

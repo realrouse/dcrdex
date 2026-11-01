@@ -457,3 +457,28 @@ func TestDebugServer(t *testing.T) {
 		t.Fatal("non-loopback debug address accepted")
 	}
 }
+
+func TestBookDrop(t *testing.T) {
+	alice, bob := newPriv(t), newPriv(t)
+	b := NewBook(dcrBTC)
+	o := signedOrder(t, alice, tNow)
+	if _, err := b.AddOrder(o, pid(t, alice), tNow); err != nil {
+		t.Fatal(err)
+	}
+	if b.Drop(o.ID(), pid(t, bob).String()) {
+		t.Fatal("dropped by a non-owner")
+	}
+	if !b.Drop(o.ID(), o.Owner) {
+		t.Fatal("not dropped")
+	}
+	if _, found := b.Order(o.ID(), tNow); found {
+		t.Fatal("still on the book")
+	}
+	// A stale re-broadcast doesn't bring it back.
+	if isNew, _ := b.AddOrder(o, pid(t, alice), tNow); isNew {
+		t.Fatal("dropped order re-added")
+	}
+	if b.Drop(o.ID(), o.Owner) {
+		t.Fatal("dropped twice")
+	}
+}

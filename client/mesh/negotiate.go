@@ -313,14 +313,20 @@ func (ob *OrderBooks) handleInboxMsg(ctx context.Context, msg *inboxMsg) {
 	}
 }
 
+// Match rejection reasons that tell a taker the maker no longer has the order.
+const (
+	rejectUnknownOrder = "unknown, filled or cancelled order"
+	rejectOrderExpired = "order expired"
+)
+
 // checkProposal returns a rejection reason or "". ob.mtx must be held.
 func (ob *OrderBooks) checkProposal(p *MatchProposal, oo *ownOrder) string {
 	now := ob.now()
 	switch {
 	case oo == nil:
-		return "unknown, filled or cancelled order"
+		return rejectUnknownOrder
 	case oo.ord.Expiry <= now.UnixMilli():
-		return "order expired"
+		return rejectOrderExpired
 	case p.Rate != oo.ord.Rate:
 		return "rate does not match order"
 	case p.Qty == 0 || p.Qty%oo.ord.LotSize != 0:
@@ -524,6 +530,14 @@ func (ob *OrderBooks) handleReject(_ context.Context, from peer.ID, r *MatchReje
 			ob.abortSwapLocked(st.match.ID, r.Reason)
 		}
 		ob.setStatus(st, MatchRejected, "maker: "+r.Reason)
+		// The maker no longer has the order (filled, cancelled, expired or
+		// lost in a restart): take it off our book so it isn't taken again.
+		if r.Reason == rejectUnknownOrder || r.Reason == rejectOrderExpired {
+			if book := ob.books[st.match.Market]; book != nil && book.Drop(st.match.MakerOrderID, from.String()) {
+				ob.log.Infof("Mesh order %s dropped from the book: maker says %q", st.match.MakerOrderID, r.Reason)
+				ob.emit(&Event{Kind: EventCancel, Market: marketName(st.match.Market), Peer: from.String(), OrderID: st.match.MakerOrderID.String()})
+			}
+		}
 	case st.side == sideMaker && st.status == MatchAccepted:
 		ob.releaseLocked(st)
 		ob.setStatus(st, MatchRejected, "taker: "+r.Reason)

@@ -365,6 +365,7 @@ export interface ExtensionModeConfig {
 export interface MeshMarket {
   baseID: number
   quoteID: number
+  lotSize?: number
 }
 
 export interface Mesh {

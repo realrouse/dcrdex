@@ -186,12 +186,20 @@ func (s *WebServer) rejectUnauthed(next http.Handler) http.Handler {
 // register page if the user has not connected any DEX.
 func (s *WebServer) requireDEXConnection(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if len(s.core.Exchanges()) == 0 {
+		// With the Tatanka mesh running (simnet --mesh), the mesh markets are
+		// shown on the Trade page, so no DEX server is required.
+		if len(s.core.Exchanges()) == 0 && !s.meshEnabled() {
 			http.Redirect(w, r, registerRoute, http.StatusSeeOther)
 			return
 		}
 		next.ServeHTTP(w, r)
 	})
+}
+
+// meshEnabled is true when the Tatanka mesh client is running.
+func (s *WebServer) meshEnabled() bool {
+	st := s.core.MeshStatus()
+	return st != nil && st.Enabled
 }
 
 // dexHostCtx embeds the host into the request context.

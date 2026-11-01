@@ -74,6 +74,8 @@ import {
 } from './registry'
 import { setOptionTemplates } from './opts'
 import { RunningMarketMakerDisplay, RunningMMDisplayElements } from './mmutil'
+import * as Mesh from './meshmarkets'
+import { MeshNote } from './mesh'
 
 const bind = Doc.bind
 
@@ -259,6 +261,8 @@ export default class MarketsPage extends BasePage {
   uoHidden: number
   batchCancelOrders: Order[]
   batchCancelRunning: boolean
+  meshTimer: number
+  meshPending: Record<string, number>
   constructor (main: HTMLElement, pageParams: MarketsPageParams) {
     super()
 
@@ -278,6 +282,8 @@ export default class MarketsPage extends BasePage {
     this.uoHidden = 0
     this.batchCancelOrders = []
     this.batchCancelRunning = false
+    this.meshTimer = 0
+    this.meshPending = {}
     this.recentMatches = []
     this.preorderCache = {}
     this.depthLines = {
@@ -605,6 +611,7 @@ export default class MarketsPage extends BasePage {
       fiatrateupdate: () => { this.handleFiatRateUpdate() },
       walletstate: (note: WalletStateNote) => { this.handleWalletState(note) },
       reputation: () => { this.updateReputation() },
+      mesh: (note: MeshNote) => { this.handleMeshNote(note) },
       feepayment: () => { this.updateReputation() },
       runstats: (note: RunStatsNote) => {
         if (note.baseID !== this.market.base.id || note.quoteID !== this.market.quote.id || note.host !== this.market.dex.host) return
@@ -725,9 +732,12 @@ export default class MarketsPage extends BasePage {
     const selected = this.market
     if (!selected) return
     // Get an up-to-date Market.
-    const xc = app().exchanges[selected.dex.host]
+    const xc = Mesh.exchangeFor(selected.dex.host)
     const mkt = xc.markets[selected.cfg.name]
-    if (!mkt.spot) return
+    if (!mkt.spot) {
+      if (Mesh.isMeshHost(selected.dex.host)) this.setMeshBookPrice()
+      return
+    }
 
     for (const s of this.stats) {
       const { unitInfo: { conventional: { conversionFactor: cFactor, unit } } } = xc.assets[mkt.baseid]
@@ -1089,7 +1099,8 @@ export default class MarketsPage extends BasePage {
 
     if (this.market) {
       const { auth: { effectiveTier, pendingStrength } } = this.market.dex
-      Doc.setVis(effectiveTier > 0 || pendingStrength > 0, page.reputationAndTradingTierBox)
+      // The mesh has no accounts or tiers (bonds are not live yet).
+      Doc.setVis(!this.isMesh() && (effectiveTier > 0 || pendingStrength > 0), page.reputationAndTradingTierBox)
     }
 
     const mmStatus = app().mmStatus
@@ -1270,7 +1281,7 @@ export default class MarketsPage extends BasePage {
         showSection(undefined)
         this.resolveOrderFormVisibility()
       }
-      if (Doc.isHidden(page.orderForm)) {
+      if (Doc.isHidden(page.orderForm) && !this.isMesh()) {
         // wait a couple of seconds before showing the form so the success
         // message is shown to the user
         setTimeout(toggle, 5000)
@@ -1382,7 +1393,7 @@ export default class MarketsPage extends BasePage {
 
   /* setMarket sets the currently displayed market. */
   async setMarket (host: string, baseID: number, quoteID: number) {
-    const dex = app().user.exchanges[host]
+    const dex = Mesh.exchangeFor(host)
     const page = this.page
 
     window.cexBook = async () => {
@@ -1483,7 +1494,14 @@ export default class MarketsPage extends BasePage {
     // if (!dex.candleDurs || dex.candleDurs.length === 0) this.currentChart = depthChart
 
     // depth chart
-    ws.request('loadmarket', makeMarket(host, baseID, quoteID))
+    this.stopMeshBook()
+    Doc.hide(page.pcNote)
+    if (Mesh.isMeshHost(host)) {
+      // Drop any server market subscription; the mesh book is polled and
+      // refreshed on mesh notes.
+      ws.request(unmarketRoute, {})
+      this.startMeshBook()
+    } else ws.request('loadmarket', makeMarket(host, baseID, quoteID))
 
     State.storeLocal(State.lastMarketLK, {
       host: host,
@@ -1501,8 +1519,12 @@ export default class MarketsPage extends BasePage {
     this.setCandleDurBttns()
     this.previewQuoteAmt(false)
     this.updateTitle()
-    this.reputationMeter.setHost(dex.host)
-    this.updateReputation()
+    // Mesh markets have no server tier trading limits.
+    Doc.setVis(!this.isMesh(), page.orderLimitBox)
+    if (!this.isMesh()) {
+      this.reputationMeter.setHost(dex.host)
+      this.updateReputation()
+    }
     this.loadUserOrders()
   }
 
@@ -1737,6 +1759,10 @@ export default class MarketsPage extends BasePage {
     this.maxEstimateTimer = window.setTimeout(async () => {
       this.maxEstimateTimer = null
       if (counter !== this.maxOrderUpdateCounter) return
+      if (this.isMesh()) {
+        success(this.meshMaxEstimate(path, args))
+        return
+      }
       const res = await postJSON(path, {
         host: this.market.dex.host,
         base: bid,
@@ -1911,7 +1937,7 @@ export default class MarketsPage extends BasePage {
   setMarketBuyOrderEstimate () {
     const market = this.market
     const lotSize = market.cfg.lotsize
-    const xc = app().user.exchanges[market.dex.host]
+    const xc = Mesh.exchangeFor(market.dex.host)
     const buffer = xc.markets[market.sid].buybuffer
     const gap = this.midGapConventional()
     if (gap) {
@@ -1921,6 +1947,7 @@ export default class MarketsPage extends BasePage {
 
   maxUserOrderCount (): number {
     const { dex: { host }, cfg: { name: mktID } } = this.market
+    if (Mesh.isMeshHost(host)) return 30
     return Math.max(maxUserOrdersShown, app().orders(host, mktID).length)
   }
 
@@ -1928,6 +1955,7 @@ export default class MarketsPage extends BasePage {
     const { base: b, quote: q, dex: { host }, cfg: { name: mktID } } = this.market
     for (const oid in this.metaOrders) delete this.metaOrders[oid]
     if (!b || !q) return this.resolveUserOrders([]) // unsupported asset
+    if (Mesh.isMeshHost(host)) return this.loadMeshUserOrders()
     const activeOrders = app().orders(host, mktID)
     if (activeOrders.length >= maxUserOrdersShown) return this.resolveUserOrders(activeOrders)
     const filter: OrderFilter = {
@@ -1946,6 +1974,7 @@ export default class MarketsPage extends BasePage {
 
   /* refreshActiveOrders refreshes the user's active order list. */
   refreshActiveOrders () {
+    if (this.isMesh()) return this.loadMeshUserOrders()
     const orders = app().orders(this.market.dex.host, marketID(this.market.baseCfg.symbol, this.market.quoteCfg.symbol))
     return this.resolveUserOrders(orders)
   }
@@ -2068,7 +2097,8 @@ export default class MarketsPage extends BasePage {
           Doc.show(details.accelerateBttn)
         }
 
-        details.link.href = `order/${orderID}`
+        // Mesh swaps are followed on the Mesh tab.
+        details.link.href = Mesh.isMeshHost(ord.host) ? '/mesh' : `order/${orderID}`
         app().bindInternalNavigation(div)
       }
       let currentFloater: (PageElement | null)
@@ -2326,7 +2356,7 @@ export default class MarketsPage extends BasePage {
         }
         let res: any
         try {
-          res = await postJSON('/api/cancel', { orderID: ord.id })
+          res = this.isMesh() ? await Mesh.cancel(ord.id) : await postJSON('/api/cancel', { orderID: ord.id })
         } catch (e) {
           res = { msg: String(e) }
         }
@@ -2671,7 +2701,9 @@ export default class MarketsPage extends BasePage {
     }
     this.showVerifyForm()
 
-    if (baseAsset.wallet.open && quoteAsset.wallet.open) this.preOrder(order)
+    // Mesh orders have no server pre-order fee estimates.
+    if (this.isMesh()) Doc.hide(page.vPreorder, page.vRelayWarning)
+    else if (baseAsset.wallet.open && quoteAsset.wallet.open) this.preOrder(order)
     else {
       Doc.hide(page.vPreorder)
       this.unlockWalletsForEstimates()
@@ -3061,8 +3093,14 @@ export default class MarketsPage extends BasePage {
     }
     // Toggle the loader and submit button.
     const loaded = app().loading(page.cancelSubmit)
-    const res = await postJSON('/api/cancel', req)
+    const res = this.isMesh() ? await Mesh.cancel(order.id) : await postJSON('/api/cancel', req)
     loaded()
+    if (this.isMesh() && res.ok) {
+      Doc.hide(cancelData.bttn, page.forms)
+      this.loadMeshUserOrders()
+      this.refreshMeshBook()
+      return
+    }
     // Display error on confirmation modal.
     if (!app().checkResponse(res)) {
       page.cancelErr.textContent = res.msg
@@ -3181,12 +3219,13 @@ export default class MarketsPage extends BasePage {
     // TODO: Use tier change notification once available.
     if (note.topic === 'AccountRegistered') await app().fetchUser()
     // Update local copy of Exchange.
-    this.market.dex = app().exchanges[dexAddr]
+    this.market.dex = Mesh.exchangeFor(dexAddr)
     this.setRegistrationStatusVisibility()
     this.updateReputation()
   }
 
   updateReputation () {
+    if (!this.market || this.isMesh()) return
     const { page, market: { dex: { host }, cfg: mkt, baseCfg: { unitInfo: bui }, quoteCfg: { unitInfo: qui } } } = this
     const { auth } = app().exchanges[host]
 
@@ -3425,6 +3464,10 @@ export default class MarketsPage extends BasePage {
     // Show loader and hide submit button.
     page.vSubmit.classList.add('d-hide')
     page.vLoader.classList.remove('d-hide')
+    if (this.isMesh()) {
+      await this.submitMeshOrder(order)
+      return
+    }
     const res = await postJSON('/api/tradeasync', req)
     // Hide loader and show submit button.
     page.vSubmit.classList.remove('d-hide')
@@ -3954,6 +3997,13 @@ export default class MarketsPage extends BasePage {
    * duration which will be requested if it is provided.
    */
   requestCandles (candleDur?: string) {
+    if (this.isMesh()) {
+      // Mesh markets have no candles (no trade history service yet).
+      if (this.loadingAnimations.candles) this.loadingAnimations.candles.stop()
+      this.page.pcNote.textContent = 'No price history for mesh markets yet. The order book and depth chart are live.'
+      Doc.show(this.page.pcNote)
+      return
+    }
     this.candlesLoading = {
       loaded: () => { /* pass */ },
       timer: window.setTimeout(() => {
@@ -3967,11 +4017,142 @@ export default class MarketsPage extends BasePage {
     ws.request('loadcandles', { host: dex.host, base: baseCfg.id, quote: quoteCfg.id, dur: candleDur || this.candleDur })
   }
 
+  /* isMesh is true when a Tatanka mesh market is selected. */
+  isMesh (): boolean {
+    return Boolean(this.market && Mesh.isMeshHost(this.market.dex.host))
+  }
+
+  /* meshDebounce runs f at most once per ms milliseconds per key. */
+  meshDebounce (key: string, ms: number, f: () => void) {
+    if (this.meshPending[key]) return
+    this.meshPending[key] = window.setTimeout(() => {
+      delete this.meshPending[key]
+      f()
+    }, ms)
+  }
+
+  /* startMeshBook loads the mesh book now and every few seconds. */
+  startMeshBook () {
+    this.refreshMeshBook()
+    this.meshTimer = window.setInterval(() => {
+      this.refreshMeshBook()
+      this.loadMeshUserOrders()
+    }, 5000)
+  }
+
+  stopMeshBook () {
+    if (this.meshTimer) window.clearInterval(this.meshTimer)
+    this.meshTimer = 0
+    for (const t of Object.values(this.meshPending)) window.clearTimeout(t)
+    this.meshPending = {}
+  }
+
+  async refreshMeshBook () {
+    const mkt = this.market
+    if (!mkt || !Mesh.isMeshHost(mkt.dex.host)) return
+    const book = await Mesh.fetchBook(mkt.cfg.name)
+    if (!book || this.market !== mkt) return
+    this.handleBook(Mesh.toMarketBook(book, mkt.baseCfg.id, mkt.quoteCfg.id))
+    mkt.bookLoaded = true
+    this.updateTitle()
+    this.setMarketBuyOrderEstimate()
+    this.updateOrderUsd()
+  }
+
+  async loadMeshUserOrders () {
+    const mkt = this.market
+    if (!mkt || !Mesh.isMeshHost(mkt.dex.host)) return
+    const act = await Mesh.fetchActivity()
+    if (!act || this.market !== mkt) return
+    for (const oid in this.metaOrders) delete this.metaOrders[oid]
+    this.resolveUserOrders(Mesh.userOrders(act, mkt.cfg))
+  }
+
+  /* setMeshBookPrice shows the mesh book's mid-gap as the market price. */
+  setMeshBookPrice () {
+    const conv = this.midGapConventional() || 0
+    const quoteUnit = this.market.quoteUnitInfo.conventional.unit
+    const pairTxt = conv > 0 ? `${Doc.formatFourSigFigs(conv)} ${quoteUnit}` : '-'
+    this.page.obPrice.textContent = pairTxt
+    if (this.page.obPriceAlt) this.page.obPriceAlt.textContent = ''
+    this.page.obPrice.classList.remove('sellcolor', 'buycolor')
+    Doc.hide(this.page.obUp, this.page.obDown)
+    for (const s of this.stats) {
+      s.tmpl.price.textContent = conv > 0 ? Doc.formatFourSigFigs(conv) : '-'
+      s.tmpl.change.textContent = ''
+      s.tmpl.volume.textContent = '-'
+    }
+    this.setOrderBookColumnUnits()
+  }
+
+  /* handleMeshNote refreshes the mesh book and our orders on mesh activity. */
+  handleMeshNote (note: MeshNote) {
+    const e = note.event
+    if (!e || !this.isMesh()) return
+    switch (e.kind) {
+      case 'order':
+      case 'cancel':
+      case 'update':
+        if (e.market === this.market.cfg.name) this.meshDebounce('book', 300, () => this.refreshMeshBook())
+        if (e.own) this.meshDebounce('orders', 300, () => this.loadMeshUserOrders())
+        break
+      case 'match':
+      case 'swap':
+        this.meshDebounce('orders', 300, () => this.loadMeshUserOrders())
+        this.meshDebounce('book', 600, () => this.refreshMeshBook())
+        break
+      case 'conn':
+        this.meshDebounce('book', 1000, () => this.refreshMeshBook())
+        break
+    }
+  }
+
+  /* meshMaxEstimate is the max order from the wallet balance. Mesh swaps
+   * have no server fee reserves; network fees come out of the balance. */
+  meshMaxEstimate (path: string, args: any): any {
+    const mkt = this.market
+    const lot = mkt.cfg.lotsize
+    const est = (lots: number, value: number): SwapEstimate => ({
+      lots, value, maxFees: 0, realisticWorstCase: 0, realisticBestCase: 0, feeReservesPerLot: 0
+    })
+    if (path === '/api/maxsell') {
+      const avail = app().assets[mkt.base.id].wallet?.balance?.available || 0
+      const lots = Math.floor(avail / lot)
+      return { maxSell: { swap: est(lots, lots * lot) } }
+    }
+    const avail = app().assets[mkt.quote.id].wallet?.balance?.available || 0
+    const quoteLot = lot * (args.rate || 0) / OrderUtil.RateEncodingFactor
+    const lots = quoteLot > 0 ? Math.floor(avail / quoteLot) : 0
+    return { maxBuy: { swap: est(lots, Math.round(lots * quoteLot)) } }
+  }
+
+  /* submitMeshOrder places the verified order on the mesh. */
+  async submitMeshOrder (order: TradeForm) {
+    const page = this.page
+    const mkt = this.market
+    const res = await Mesh.submit(mkt.cfg.name, mkt.cfg.lotsize, order)
+    page.vSubmit.classList.remove('d-hide')
+    page.vLoader.classList.add('d-hide')
+    if (res.errors.length && !res.taken.length && !res.posted) {
+      page.vErr.textContent = res.errors.join('; ')
+      Doc.show(page.vErr)
+      return
+    }
+    Doc.hide(page.forms)
+    if (res.errors.length) {
+      page.orderErr.textContent = `Partly placed: ${res.errors.join('; ')}`
+      Doc.show(page.orderErr)
+    }
+    this.loadMeshUserOrders()
+    this.refreshMeshBook()
+  }
+
   /*
    * unload is called by the Application when the user navigates away from
    * the /markets page.
    */
   unload () {
+    this.stopMeshBook()
     ws.request(unmarketRoute, {})
     ws.deregisterRoute(bookRoute)
     ws.deregisterRoute(bookOrderRoute)
@@ -4009,7 +4190,7 @@ class MarketList {
   updateSpots (note: SpotPriceNote) {
     for (const row of this.markets) {
       if (row.mkt.xc.host !== note.host) continue
-      const xc = app().exchanges[row.mkt.xc.host]
+      const xc = Mesh.exchangeFor(row.mkt.xc.host)
       const mkt = xc.markets[row.mkt.name]
       setPriceAndChange(row.tmpl, xc, mkt)
     }
@@ -4019,7 +4200,7 @@ class MarketList {
    * fiat rate update. */
   refreshPrices () {
     for (const row of this.markets) {
-      const xc = app().exchanges[row.mkt.xc.host]
+      const xc = Mesh.exchangeFor(row.mkt.xc.host)
       const mkt = xc?.markets?.[row.mkt.name]
       if (mkt) setPriceAndChange(row.tmpl, xc, mkt)
     }
@@ -4199,7 +4380,7 @@ class BalanceWidget {
       if (asset?.token) return asset.token.parentID
       return parentIDNone
     }
-    this.dex = app().user.exchanges[host]
+    this.dex = Mesh.exchangeFor(host)
     this.base.id = baseID
     this.base.parentID = parentID(baseID)
     this.base.cfg = this.dex.assets[baseID]
@@ -4568,7 +4749,7 @@ function sortedMarkets (): ExchangeMarket[] {
       return Object.assign({ xc, baseName, bui }, mkt)
     })
   }
-  for (const xc of Object.values(app().exchanges)) mkts.push(...convertMarkets(xc, Object.values(xc.markets || {})))
+  for (const xc of Mesh.allExchanges()) mkts.push(...convertMarkets(xc, Object.values(xc.markets || {})))
   mkts.sort((a: ExchangeMarket, b: ExchangeMarket): number => {
     if (!a.spot) {
       if (b.spot) return 1 // put b first, since we have the spot
@@ -4633,7 +4814,7 @@ function generateHue (idx: number): string {
 }
 
 function hostColor (host: string): string {
-  const hosts = Object.keys(app().exchanges)
+  const hosts = Mesh.allExchanges().map((xc: Exchange) => xc.host)
   hosts.sort()
   return generateHue(hosts.indexOf(host))
 }

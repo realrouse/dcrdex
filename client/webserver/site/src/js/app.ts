@@ -16,6 +16,7 @@ import InitPage from './init'
 import ProposalPage from './proposal'
 import ProposalsPage from './proposals'
 import MeshPage from './mesh'
+import MeshConnectOverlay from './meshconnect'
 import { MM } from './mmutil'
 import { RateEncodingFactor, StatusExecuted, hasActiveMatches } from './orderutil'
 import { getJSON, postJSON, Errors } from './http'
@@ -182,6 +183,7 @@ export default class Application {
   headerSpace: HTMLElement
   assets: Record<number, SupportedAsset>
   exchanges: Record<string, Exchange>
+  meshConnectChecked: boolean
   walletMap: Record<number, WalletState>
   fiatRatesMap: Record<number, number>
   tooltip: HTMLElement
@@ -376,6 +378,13 @@ export default class Application {
     }
 
     this.updateMenuItemsDisplay()
+    // The first time we see a running mesh client in this browser session,
+    // show the mesh connect progress until the bootstrap node, peers and
+    // order books are in. Skipped if the mesh is already connected.
+    if (user.mesh && !this.meshConnectChecked) {
+      this.meshConnectChecked = true
+      new MeshConnectOverlay().run()
+    }
     return user
   }
 
@@ -971,27 +980,16 @@ export default class Application {
     }
     if (!authed) {
       page.profileBox.classList.remove('authed')
-      Doc.hide(page.noteBell, page.walletsMenuEntry, page.marketsMenuEntry)
+      Doc.hide(page.noteBell, page.walletsMenuEntry, page.marketsMenuEntry, page.meshMenuEntry)
       return
     }
     Doc.setVis(Object.keys(this.exchanges).length > 0, page.marketsMenuEntry, page.mmLink)
 
     page.profileBox.classList.add('authed')
     Doc.show(page.noteBell, page.walletsMenuEntry, page.marketsMenuEntry)
-    // With the Tatanka mesh running (simnet --mesh), Trade opens peer-to-peer
-    // mesh trading. Server markets stay reachable from that page.
-    const entry = page.marketsMenuEntry as HTMLAnchorElement
-    if (this.user && this.user.mesh && entry.getAttribute('href') !== '/mesh') {
-      // Replace the link to drop the internal navigation handler bound to /markets.
-      const meshEntry = entry.cloneNode(true) as HTMLAnchorElement
-      meshEntry.setAttribute('href', '/mesh')
-      entry.replaceWith(meshEntry)
-      page.marketsMenuEntry = meshEntry
-      Doc.bind(meshEntry, 'click', (e: Event) => {
-        e.preventDefault()
-        this.loadPage('mesh')
-      })
-    }
+    // With the Tatanka mesh running (simnet --mesh), the Mesh tab shows the
+    // mesh connectivity. Trading stays on the Trade page.
+    Doc.setVis(Boolean(this.user && this.user.mesh), page.meshMenuEntry)
     Doc.setVis(mmStatus, page.mmLink)
   }
 

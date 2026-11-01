@@ -4963,6 +4963,12 @@ func (c *Core) Login(pw []byte) error {
 		c.connectWallets(crypter) // initialize reserves
 		c.notify(newLoginNote("Resuming active trades..."))
 		c.resolveActiveTrades(crypter)
+		if c.cfg.Mesh && c.net == dex.Simnet {
+			// Starts the mesh client. The bootstrap node connection, peer
+			// discovery and order book sync continue in the background after
+			// login; the UI shows their progress (/api/mesh/status).
+			c.notify(newLoginNote("Connecting to the Tatanka mesh..."))
+		}
 		c.connectMesh(c.ctx, crypter)
 		c.notify(newLoginNote("Connecting to DEX servers..."))
 		c.initializeDEXConnections(crypter)

@@ -142,9 +142,9 @@ func (s *WebServer) handleMarkets(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleMesh is the handler for the '/mesh' page request: peer-to-peer
-// trading on the Tatanka mesh (simnet).
+// mesh connectivity (Tatanka mesh, simnet).
 func (s *WebServer) handleMesh(w http.ResponseWriter, r *http.Request) {
-	s.sendTemplate(w, "mesh", s.commonArgs(r, "Mesh Trade | Bison Wallet"))
+	s.sendTemplate(w, "mesh", s.commonArgs(r, "Mesh | Bison Wallet"))
 }
 
 // handleMarketMaking is the handler for the '/mm' page request.
