@@ -73,6 +73,24 @@ const (
 	foundationFilterPeer     = "s1.lbry.network:9246"
 )
 
+// mainnetFilterPeers are the default LBC mainnet SPV peers. Each was verified
+// (2026-10-30, read-only P2P probe over four runs) to advertise
+// NODE_COMPACT_FILTERS and to serve getcfcheckpt/getcfheaders/getcfilters with
+// identical BIP157 filter-header chains. They are only bootstrap peers:
+// neutrino learns more CF peers via addr gossip and cross-checks filter
+// headers between peers. Peers added by the user are still loaded in addition
+// to these. LBC's DNS "seeds" are static A records, not crawler seeders, so
+// DNS seeding stays off.
+var mainnetFilterPeers = []string{
+	foundationFilterPeer,         // 88.99.63.52, Hetzner, lbcd (s1.lbry.network)
+	"use-lbrycrd1.lbry.com:9247", // 147.135.15.197, OVH, lbcd 0.22.100-rc.4 (lbry.com)
+	"black.coinomi.net:9071",     // 157.90.223.151, Hetzner, lbcd 0.22.119 (coinomi.net)
+	"yellow.coinomi.net:9071",    // 162.55.92.62, Hetzner, lbcd 0.22.119 (coinomi.net)
+	"135.148.121.136:9246",       // OVH US, lbcd 0.22.119
+	"149.56.26.199:9246",         // OVH CA, lbcd 0.22.119
+	"51.81.34.141:9246",          // OVH US, lbcd 0.22.119
+}
+
 var (
 	waddrmgrNamespace = []byte("waddrmgr")
 	wtxmgrNamespace   = []byte("wtxmgr")
@@ -210,7 +228,7 @@ func (w *lbcSPVWallet) Start() (btc.SPVService, error) {
 	var defaultPeers []string
 	switch w.chainParams.Net {
 	case lbcchaincfg.MainNetParams.Net:
-		defaultPeers = []string{foundationFilterPeer}
+		defaultPeers = mainnetFilterPeers
 	case lbcchaincfg.RegressionNetParams.Net:
 		defaultPeers = []string{regtestP2P}
 	}
