@@ -13,6 +13,7 @@ import (
 	meshpkg "decred.org/dcrdex/client/mesh"
 	"decred.org/dcrdex/dex"
 	"decred.org/dcrdex/dex/calc"
+	"decred.org/dcrdex/dex/msgjson"
 )
 
 // NoteTypeMesh is the notification type for mesh activity (orders, matches,
@@ -350,4 +351,57 @@ func (c *Core) MeshActivity() (*MeshActivity, error) {
 		act.Swaps = append(act.Swaps, v)
 	}
 	return act, nil
+}
+
+// MeshCandles are a mesh market's candles of one bin size, built from the
+// trade history the mesh peers publish.
+type MeshCandles struct {
+	Dur     string           `json:"dur"`
+	DurMs   uint64           `json:"ms"`
+	Candles []msgjson.Candle `json:"candles"`
+}
+
+// MeshCandles returns a mesh market's candles for a bin size (5m, 1h, 24h).
+func (c *Core) MeshCandles(market, dur string) (*MeshCandles, error) {
+	m, err := c.meshClient()
+	if err != nil {
+		return nil, err
+	}
+	mkt, err := meshpkg.ParseMarket(market)
+	if err != nil {
+		return nil, err
+	}
+	var ok bool
+	for _, d := range meshpkg.CandleBinSizes {
+		ok = ok || d == dur
+	}
+	binSize, err := time.ParseDuration(dur)
+	if !ok || err != nil {
+		return nil, fmt.Errorf("unsupported candle duration %q", dur)
+	}
+	cs := meshpkg.BuildCandles(m.Trades(mkt, 0), binSize).CandlesCopy()
+	if cs == nil {
+		cs = []msgjson.Candle{}
+	}
+	return &MeshCandles{Dur: dur, DurMs: uint64(binSize.Milliseconds()), Candles: cs}, nil
+}
+
+// MeshSpots returns the 24 hour price summary of each mesh market with trades.
+func (c *Core) MeshSpots() (map[string]*msgjson.Spot, error) {
+	m, err := c.meshClient()
+	if err != nil {
+		return nil, err
+	}
+	now := time.Now()
+	spots := make(map[string]*msgjson.Spot)
+	for _, d := range meshpkg.DefaultMarkets {
+		mkt, err := meshpkg.ParseMarket(d.Name)
+		if err != nil {
+			continue
+		}
+		if s := meshpkg.MarketSpot(mkt, m.Trades(mkt, now.Add(-meshpkg.TradeRetention).UnixMilli()), now); s != nil {
+			spots[d.Name] = s
+		}
+	}
+	return spots, nil
 }

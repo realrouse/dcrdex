@@ -209,6 +209,8 @@ type clientCore interface {
 	MeshTakeOrder(market, orderID string, lots uint64) (string, error)
 	MeshCancelOrder(orderID string) error
 	MeshActivity() (*core.MeshActivity, error)
+	MeshCandles(market, dur string) (*core.MeshCandles, error)
+	MeshSpots() (map[string]*msgjson.Spot, error)
 }
 
 type MMCore interface {
@@ -687,6 +689,8 @@ func New(cfg *Config) (*WebServer, error) {
 			apiAuth.Post("/mesh/take", s.apiMeshTake)
 			apiAuth.Post("/mesh/cancel", s.apiMeshCancel)
 			apiAuth.Get("/mesh/activity", s.apiMeshActivity)
+			apiAuth.Post("/mesh/candles", s.apiMeshCandles)
+			apiAuth.Get("/mesh/spots", s.apiMeshSpots)
 			apiAuth.Post("/unpaircompanionapp", s.apiUnpairCompanionApp)
 		})
 	})

@@ -115,6 +115,13 @@ func (c *Core) connectMesh(ctx context.Context, crypter encrypt.Crypter) {
 	// The secrets in it are encrypted with a key that is itself encrypted
 	// with the app crypter, so they are only readable after login.
 	meshDir := filepath.Join(filepath.Dir(c.cfg.DBPath), "mesh")
+	// Trade (price) history for the mesh markets' candles. Loaded before
+	// the swaps, so completed swaps aren't re-signed.
+	if n, err := mesh.SetTradeStore(filepath.Join(meshDir, "trades.json")); err != nil {
+		c.log.Errorf("Error loading mesh trade history: %v", err)
+	} else if n > 0 {
+		c.log.Infof("Loaded %d mesh trades", n)
+	}
 	var store *meshpkg.SwapStore
 	key, serr := meshSwapStoreKey(filepath.Join(meshDir, "swapstore.key"), crypter)
 	if serr == nil {

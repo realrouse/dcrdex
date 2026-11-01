@@ -666,6 +666,8 @@ export default class MarketsPage extends BasePage {
     }
     if (selected) this.setMarket(selected.host, selected.base, selected.quote)
     else this.balanceWgt.setBalanceVisibility(false) // no market to display balance widget for.
+    // 24h prices of the mesh markets for the market list.
+    if (Mesh.meshExchange()) Mesh.fetchSpots().then(spots => this.handlePriceUpdate({ host: Mesh.MeshHost, spots } as SpotPriceNote))
 
     // set the initial state for the registration status
     this.setRegistrationStatusVisibility()
@@ -3998,10 +4000,7 @@ export default class MarketsPage extends BasePage {
    */
   requestCandles (candleDur?: string) {
     if (this.isMesh()) {
-      // Mesh markets have no candles (no trade history service yet).
-      if (this.loadingAnimations.candles) this.loadingAnimations.candles.stop()
-      this.page.pcNote.textContent = 'No price history for mesh markets yet. The order book and depth chart are live.'
-      Doc.show(this.page.pcNote)
+      this.requestMeshCandles(candleDur || this.candleDur)
       return
     }
     this.candlesLoading = {
@@ -4085,10 +4084,51 @@ export default class MarketsPage extends BasePage {
     this.setOrderBookColumnUnits()
   }
 
+  /*
+   * requestMeshCandles loads a mesh market's candles, built from the trade
+   * history that mesh peers publish when their swaps complete.
+   */
+  async requestMeshCandles (dur: string) {
+    const mkt = this.market
+    const payload = await Mesh.fetchCandles(mkt.cfg.name, dur)
+    if (this.market !== mkt || !payload) return
+    mkt.candleCaches[dur] = payload
+    this.setHighLow()
+    if (this.candleDur !== dur) return
+    if (this.loadingAnimations.candles) this.loadingAnimations.candles.stop()
+    const page = this.page
+    if (!payload.candles?.length) {
+      page.pcNote.textContent = 'No mesh trades on this market yet. Candles appear after the first completed swap.'
+      Doc.show(page.pcNote)
+      return
+    }
+    if (page.pcNote.textContent?.startsWith('No mesh trades')) Doc.hide(page.pcNote)
+    this.candleChart.canvas.classList.remove('invisible')
+    this.showCandles(true)
+    this.applyChartRange()
+  }
+
+  /* refreshMeshPrices reloads the mesh 24h spots and, for the current mesh
+   * market, its candles. */
+  async refreshMeshPrices (market?: string) {
+    const spots = await Mesh.fetchSpots()
+    this.handlePriceUpdate({ host: Mesh.MeshHost, spots } as SpotPriceNote)
+    if (!this.isMesh() || (market && market !== this.market.cfg.name)) return
+    this.market.candleCaches = {}
+    this.requestMeshCandles(this.candleDur)
+    if (this.candleDur !== fiveMinBinKey) this.requestMeshCandles(fiveMinBinKey)
+  }
+
   /* handleMeshNote refreshes the mesh book and our orders on mesh activity. */
   handleMeshNote (note: MeshNote) {
     const e = note.event
-    if (!e || !this.isMesh()) return
+    if (!e) return
+    if (e.kind === 'trade') {
+      // A completed mesh trade: update the price history and spots.
+      this.meshDebounce('prices', 1000, () => this.refreshMeshPrices(e.market))
+      return
+    }
+    if (!this.isMesh()) return
     switch (e.kind) {
       case 'order':
       case 'cancel':

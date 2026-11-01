@@ -438,6 +438,7 @@ func (ob *OrderBooks) LoadSwaps() (int, error) {
 		return 0, err
 	}
 	var n int
+	defer ob.recordCompletedSwaps(recs) // after the unlock below
 	ob.mtx.Lock()
 	defer ob.mtx.Unlock()
 	for _, r := range recs {
@@ -579,6 +580,9 @@ func (ob *OrderBooks) setSwapStatus(sw *swapper, s *swapState, status, format st
 	ob.swapEvent(s, status+": "+format, args...)
 	ob.persist(sw, s)
 	m := &s.rec.Match
+	if status == SwapComplete {
+		ob.publishTrade(m)
+	}
 	ob.emit(&Event{Kind: EventSwap, Market: marketName(m.Market), MatchID: m.ID.String(), OrderID: m.MakerOrderID.String(),
 		Status: status, Side: s.rec.Side, Sell: m.MakerSell, Qty: m.Qty, Rate: m.Rate, Maker: m.Maker, Taker: m.Taker})
 }

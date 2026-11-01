@@ -86,26 +86,34 @@ type OrderBooks struct {
 	adv   advCapture // debug only (adversary.go)
 	// pres is the presence and peer registry (presence.go).
 	pres *presence
+	// trades is the trade (price) history (trades.go). histReq and histReply
+	// are when we last asked for and answered trade history, per market.
+	trades    *TradeHistory
+	histReq   map[Market]time.Time
+	histReply map[Market]time.Time
 }
 
 // NewOrderBooks constructs an OrderBooks.
 func NewOrderBooks(ps pubSub, priv libp2pcrypto.PrivKey, encPriv *secp256k1.PrivateKey, log dex.Logger) *OrderBooks {
 	self, _ := peer.IDFromPrivateKey(priv)
 	return &OrderBooks{
-		ps:       ps,
-		priv:     priv,
-		encPriv:  encPriv,
-		self:     self,
-		log:      log,
-		now:      time.Now,
-		cfg:      DefaultNegotiationConfig,
-		addr:     func(uint32) (string, error) { return "", errors.New("no address source") },
-		books:    make(map[Market]*Book),
-		own:      make(map[OrderID]*ownOrder),
-		matches:  make(map[MatchID]*matchState),
-		policies: make(map[Market]LockPolicy),
-		guard:    newInboxGuard(),
-		pres:     newPresence(),
+		ps:        ps,
+		priv:      priv,
+		encPriv:   encPriv,
+		self:      self,
+		log:       log,
+		now:       time.Now,
+		cfg:       DefaultNegotiationConfig,
+		addr:      func(uint32) (string, error) { return "", errors.New("no address source") },
+		books:     make(map[Market]*Book),
+		own:       make(map[OrderID]*ownOrder),
+		matches:   make(map[MatchID]*matchState),
+		policies:  make(map[Market]LockPolicy),
+		guard:     newInboxGuard(),
+		pres:      newPresence(),
+		trades:    newTradeHistory(),
+		histReq:   make(map[Market]time.Time),
+		histReply: make(map[Market]time.Time),
 	}
 }
 
@@ -141,6 +149,18 @@ func (ob *OrderBooks) SubscribeMarket(ctx context.Context, m Market) error {
 		ob.log.Warnf("Error subscribing to %s: %v", topic, err)
 	}
 	ob.log.Infof("Subscribed to mesh order book %s", topic)
+	// Ask the market's peers for recent trades once the mesh connection is
+	// likely up, and again a little later.
+	go func() {
+		for _, d := range []time.Duration{3 * time.Second, 15 * time.Second} {
+			select {
+			case <-time.After(d):
+				ob.requestHistory(ctx, m)
+			case <-ctx.Done():
+				return
+			}
+		}
+	}()
 	return nil
 }
 
@@ -150,6 +170,7 @@ func (ob *OrderBooks) handleEvent(ctx context.Context, m Market, topic string, b
 		ob.log.Debugf("Peer %s subscribed to %s. Sending own orders.", ev.Peer, topic)
 		ob.seenPeer(ev.Peer.String(), "topic")
 		ob.broadcastOwn(ctx, &m)
+		ob.replyHistory(ctx, m)
 		return
 	case mc.TopicEventData:
 	default:
@@ -186,6 +207,10 @@ func (ob *OrderBooks) handleEvent(ctx context.Context, m Market, topic string, b
 			ob.log.Infof("Mesh order %s cancelled on %s", msg.Cancel.OrderID, topic)
 			ob.emit(&Event{Kind: EventCancel, Market: marketName(m), Peer: ev.Peer.String(), OrderID: msg.Cancel.OrderID.String()})
 		}
+	case msgTypeTrade:
+		ob.handleTrade(m, msg.Trade)
+	case msgTypeHistory:
+		ob.replyHistory(ctx, m)
 	case msgTypeUpdate:
 		changed, err := book.Update(msg.Update, ev.Peer, now)
 		if err != nil {
@@ -474,6 +499,7 @@ func (ob *OrderBooks) maintain(ctx context.Context) {
 		b.Prune(now)
 	}
 	ob.broadcastOwn(ctx, nil)
+	ob.maintainTrades(ctx)
 }
 
 // RunMaintenance runs the maintenance loop until ctx is done.

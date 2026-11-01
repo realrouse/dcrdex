@@ -2713,3 +2713,39 @@ func (s *WebServer) apiMeshActivity(w http.ResponseWriter, r *http.Request) {
 		Activity *core.MeshActivity `json:"activity"`
 	}{OK: true, Activity: act})
 }
+
+// apiMeshCandles is the handler for the '/mesh/candles' API request: a mesh
+// market's candles of one bin size, from the trade history published by the
+// mesh peers.
+func (s *WebServer) apiMeshCandles(w http.ResponseWriter, r *http.Request) {
+	form := &struct {
+		Market string `json:"market"`
+		Dur    string `json:"dur"`
+	}{}
+	if !readPost(w, r, form) {
+		return
+	}
+	cs, err := s.core.MeshCandles(form.Market, form.Dur)
+	if err != nil {
+		s.writeAPIError(w, fmt.Errorf("mesh candles error: %w", err))
+		return
+	}
+	writeJSON(w, &struct {
+		OK      bool              `json:"ok"`
+		Candles *core.MeshCandles `json:"candles"`
+	}{OK: true, Candles: cs})
+}
+
+// apiMeshSpots is the handler for the '/mesh/spots' API request: the 24 hour
+// price summary of the mesh markets with trades.
+func (s *WebServer) apiMeshSpots(w http.ResponseWriter, r *http.Request) {
+	spots, err := s.core.MeshSpots()
+	if err != nil {
+		s.writeAPIError(w, fmt.Errorf("mesh spots error: %w", err))
+		return
+	}
+	writeJSON(w, &struct {
+		OK    bool                     `json:"ok"`
+		Spots map[string]*msgjson.Spot `json:"spots"`
+	}{OK: true, Spots: spots})
+}

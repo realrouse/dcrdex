@@ -38,3 +38,17 @@ connections and three steps: connecting to a mesh node, peers found, order
 books synced. It closes by itself when done; after 30 s it shows a link to the
 Mesh tab. "Continue without waiting" closes it. If the mesh is already
 connected (e.g. a page reload) the overlay is not shown.
+
+## Price history (candles)
+
+When a swap completes, each participant signs a `TradeSummary` (market, match
+ID, rate, qty, time, maker and taker peer IDs; no addresses) and publishes it
+on the market's `orderbook.<mkt>` topic. Every client validates the signature
+against the signer's peer ID (the signer must be the maker or the taker),
+bounds-checks the values, dedupes by match ID and keeps 30 days of trades in
+`<appdata>/<net>/mesh/trades.json`. On subscribing, a client asks online peers
+for the last 7 days (replies are capped, paced and rate limited). Candles
+(5m, 1h, 24h) and 24h spots are built locally and served by
+`POST /api/mesh/candles {market, dur}` and `GET /api/mesh/spots`, which the
+markets page chart and market list use. Peers that collude can still publish
+fake trades between themselves, so mesh prices are indicative only.

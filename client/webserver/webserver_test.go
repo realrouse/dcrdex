@@ -1279,3 +1279,7 @@ func (*TCore) MeshTakeOrder(market, orderID string, lots uint64) (string, error)
 }
 func (*TCore) MeshCancelOrder(orderID string) error      { return core.ErrMeshDisabled }
 func (*TCore) MeshActivity() (*core.MeshActivity, error) { return &core.MeshActivity{}, nil }
+func (*TCore) MeshCandles(market, dur string) (*core.MeshCandles, error) {
+	return &core.MeshCandles{Dur: dur}, nil
+}
+func (*TCore) MeshSpots() (map[string]*msgjson.Spot, error) { return nil, nil }

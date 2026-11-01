@@ -217,6 +217,7 @@ const (
 	EventUpdate   = "update"    // an order's remaining quantity changed
 	EventMatch    = "match"     // a match changed status
 	EventSwap     = "swap"      // a swap changed status
+	EventTrade    = "trade"     // a completed trade was added to the price history
 	EventPeer     = "peer"      // a peer joined or updated its presence
 	EventPeerLeft = "peer_left" // a peer went offline
 	EventConn     = "conn"      // our mesh connection changed

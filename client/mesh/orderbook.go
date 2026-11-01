@@ -330,6 +330,7 @@ type bookMsg struct {
 	Order  *MeshOrder       `json:"order,omitempty"`
 	Cancel *MeshCancel      `json:"cancel,omitempty"`
 	Update *MeshOrderUpdate `json:"update,omitempty"`
+	Trade  *TradeSummary    `json:"trade,omitempty"`
 }
 
 func encodeBookMsg(m *bookMsg) ([]byte, error) { return json.Marshal(m) }
@@ -352,6 +353,11 @@ func decodeBookMsg(b []byte) (*bookMsg, error) {
 		if m.Update == nil {
 			return nil, errors.New("update message without update")
 		}
+	case msgTypeTrade:
+		if m.Trade == nil {
+			return nil, errors.New("trade message without trade")
+		}
+	case msgTypeHistory:
 	default:
 		return nil, fmt.Errorf("unknown book message type %q", m.Type)
 	}

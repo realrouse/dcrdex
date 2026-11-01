@@ -10,7 +10,9 @@
  *   - order submission: a limit or market order first takes the crossing
  *     mesh orders of other peers (best price first, at the maker's rate) and
  *     a limit order's remainder is posted as a standing mesh order,
- *   - our mesh orders, matches and swaps as Orders for "Your Orders".
+ *   - our mesh orders, matches and swaps as Orders for "Your Orders",
+ *   - candles and 24h spot prices from the trade history that mesh peers
+ *     publish when their swaps complete.
  */
 import { postJSON, getJSON } from './http'
 import {
@@ -23,7 +25,9 @@ import {
   Order,
   Match,
   TradeForm,
-  ConnectionStatus
+  ConnectionStatus,
+  CandlesPayload,
+  Spot
 } from './registry'
 import * as OrderUtil from './orderutil'
 import { BookView, ViewOrder, Activity, MeshMatch, MatchRecord, SwapView } from './mesh'
@@ -39,6 +43,12 @@ export function isMeshHost (host: string | undefined): boolean {
 }
 
 let cached: { key: string, xc: Exchange } | null = null
+
+/* spots are the latest 24h price summaries of the mesh markets. */
+let spots: Record<string, Spot> = {}
+
+/* CandleDurs are the candle bin sizes served for mesh markets. */
+export const CandleDurs = ['24h', '1h', '5m']
 
 /* meshExchange describes the mesh markets as an Exchange, or null if the mesh
  * is not running. */
@@ -75,7 +85,7 @@ export function meshExchange (): Exchange | null {
       startepoch: 0,
       buybuffer: 1,
       orders: [],
-      spot: undefined,
+      spot: spots[name],
       atomToConv: 1,
       inflight: [],
       minimumRate: 1
@@ -103,7 +113,7 @@ export function meshExchange (): Exchange | null {
     connectionStatus: ConnectionStatus.Connected,
     viewOnly: false,
     bondAssets: {},
-    candleDurs: [],
+    candleDurs: CandleDurs,
     candlePageSize: 0,
     maxScore: 0,
     penaltyThreshold: 0,
@@ -352,4 +362,24 @@ export function userOrders (act: Activity, mkt: Market): Order[] {
 /* isTakeID is true for the Your Orders entries of orders we took. */
 export function isTakeID (id: string): boolean {
   return id.startsWith('take-')
+}
+
+/* fetchCandles gets a mesh market's candles for a bin size. */
+export async function fetchCandles (market: string, dur: string): Promise<CandlesPayload | null> {
+  const res = await postJSON('/api/mesh/candles', { market, dur })
+  if (!res || !res.ok) return null
+  return res.candles as CandlesPayload
+}
+
+/*
+ * fetchSpots gets the mesh markets' 24h price summaries and sets them on the
+ * mesh Exchange's markets. It returns the spots.
+ */
+export async function fetchSpots (): Promise<Record<string, Spot>> {
+  const res = await getJSON('/api/mesh/spots')
+  if (!res || !res.ok) return spots
+  spots = res.spots || {}
+  const xc = meshExchange()
+  if (xc) for (const [name, mkt] of Object.entries(xc.markets)) mkt.spot = spots[name]
+  return spots
 }
