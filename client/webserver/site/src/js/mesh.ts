@@ -3,6 +3,7 @@ import Doc from './doc'
 import { getJSON } from './http'
 import { app, PageElement, CoreNote, UnitInfo } from './registry'
 import MeshViz, { VizPeer, Health } from './meshviz'
+import MeshNodePanel from './meshnode'
 
 export interface MeshMarketInfo {
   name: string
@@ -185,6 +186,7 @@ export default class MeshPage extends BasePage {
   timers: number[]
   pending: Record<string, number>
   seenMatches: Set<string>
+  nodePanel: MeshNodePanel
 
   constructor (body: HTMLElement) {
     super()
@@ -198,6 +200,9 @@ export default class MeshPage extends BasePage {
     this.pending = {}
     this.seenMatches = new Set()
     Doc.cleanTemplates(page.swapTmpl)
+    this.nodePanel = new MeshNodePanel(page.meshNodePanel)
+    this.nodePanel.onChange = info => Doc.setVis(info.available, page.meshNodeCard)
+    this.nodePanel.start()
 
     app().registerNoteFeeder({
       mesh: (n: CoreNote) => { this.handleMeshNote(n as MeshNote) }
@@ -223,6 +228,7 @@ export default class MeshPage extends BasePage {
   }
 
   unload () {
+    this.nodePanel.stop()
     for (const t of this.timers) window.clearInterval(t)
     for (const t of Object.values(this.pending)) window.clearTimeout(t)
     if (this.viz) this.viz.stop()

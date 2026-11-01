@@ -4,6 +4,7 @@ import { postJSON } from './http'
 import * as intl from './locales'
 import { slideSwap } from './forms'
 import { Wave } from './charts'
+import MeshNodePanel, { fetchMeshNode } from './meshnode'
 import {
   app,
   PageElement,
@@ -45,6 +46,7 @@ export default class InitPage extends BasePage {
   initForm: AppInitForm
   quickConfigForm: QuickConfigForm
   seedBackupForm: SeedBackupForm
+  meshNodePanel?: MeshNodePanel
   mnemonic?: string
 
   constructor (body: HTMLElement) {
@@ -54,6 +56,7 @@ export default class InitPage extends BasePage {
     this.initForm = new AppInitForm(page.appPWForm, (pw: string, hosts: string[], mnemonic?: string) => { this.appInited(pw, hosts, mnemonic) })
     this.quickConfigForm = new QuickConfigForm(page.quickConfigForm, () => this.quickConfigDone())
     this.seedBackupForm = new SeedBackupForm(page.seedBackupForm, () => this.seedBackedUp())
+    Doc.bind(page.meshNodeContinue, 'click', (e: Event) => { e.preventDefault(); this.meshNodeDone() })
   }
 
   async appInited (pw: string, hosts: string[], mnemonic?: string) {
@@ -65,13 +68,35 @@ export default class InitPage extends BasePage {
   }
 
   async quickConfigDone () {
+    // Optional step: run a mesh node (only where it is available: simnet
+    // with the mesh enabled).
+    const node = await fetchMeshNode()
+    if (node && node.available) {
+      this.meshNodePanel = new MeshNodePanel(this.page.meshNodeWizPanel)
+      await this.meshNodePanel.start()
+      slideSwap(this.page.quickConfigForm, this.page.meshNodeForm)
+      return
+    }
+    this.afterMeshNode(this.page.quickConfigForm)
+  }
+
+  meshNodeDone () {
+    if (this.meshNodePanel) this.meshNodePanel.stop()
+    this.afterMeshNode(this.page.meshNodeForm)
+  }
+
+  async afterMeshNode (from: PageElement) {
     if (!this.mnemonic) {
       await app().fetchUser()
       app().showNewUserBanner()
       app().loadPage('wallets')
     } else {
-      slideSwap(this.page.quickConfigForm, this.page.seedBackupForm)
+      slideSwap(from, this.page.seedBackupForm)
     }
+  }
+
+  unload () {
+    if (this.meshNodePanel) this.meshNodePanel.stop()
   }
 
   async seedBackedUp () {

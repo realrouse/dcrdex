@@ -2783,3 +2783,6 @@ func (*TCore) MeshCandles(market, dur string) (*core.MeshCandles, error) {
 	return &core.MeshCandles{Dur: dur}, nil
 }
 func (*TCore) MeshSpots() (map[string]*msgjson.Spot, error) { return nil, nil }
+func (*TCore) MeshNodeStatus() *core.MeshNodeInfo           { return &core.MeshNodeInfo{} }
+func (*TCore) SetMeshNode(bool) (*core.MeshNodeInfo, error) { return &core.MeshNodeInfo{}, nil }
+func (*TCore) MeshNodeCheck() (*core.MeshNodeInfo, error)   { return &core.MeshNodeInfo{}, nil }

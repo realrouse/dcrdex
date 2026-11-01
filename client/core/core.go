@@ -1765,6 +1765,10 @@ type Core struct {
 	mesh    *mesh.Client
 	meshCM  *dex.ConnectionMaster
 
+	// meshNode is the optional embedded mesh node (mesh_node.go).
+	meshNodeMtx sync.Mutex
+	meshNode    *mesh.Node
+
 	// bondRefunds tracks broadcast bond refunds that are not yet confirmed,
 	// keyed by bondRefundKey.
 	bondRefundsMtx sync.Mutex

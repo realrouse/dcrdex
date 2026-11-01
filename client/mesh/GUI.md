@@ -52,3 +52,32 @@ for the last 7 days (replies are capped, paced and rate limited). Candles
 `POST /api/mesh/candles {market, dur}` and `GET /api/mesh/spots`, which the
 markets page chart and market list use. Peers that collude can still publish
 fake trades between themselves, so mesh prices are indicative only.
+
+## Running a mesh node (optional)
+
+"Help the network: run a mesh node" is an optional setup wizard step (after
+Quick Configuration) and a "Your mesh node" card on the Mesh page. Off by
+default; simnet with `--mesh` only for now. The setting is kept in
+`<appdata>/simnet/mesh/node.json`, the node key in `mesh/node/p.key`.
+
+- bisonw runs the bisoncraft/mesh node code in-process on its own libp2p host,
+  TCP port 17300 (or a free port if that is busy). No metrics/pprof server.
+- It asks the router to open the port: UPnP IGD, then NAT-PMP. The public IP is
+  the manual one (`TATANKA_MESH_NODE_IP`), else the router's external IP, else
+  the IP the mesh nodes observe.
+- Reachability: there is no dial-back service on the mesh nodes, so the check
+  asks other bisonw peers on the `reach.tatanka-dex` topic to dial the node's
+  public address. A dial only counts if the node proves its peer ID. Answers
+  are rate limited (one dial per 3 s, one per requester per 30 s); probes for
+  private addresses are only answered on simnet. Verdict: reachable (any peer
+  connected), not reachable (all failed, or no public address), unknown (no
+  answers).
+- The mesh is permissioned: nodes only peer with whitelisted nodes and a
+  whitelist change needs 2/3 of the nodes. A new node runs, can be reached and
+  shows "not on their whitelist" until the operators add its ID. Clients
+  (normal bisonw use) need no open ports at all.
+- API: `GET /api/mesh/node`, `POST /api/mesh/node {"enabled": bool}`,
+  `POST /api/mesh/node/check`.
+- Test settings: `TATANKA_MESH_NODE_IP`, `TATANKA_MESH_NODE_PEERS` (extra
+  node multiaddrs, dialed and whitelisted), `TATANKA_MESH_NODE_WHITELIST`,
+  `TATANKA_MESH_NODE_NOPORTMAP=1`.

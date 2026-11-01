@@ -233,6 +233,9 @@ func (c *Client) Connect(ctx context.Context) (*sync.WaitGroup, error) {
 	if err := c.OrderBooks.SubscribePresence(ctx); err != nil {
 		return nil, fmt.Errorf("error subscribing to presence: %w", err)
 	}
+	if err := c.OrderBooks.SubscribeReach(ctx); err != nil {
+		c.log.Warnf("Error subscribing to %s: %v", ReachTopic, err)
+	}
 	// Subscribe to the default markets so their books and peers show up
 	// without any user action.
 	for _, dm := range DefaultMarkets {

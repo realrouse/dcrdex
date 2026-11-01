@@ -159,6 +159,12 @@ func (c *Core) connectMesh(ctx context.Context, crypter encrypt.Crypter) {
 		}()
 	}
 
+	// Probes for mesh node reachability may name private addresses on
+	// simnet (local test setups).
+	mesh.OrderBooks.SetReachAllowPrivate(c.net == dex.Simnet)
+	// The optional embedded mesh node (mesh_node.go).
+	c.startMeshNodeIfEnabled()
+
 	if err = mesh.SubscribeToFeeRateEstimates(ctx); err != nil {
 		c.log.Errorf("error subscribing to mesh fee rate estimates: %v", err)
 		return

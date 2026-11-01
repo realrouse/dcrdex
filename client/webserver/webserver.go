@@ -211,6 +211,9 @@ type clientCore interface {
 	MeshActivity() (*core.MeshActivity, error)
 	MeshCandles(market, dur string) (*core.MeshCandles, error)
 	MeshSpots() (map[string]*msgjson.Spot, error)
+	MeshNodeStatus() *core.MeshNodeInfo
+	SetMeshNode(enabled bool) (*core.MeshNodeInfo, error)
+	MeshNodeCheck() (*core.MeshNodeInfo, error)
 }
 
 type MMCore interface {
@@ -691,6 +694,9 @@ func New(cfg *Config) (*WebServer, error) {
 			apiAuth.Get("/mesh/activity", s.apiMeshActivity)
 			apiAuth.Post("/mesh/candles", s.apiMeshCandles)
 			apiAuth.Get("/mesh/spots", s.apiMeshSpots)
+			apiAuth.Get("/mesh/node", s.apiMeshNode)
+			apiAuth.Post("/mesh/node", s.apiSetMeshNode)
+			apiAuth.Post("/mesh/node/check", s.apiMeshNodeCheck)
 			apiAuth.Post("/unpaircompanionapp", s.apiUnpairCompanionApp)
 		})
 	})

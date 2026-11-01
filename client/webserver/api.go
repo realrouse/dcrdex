@@ -2749,3 +2749,46 @@ func (s *WebServer) apiMeshSpots(w http.ResponseWriter, r *http.Request) {
 		Spots map[string]*msgjson.Spot `json:"spots"`
 	}{OK: true, Spots: spots})
 }
+
+// apiMeshNode is the handler for the '/mesh/node' GET API request: the
+// embedded mesh node's setting and state.
+func (s *WebServer) apiMeshNode(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, &struct {
+		OK   bool               `json:"ok"`
+		Node *core.MeshNodeInfo `json:"node"`
+	}{OK: true, Node: s.core.MeshNodeStatus()})
+}
+
+// apiSetMeshNode is the handler for the '/mesh/node' POST API request: turn
+// the embedded mesh node on or off.
+func (s *WebServer) apiSetMeshNode(w http.ResponseWriter, r *http.Request) {
+	form := &struct {
+		Enabled bool `json:"enabled"`
+	}{}
+	if !readPost(w, r, form) {
+		return
+	}
+	info, err := s.core.SetMeshNode(form.Enabled)
+	if err != nil {
+		s.writeAPIError(w, fmt.Errorf("mesh node error: %w", err))
+		return
+	}
+	writeJSON(w, &struct {
+		OK   bool               `json:"ok"`
+		Node *core.MeshNodeInfo `json:"node"`
+	}{OK: true, Node: info})
+}
+
+// apiMeshNodeCheck is the handler for the '/mesh/node/check' API request:
+// start a reachability check of the embedded mesh node.
+func (s *WebServer) apiMeshNodeCheck(w http.ResponseWriter, r *http.Request) {
+	info, err := s.core.MeshNodeCheck()
+	if err != nil {
+		s.writeAPIError(w, fmt.Errorf("mesh node check error: %w", err))
+		return
+	}
+	writeJSON(w, &struct {
+		OK   bool               `json:"ok"`
+		Node *core.MeshNodeInfo `json:"node"`
+	}{OK: true, Node: info})
+}

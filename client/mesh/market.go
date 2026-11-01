@@ -91,6 +91,8 @@ type OrderBooks struct {
 	trades    *TradeHistory
 	histReq   map[Market]time.Time
 	histReply map[Market]time.Time
+	// reach answers and sends mesh node reachability probes (reach.go).
+	reach *reach
 }
 
 // NewOrderBooks constructs an OrderBooks.
@@ -114,6 +116,7 @@ func NewOrderBooks(ps pubSub, priv libp2pcrypto.PrivKey, encPriv *secp256k1.Priv
 		trades:    newTradeHistory(),
 		histReq:   make(map[Market]time.Time),
 		histReply: make(map[Market]time.Time),
+		reach:     newReach(),
 	}
 }
 

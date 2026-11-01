@@ -295,3 +295,41 @@
 @keyframes mc-spin {
   to { transform: rotate(360deg); }
 }
+
+// The embedded mesh node panel (setup wizard and Mesh page).
+.mesh-node-panel {
+  .mnp-row {
+    padding: 2px 0;
+
+    .mnp-label {
+      min-width: 120px;
+    }
+
+    .mnp-value {
+      word-break: break-all;
+    }
+  }
+
+  .mnp-pill {
+    font-size: 13px;
+    padding: 2px 10px;
+    border-radius: 12px;
+    color: #fff;
+    background-color: #64748b;
+
+    &.reachable { background-color: #16a34a; }
+    &.unreachable { background-color: #dc2626; }
+    &.checking { background-color: #ca8a04; }
+  }
+
+  .mnp-note {
+    padding: 6px 8px;
+    border-left: 3px solid #ca8a04;
+    background-color: rgb(202 138 4 / 10%);
+  }
+
+  .mnp-guide ol {
+    padding-left: 18px;
+    margin-top: 4px;
+  }
+}

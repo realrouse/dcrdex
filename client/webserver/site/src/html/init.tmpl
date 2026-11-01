@@ -83,6 +83,21 @@
       </div>
     </form>
 
+    {{- /* Optional: run a mesh node (simnet with --mesh) */ -}}
+    <form id="meshNodeForm" class="flex-stretch-column d-hide">
+      <header>
+        <span class="fs20 ico-connection grey me-2"></span>
+        <span>Help the network: run a mesh node</span>
+      </header>
+      <div class="fs15 mb-2">
+        This step is optional. You can trade without it, and you can change it later on the Mesh page.
+      </div>
+      <div id="meshNodeWizPanel" class="py-2 border-top"></div>
+      <div class="d-flex justify-content-end mt-2">
+        <button id="meshNodeContinue" class="feature" type="button">[[[Continue]]]</button>
+      </div>
+    </form>
+
     {{- /* Seed Backup */ -}}
     <form id="seedBackupForm" class="d-hide">
       <header>[[[Backup App Seed]]]</header>
