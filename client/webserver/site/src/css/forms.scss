@@ -305,6 +305,11 @@ div[data-handler=register] {
   width: 350px;
 }
 
+#meshNodeForm {
+  width: 620px;
+  max-width: 95vw;
+}
+
 #sendForm,
 #vSendForm,
 #exportSeedAuth,
