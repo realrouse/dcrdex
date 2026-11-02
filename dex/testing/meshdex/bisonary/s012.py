@@ -123,11 +123,17 @@ def compare_chains(nodes, frm):
 # ---------------- phases ----------------
 def setup(net):
     os.makedirs(EVID, exist_ok=True)
-    if os.path.exists(RUN):
-        os.rename(RUN, RUN + time.strftime(".%Y%m%d-%H%M%S"))   # never delete appdata with possible contracts
-    os.makedirs(RUN)
-    for n in net.nodes.values():
-        n.pw = None
+    # Reuse the previous run's appdata (S012_REUSE=1, default): the traders
+    # keep their funded wallets and are only topped up. Mining millions of
+    # LBC again on regtest takes the better part of an hour.
+    reuse = os.environ.get("S012_REUSE", "1") == "1" and os.path.exists(os.path.join(RUN, "alice", ".testpw"))
+    if not reuse:
+        if os.path.exists(RUN):
+            os.rename(RUN, RUN + time.strftime(".%Y%m%d-%H%M%S"))   # never delete appdata with possible contracts
+        os.makedirs(RUN)
+        for n in net.nodes.values():
+            n.pw = None
+    log("setup: %s %s" % ("reusing" if reuse else "fresh", RUN))
     # 1. Learn the validators' mesh peer IDs (derived from their app seeds).
     for v in net.vals:
         net.start(v)
@@ -143,28 +149,44 @@ def setup(net):
     # 2. Traders with realistic balances.
     for t in net.traders:
         net.start(t)
-    need = 0
     lbc_amounts = dict(zip([t.name for t in net.traders], h.REALISTIC_LBC))
-    need = sum(lbc_amounts.values()) + 1000
-    h.ensure_lbc_supply(need)
     for t in net.traders:
         for a in ("lbc", "btc", "dcr"):
             t.new_wallet(a, "SPV")
     for t in (net["alice"], net["bob"]):
         t.new_wallet("polygon", "rpc", {"providers": "ws://127.0.0.1:34983"})
         t.new_wallet("usdc.polygon", "token", {})
+    if reuse:  # let reused SPV wallets sync before reading balances
+        for t in net.traders:
+            for a in ("lbc", "dcr", "btc"):
+                try:
+                    h.wait_until(lambda: t.coins(a, "total") > 0, 120, "%s %s balance" % (t.name, a), 2)
+                except Fail as e:
+                    log("note: %s" % e)
+    usdcs = {"alice": 5000, "bob": 8000}
+    def deficit(t, a, target):
+        have = t.coins(a, "total")
+        return 0 if have >= target * 0.98 else target - have
+    plan = {}
+    for t in net.traders:
+        plan[t.name] = {"lbc": int(round(deficit(t, "lbc", lbc_amounts[t.name]))), "dcr": round(deficit(t, "dcr", h.REALISTIC_DCR), 4),
+                        "btc": round(deficit(t, "btc", h.REALISTIC_BTC), 6),
+                        "usdc": usdcs.get(t.name) and deficit(t, "usdc.polygon", usdcs[t.name])}
+    log("funding plan (top-up to target): %s" % plan)
+    h.ensure_lbc_supply(sum(p["lbc"] for p in plan.values()) + 1000)
     net.miner = h.Miner(3)
     net.miner.start()
     funding = {}
     for t in net.traders:
-        usdc = {"alice": 5000, "bob": 8000}.get(t.name)
-        h.fund_realistic(t, lbc_amounts[t.name], polygon_usdc=usdc)
-        funding[t.name] = {"lbc": lbc_amounts[t.name], "dcr": h.REALISTIC_DCR, "btc": h.REALISTIC_BTC, "usdc": usdc}
+        p = plan[t.name]
+        h.fund_realistic(t, p["lbc"], dcr=p["dcr"], btc=p["btc"], polygon_usdc=int(p["usdc"]) if p["usdc"] else None)
+        funding[t.name] = {"targetLBC": lbc_amounts[t.name], "targetDCR": h.REALISTIC_DCR, "targetBTC": h.REALISTIC_BTC,
+                           "targetUSDC": usdcs.get(t.name), "sent": p}
     bal = {}
     for t in net.traders:
-        need_t = {"lbc": lbc_amounts[t.name] * 0.999, "dcr": 199, "btc": 0.354}
+        need_t = {"lbc": lbc_amounts[t.name] * 0.97, "dcr": 194, "btc": 0.344}
         if t.name in ("alice", "bob"):
-            need_t["usdc.polygon"] = 4999
+            need_t["usdc.polygon"] = usdcs[t.name] * 0.97
         bal[t.name] = h.wait_funded(t, need_t, 900)
     result("setup", {"release": os.path.basename(net.release), "validators": dict(zip([v.name for v in net.vals], ids)),
                      "funding": funding, "balances": bal})
@@ -178,6 +200,9 @@ def phase_s0(net):
     open(bad, "w").write(tam)
     shutil.copy(bad, EVID)
     verify = subprocess.run([RELTOOL, "verify", bad], capture_output=True, text=True)
+    td = os.path.join(RUN, "tamper")
+    if os.path.exists(td):  # fresh appdata each time (no wallets in it)
+        os.rename(td, td + time.strftime(".%H%M%S"))
     t = h.Bisonw("tamper", RUN, "127.0.0.1:16120", "127.0.0.1:16220", net.addr[1], BISONW, 16320)
     t.start(["--meshrelease", bad])
     try:
@@ -342,7 +367,9 @@ def phase_kill(net):
     rate = ba - 1 if ba - 1 > bb else ba
     oid = c.order("lbc_dcr", True, 1, rate, 900)
     time.sleep(3)
-    b.dbgapi("/mesh/take", {"market": "lbc_dcr", "sell": False, "qty": h.LOTS["lbc_dcr"], "rate": rate, "lotSize": h.LOTS["lbc_dcr"]})
+    # A standing crossing order (a take's order lives only max(4 epochs, 30 s)
+    # and would expire during the stall).
+    b.order("lbc_dcr", False, 1, rate, 900)
     time.sleep(60)
     f3 = finalized(al)
     pool = al.dbgapi("/mesh/epochs/order?id=" + oid)["status"]

@@ -324,11 +324,13 @@ class Bisonw:
 
 def fund_realistic(bw, lbc, dcr=REALISTIC_DCR, btc=REALISTIC_BTC, polygon_usdc=None):
     """Fund bw's SPV wallets: lbc LBC (chunked), dcr DCR, btc BTC; optionally POL + USDC."""
-    out = {}
-    a = bw.deposit_addr("lbc")
-    out["lbc"] = send_lbc_chunked(a, lbc)
-    out["dcr"] = send("dcr", bw.deposit_addr("dcr"), dcr)
-    out["btc"] = send("btc", bw.deposit_addr("btc"), btc)
+    out = {"lbc": []}
+    if lbc > 0:
+        out["lbc"] = send_lbc_chunked(bw.deposit_addr("lbc"), lbc)
+    if dcr > 0:
+        out["dcr"] = send("dcr", bw.deposit_addr("dcr"), dcr)
+    if btc > 0:
+        out["btc"] = send("btc", bw.deposit_addr("btc"), btc)
     if polygon_usdc:
         ev = bw.deposit_addr("polygon")
         polygon("sendtoaddress", ev, 10)

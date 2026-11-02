@@ -422,13 +422,17 @@ func (ob *OrderBooks) handlePropose(ctx context.Context, from peer.ID, p *MatchP
 		st.match.Market, st.match.MakerSell, st.lotSize = oo.ord.Market, oo.ord.Sell, oo.ord.LotSize
 	}
 	ob.matches[p.MatchID] = st
-	reason := ob.checkProposal(p, oo)
-	if reason == "" && ob.epochs != nil {
+	var reason string
+	if ob.epochs != nil {
 		// S2: in epoch mode only matches from finalized epochs are traded.
-		reason = ob.epochs.VerifyMatchProposal(p)
-		if reason != "" {
+		// Checked first so a forged or legacy match is always rejected as
+		// such, whatever else is wrong with it.
+		if reason = ob.epochs.VerifyMatchProposal(p); reason != "" {
 			ob.log.Warnf("Rejecting proposal %s from %s: %s", p.MatchID, from, reason)
 		}
+	}
+	if reason == "" {
+		reason = ob.checkProposal(p, oo)
 	}
 	if reason != "" {
 		ob.setStatus(st, MatchRejected, reason)
