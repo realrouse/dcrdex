@@ -214,6 +214,8 @@ type clientCore interface {
 	MeshNodeStatus() *core.MeshNodeInfo
 	SetMeshNode(enabled bool) (*core.MeshNodeInfo, error)
 	MeshNodeCheck() (*core.MeshNodeInfo, error)
+	MeshNodePrecheck(*core.MeshNodeConfigForm) (*core.MeshNodePrecheck, error)
+	ConfigureMeshNode(*core.MeshNodeConfigForm) (*core.MeshNodeInfo, error)
 	QuickSwapQuote(form *core.QuickSwapForm) (*core.QuickSwapQuote, error)
 	QuickSwapStart(form *core.QuickSwapForm) (*core.QuickSwapRun, error)
 	QuickSwapRuns() []*core.QuickSwapRun
@@ -703,6 +705,8 @@ func New(cfg *Config) (*WebServer, error) {
 			apiAuth.Get("/mesh/node", s.apiMeshNode)
 			apiAuth.Post("/mesh/node", s.apiSetMeshNode)
 			apiAuth.Post("/mesh/node/check", s.apiMeshNodeCheck)
+			apiAuth.Post("/mesh/node/precheck", s.apiMeshNodePrecheck)
+			apiAuth.Post("/mesh/node/configure", s.apiConfigureMeshNode)
 			apiAuth.Post("/quickswap/quote", s.apiQuickSwapQuote)
 			apiAuth.Post("/quickswap/start", s.apiQuickSwapStart)
 			apiAuth.Post("/quickswap/status", s.apiQuickSwapStatus)

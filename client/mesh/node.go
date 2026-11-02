@@ -549,3 +549,62 @@ func (l *nodeLogger) Debugf(format string, args ...any) {
 	l.note(format, args)
 	l.Logger.Debugf(format, args...)
 }
+
+// BootstrapCheck is the result of a TCP connection test to a mesh node.
+type BootstrapCheck struct {
+	Addr string `json:"addr"`
+	ID   string `json:"id,omitempty"`
+	OK   bool   `json:"ok"`
+	Err  string `json:"err,omitempty"`
+	Ms   int64  `json:"ms,omitempty"`
+}
+
+// CheckBootstrapAddr checks that addr is a valid mesh node multiaddr with a
+// peer ID and that its TCP port accepts connections.
+func CheckBootstrapAddr(ctx context.Context, addr string, timeout time.Duration) *BootstrapCheck {
+	r := &BootstrapCheck{Addr: addr}
+	maddr, err := ma.NewMultiaddr(strings.TrimSpace(addr))
+	if err != nil {
+		r.Err = "not a valid address: " + err.Error()
+		return r
+	}
+	ai, err := peer.AddrInfoFromP2pAddr(maddr)
+	if err != nil {
+		r.Err = "needs a /p2p/<peer ID> part"
+		return r
+	}
+	r.ID = ai.ID.String()
+	if len(ai.Addrs) == 0 {
+		r.Err = "no transport address"
+		return r
+	}
+	na, err := manet.ToNetAddr(ai.Addrs[0])
+	if err != nil {
+		r.Err = "unsupported address: " + err.Error()
+		return r
+	}
+	ctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	start := time.Now()
+	var d net.Dialer
+	c, err := d.DialContext(ctx, na.Network(), na.String())
+	if err != nil {
+		r.Err = shortDialErr(err)
+		return r
+	}
+	c.Close()
+	r.OK, r.Ms = true, time.Since(start).Milliseconds()
+	return r
+}
+
+// PortFree reports whether TCP port can be listened on (all interfaces).
+func PortFree(port int) error {
+	if port <= 0 || port > 65535 {
+		return fmt.Errorf("port %d is out of range (1-65535)", port)
+	}
+	l, err := net.Listen("tcp4", fmt.Sprintf("0.0.0.0:%d", port))
+	if err != nil {
+		return err
+	}
+	return l.Close()
+}

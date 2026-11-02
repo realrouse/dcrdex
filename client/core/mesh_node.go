@@ -11,9 +11,12 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	meshpkg "decred.org/dcrdex/client/mesh"
@@ -26,6 +29,24 @@ import (
 type MeshNodeSettings struct {
 	Enabled bool `json:"enabled"`
 	Port    int  `json:"port,omitempty"`
+	// Name is the node's display name (random by default, never the
+	// computer name). It is shown in this app and the node log; the mesh
+	// knows nodes by their ID.
+	Name string `json:"name,omitempty"`
+	// Bootstrap overrides the mesh nodes the node peers with (empty: the
+	// client's bootstrap list).
+	Bootstrap []string `json:"bootstrap,omitempty"`
+	// PublicIP is a manual public IPv4 (port forward or VPS). Empty: from
+	// the router mapping or as seen by the mesh nodes. TATANKA_MESH_NODE_IP
+	// overrides it.
+	PublicIP string `json:"publicIP,omitempty"`
+}
+
+// MeshNodeDefaults are the wizard's suggested settings.
+type MeshNodeDefaults struct {
+	Port      int      `json:"port"`
+	Name      string   `json:"name"`
+	Bootstrap []string `json:"bootstrap"`
 }
 
 // MeshNodeInfo is the embedded node's setting and state.
@@ -34,6 +55,17 @@ type MeshNodeInfo struct {
 	Available bool                `json:"available"`
 	Enabled   bool                `json:"enabled"`
 	Status    *meshpkg.NodeStatus `json:"status,omitempty"`
+	Settings  *MeshNodeSettings   `json:"settings,omitempty"`
+	Defaults  *MeshNodeDefaults   `json:"defaults,omitempty"`
+}
+
+// MeshNodePrecheck is the result of the wizard's checks before the node
+// starts: is the port free, and do the bootstrap mesh nodes answer.
+type MeshNodePrecheck struct {
+	Port      int                       `json:"port"`
+	PortOK    bool                      `json:"portOK"`
+	PortErr   string                    `json:"portErr,omitempty"`
+	Bootstrap []*meshpkg.BootstrapCheck `json:"bootstrap"`
 }
 
 // ErrMeshNodeUnavailable is returned where the node can't run.
@@ -80,7 +112,10 @@ func (c *Core) MeshNodeStatus() *MeshNodeInfo {
 	if !info.Available {
 		return info
 	}
-	info.Enabled = c.loadMeshNodeSettings().Enabled
+	set := c.loadMeshNodeSettings()
+	info.Enabled = set.Enabled
+	info.Settings = set
+	info.Defaults = c.meshNodeDefaults(set)
 	c.meshNodeMtx.Lock()
 	n := c.meshNode
 	c.meshNodeMtx.Unlock()
@@ -114,6 +149,132 @@ func (c *Core) SetMeshNode(enabled bool) (*MeshNodeInfo, error) {
 		}
 	} else {
 		c.stopMeshNode()
+	}
+	return c.MeshNodeStatus(), nil
+}
+
+func (c *Core) meshNodeDefaults(set *MeshNodeSettings) *MeshNodeDefaults {
+	d := &MeshNodeDefaults{Port: meshpkg.DefaultNodePort, Name: set.Name}
+	if set.Port > 0 {
+		d.Port = set.Port
+	}
+	if d.Name == "" {
+		c.meshNodeMtx.Lock()
+		if c.meshNodeSuggestedName == "" {
+			c.meshNodeSuggestedName = meshpkg.RandomName()
+		}
+		d.Name = c.meshNodeSuggestedName
+		c.meshNodeMtx.Unlock()
+	}
+	d.Bootstrap, _ = c.meshBootstrap()
+	return d
+}
+
+// MeshNodeConfigForm is the wizard's settings step.
+type MeshNodeConfigForm struct {
+	Port      int      `json:"port"`
+	Name      string   `json:"name"`
+	Bootstrap []string `json:"bootstrap"`
+	PublicIP  string   `json:"publicIP"`
+}
+
+func (c *Core) validMeshNodeForm(f *MeshNodeConfigForm) (*MeshNodeConfigForm, error) {
+	out := &MeshNodeConfigForm{Port: f.Port, Name: meshpkg.SanitizeName(f.Name), PublicIP: strings.TrimSpace(f.PublicIP)}
+	if out.Port == 0 {
+		out.Port = meshpkg.DefaultNodePort
+	}
+	if out.Port < 1024 || out.Port > 65535 {
+		return nil, fmt.Errorf("port %d: use a port from 1024 to 65535", out.Port)
+	}
+	for _, b := range f.Bootstrap {
+		l, err := meshpkg.ParseBootstrapList(b)
+		if err != nil {
+			return nil, err
+		}
+		out.Bootstrap = append(out.Bootstrap, l...)
+	}
+	if out.PublicIP != "" {
+		if ip := net.ParseIP(out.PublicIP); ip == nil || ip.To4() == nil {
+			return nil, fmt.Errorf("public IP %q is not an IPv4 address", out.PublicIP)
+		}
+	}
+	return out, nil
+}
+
+// MeshNodePrecheck tests the wizard settings before the node starts: is
+// the port free (or already used by our running node), and do the
+// bootstrap mesh nodes accept TCP connections.
+func (c *Core) MeshNodePrecheck(f *MeshNodeConfigForm) (*MeshNodePrecheck, error) {
+	if !c.meshNodeAvailable() {
+		return nil, ErrMeshNodeUnavailable
+	}
+	f, err := c.validMeshNodeForm(f)
+	if err != nil {
+		return nil, err
+	}
+	res := &MeshNodePrecheck{Port: f.Port}
+	c.meshNodeMtx.Lock()
+	n := c.meshNode
+	c.meshNodeMtx.Unlock()
+	if n != nil && n.Status().Port == f.Port {
+		res.PortOK = true // our own node listens there
+	} else if err := meshpkg.PortFree(f.Port); err != nil {
+		res.PortErr = fmt.Sprintf("port %d is in use by another program on this computer", f.Port)
+	} else {
+		res.PortOK = true
+	}
+	boot := f.Bootstrap
+	if len(boot) == 0 {
+		boot, _ = c.meshBootstrap()
+	}
+	if len(boot) == 0 {
+		return nil, errors.New("no bootstrap mesh nodes")
+	}
+	res.Bootstrap = make([]*meshpkg.BootstrapCheck, len(boot))
+	var wg sync.WaitGroup
+	for i, b := range boot {
+		wg.Add(1)
+		go func(i int, b string) {
+			defer wg.Done()
+			res.Bootstrap[i] = meshpkg.CheckBootstrapAddr(c.ctx, b, 6*time.Second)
+		}(i, b)
+	}
+	wg.Wait()
+	return res, nil
+}
+
+// ConfigureMeshNode saves the wizard settings, switches the node on and
+// (re)starts it with them.
+func (c *Core) ConfigureMeshNode(f *MeshNodeConfigForm) (*MeshNodeInfo, error) {
+	if !c.meshNodeAvailable() {
+		return nil, ErrMeshNodeUnavailable
+	}
+	f, err := c.validMeshNodeForm(f)
+	if err != nil {
+		return nil, err
+	}
+	s := c.loadMeshNodeSettings()
+	changed := s.Port != f.Port || s.PublicIP != f.PublicIP || strings.Join(s.Bootstrap, ",") != strings.Join(f.Bootstrap, ",")
+	s.Enabled, s.Port, s.PublicIP, s.Bootstrap = true, f.Port, f.PublicIP, f.Bootstrap
+	if f.Name != "" {
+		s.Name = f.Name
+	} else if s.Name == "" {
+		s.Name = c.meshNodeDefaults(s).Name
+	}
+	if err := c.saveMeshNodeSettings(s); err != nil {
+		return nil, err
+	}
+	c.meshNodeMtx.Lock()
+	n := c.meshNode
+	c.meshNodeMtx.Unlock()
+	if n != nil {
+		st := n.Status()
+		if changed || st.Error != "" || (!st.Running && !st.Starting) {
+			c.stopMeshNode()
+		}
+	}
+	if err := c.startMeshNode(); err != nil {
+		return nil, err
 	}
 	return c.MeshNodeStatus(), nil
 }
@@ -163,17 +324,29 @@ func (c *Core) startMeshNode() error {
 	if c.meshNode != nil {
 		return nil
 	}
-	bootstrap, err := c.meshBootstrap()
-	if err != nil {
-		return err
+	set := c.loadMeshNodeSettings()
+	bootstrap := set.Bootstrap
+	if len(bootstrap) == 0 {
+		var err error
+		if bootstrap, err = c.meshBootstrap(); err != nil {
+			return err
+		}
+	}
+	pubIP := set.PublicIP
+	if ip := strings.TrimSpace(os.Getenv("TATANKA_MESH_NODE_IP")); ip != "" {
+		pubIP = ip
+	}
+	if set.Name != "" {
+		c.log.Infof("Starting mesh node %q", set.Name)
 	}
 	cfg := &meshpkg.NodeConfig{
 		DataDir:   c.meshNodeDir(),
-		Port:      c.loadMeshNodeSettings().Port,
+		Port:      set.Port,
 		Bootstrap: bootstrap,
-		// Test overrides (simnet): a manual public IP (port forward or
-		// VPS), extra whitelisted nodes, and no router port mapping.
-		PublicIP:  strings.TrimSpace(os.Getenv("TATANKA_MESH_NODE_IP")),
+		// Manual public IP (port forward or VPS; env TATANKA_MESH_NODE_IP
+		// overrides the setting). Test overrides (simnet): extra
+		// whitelisted nodes, and no router port mapping.
+		PublicIP:  pubIP,
 		NoPortMap: os.Getenv("TATANKA_MESH_NODE_NOPORTMAP") == "1",
 		Log:       c.log.SubLogger("MNODE"),
 	}

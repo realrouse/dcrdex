@@ -2793,6 +2793,42 @@ func (s *WebServer) apiMeshNodeCheck(w http.ResponseWriter, r *http.Request) {
 	}{OK: true, Node: info})
 }
 
+// apiMeshNodePrecheck is the handler for the '/mesh/node/precheck' API
+// request: the node wizard's port and bootstrap checks before starting.
+func (s *WebServer) apiMeshNodePrecheck(w http.ResponseWriter, r *http.Request) {
+	form := new(core.MeshNodeConfigForm)
+	if !readPost(w, r, form) {
+		return
+	}
+	res, err := s.core.MeshNodePrecheck(form)
+	if err != nil {
+		s.writeAPIError(w, fmt.Errorf("mesh node check error: %w", err))
+		return
+	}
+	writeJSON(w, &struct {
+		OK    bool                   `json:"ok"`
+		Check *core.MeshNodePrecheck `json:"check"`
+	}{OK: true, Check: res})
+}
+
+// apiConfigureMeshNode is the handler for the '/mesh/node/configure' API
+// request: save the wizard settings and (re)start the node with them.
+func (s *WebServer) apiConfigureMeshNode(w http.ResponseWriter, r *http.Request) {
+	form := new(core.MeshNodeConfigForm)
+	if !readPost(w, r, form) {
+		return
+	}
+	info, err := s.core.ConfigureMeshNode(form)
+	if err != nil {
+		s.writeAPIError(w, fmt.Errorf("mesh node error: %w", err))
+		return
+	}
+	writeJSON(w, &struct {
+		OK   bool               `json:"ok"`
+		Node *core.MeshNodeInfo `json:"node"`
+	}{OK: true, Node: info})
+}
+
 // apiQuickSwapQuote is the handler for the '/quickswap/quote' API request:
 // the best route (at most 2 swaps) for a swap and the others considered.
 func (s *WebServer) apiQuickSwapQuote(w http.ResponseWriter, r *http.Request) {

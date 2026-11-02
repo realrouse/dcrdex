@@ -129,3 +129,19 @@ default; simnet with `--mesh` only for now. The setting is kept in
   list shows IDs only, and the "Your mesh node" card hides the port, public address and LAN addresses.
   Error texts and peer answers are filtered (`netdetails.ts` `redactNet`). The "Show network details"
   switch at the top (off by default, kept in the browser's localStorage) shows them.
+
+## "Start mesh node" wizard (replaces the node checkbox)
+The "Your mesh node" card (Mesh page, and the optional setup step) shows a **Start mesh node** button while
+the node is off. It opens a 4-step overlay (meshnode.ts `MeshNodeWizard`):
+1. About: what running a node means (relays orders and messages, never holds coins, peers see your IP,
+   permissioned test mesh).
+2. Settings: node name (random adjective-animal-NNNN default, "New random name"), and under the collapsed
+   "Advanced network settings": TCP port (default 17300), bootstrap mesh nodes (empty: the app's list) and
+   an optional manual public IP (port forward / VPS; env TATANKA_MESH_NODE_IP still overrides it).
+3. Checks, each pass / fail / warning / skipped: port free on this computer, bootstrap mesh nodes accept
+   TCP connections (`/api/mesh/node/precheck`), node started (`/api/mesh/node/configure` saves the
+   settings and (re)starts the node), reachable by other peers (dial-back probe; waits out the peers'
+   30 s per-node probe limit on Retry), accepted by the mesh (whitelist peers / mismatch answers).
+4. Result with a verdict, the node ID, the port-forward / VPS guide when not reachable, and Retry,
+   Change settings, Done.
+While the node runs, the card shows its state with Run checks again, Change settings and Stop node.

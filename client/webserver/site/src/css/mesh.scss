@@ -333,3 +333,95 @@
     margin-top: 4px;
   }
 }
+
+// The "Start mesh node" wizard (meshnode.ts MeshNodeWizard).
+.mnw-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 1000;
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  padding-top: 60px;
+  background-color: rgb(0 0 0 / 55%);
+  overflow-y: auto;
+
+  &.d-hide { display: none; }
+}
+
+.mnw-box {
+  width: 600px;
+  max-width: calc(100% - 20px);
+  padding: 18px 22px;
+  margin-bottom: 40px;
+  background: var(--section-bg);
+  border: 1px solid var(--border-color);
+  border-radius: 4px;
+
+  .mnw-x {
+    background: none;
+    border: none;
+    color: inherit;
+    font-size: 24px;
+    line-height: 1;
+  }
+
+  .mnw-steps {
+    gap: 14px;
+
+    .mnw-dot {
+      color: #94a3b8;
+
+      &.done { color: #16a34a; }
+      &.now { color: inherit; font-family: $demi-sans; border-bottom: 2px solid #2970fe; }
+    }
+  }
+
+  .mnw-list li { margin-bottom: 4px; }
+
+  .mnw-check {
+    gap: 10px;
+    border-bottom: 1px solid var(--border-color);
+  }
+
+  .mnw-icon {
+    width: 22px;
+    height: 22px;
+    flex-shrink: 0;
+    border-radius: 11px;
+    text-align: center;
+    line-height: 22px;
+    font-size: 13px;
+    color: #fff;
+    background-color: #64748b;
+
+    &.run { background-color: #2970fe; }
+    &.pass { background-color: #16a34a; }
+    &.fail { background-color: #dc2626; }
+    &.warn { background-color: #ca8a04; }
+    &.skip { background-color: #475569; }
+  }
+
+  .mnw-verdict {
+    padding: 8px 12px;
+    border-left: 4px solid #64748b;
+
+    &.pass { border-color: #16a34a; background-color: rgb(22 163 74 / 10%); }
+    &.warn { border-color: #ca8a04; background-color: rgb(202 138 4 / 10%); }
+    &.fail { border-color: #dc2626; background-color: rgb(220 38 38 / 10%); }
+  }
+
+  .mnp-guide ol {
+    padding-left: 18px;
+    margin-top: 4px;
+  }
+}
+
+.mnw-box .mnw-input {
+  width: 100%;
+  padding: 5px 8px;
+  color: inherit;
+  background-color: var(--body-bg, transparent);
+  border: 1px solid var(--border-color);
+  border-radius: 3px;
+}

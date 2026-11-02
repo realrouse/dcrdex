@@ -1765,12 +1765,15 @@ type Core struct {
 	// Quick Swap runs (quickswap.go), created on first use.
 	qsOnce sync.Once
 	qs     *quickSwapper
-	mesh    *mesh.Client
-	meshCM  *dex.ConnectionMaster
+	mesh   *mesh.Client
+	meshCM *dex.ConnectionMaster
 
 	// meshNode is the optional embedded mesh node (mesh_node.go).
 	meshNodeMtx sync.Mutex
 	meshNode    *mesh.Node
+	// meshNodeSuggestedName is the wizard's random default node name until
+	// one is saved.
+	meshNodeSuggestedName string
 
 	// bondRefunds tracks broadcast bond refunds that are not yet confirmed,
 	// keyed by bondRefundKey.
@@ -7471,16 +7474,16 @@ func (c *Core) walletSet(dc *dexConnection, baseID, quoteID uint32, sell bool) (
 	}
 
 	return &walletSet{
-			fromWallet:  fromWallet,
-			toWallet:    toWallet,
-			baseWallet:  baseWallet,
-			quoteWallet: quoteWallet,
-		}, &assetSet{
-			baseAsset:  baseAsset,
-			quoteAsset: quoteAsset,
-			fromAsset:  fromAsset,
-			toAsset:    toAsset,
-		}, versCompat, nil
+		fromWallet:  fromWallet,
+		toWallet:    toWallet,
+		baseWallet:  baseWallet,
+		quoteWallet: quoteWallet,
+	}, &assetSet{
+		baseAsset:  baseAsset,
+		quoteAsset: quoteAsset,
+		fromAsset:  fromAsset,
+		toAsset:    toAsset,
+	}, versCompat, nil
 }
 
 func (c *Core) Cancel(oidB dex.Bytes) error {
