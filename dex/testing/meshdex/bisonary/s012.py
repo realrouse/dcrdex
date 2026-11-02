@@ -174,7 +174,7 @@ def setup(net):
     for t in net.traders:
         for a in ("lbc", "btc", "dcr"):
             t.new_wallet(a, "SPV")
-    for t in (net["alice"], net["bob"]):
+    for t in (net["alice"], net["bob"], net["mm"]):
         t.new_wallet("polygon", "rpc", {"providers": "ws://127.0.0.1:34983"})
         t.new_wallet("usdc.polygon", "token", {})
     if reuse:  # let reused SPV wallets sync before reading balances
@@ -184,7 +184,7 @@ def setup(net):
                     h.wait_until(lambda: t.coins(a, "total") > 0, 120, "%s %s balance" % (t.name, a), 2)
                 except Fail as e:
                     log("note: %s" % e)
-    usdcs = {"alice": 5000, "bob": 8000}
+    usdcs = {"alice": 5000, "bob": 8000, "mm": 3000}
     def deficit(t, a, target):
         have = t.coins(a, "total")
         return 0 if have >= target * 0.98 else target - have
@@ -206,7 +206,7 @@ def setup(net):
     bal = {}
     for t in net.traders:
         need_t = {"lbc": lbc_amounts[t.name] * 0.97, "dcr": 194, "btc": 0.344}
-        if t.name in ("alice", "bob"):
+        if t.name in usdcs:
             need_t["usdc.polygon"] = usdcs[t.name] * 0.97
         bal[t.name] = h.wait_funded(t, need_t, 900)
     result("setup", {"release": os.path.basename(net.release), "validators": dict(zip([v.name for v in net.vals], ids)),
@@ -276,12 +276,12 @@ def phase_book(net):
         for m in MARKETS:
             t.subscribe(m)
     for m in MARKETS:
-        sd = [net["alice"], net["bob"]] if m.endswith("polygon") else seeders
-        mid, placed = meshmm.seed_book(sd, m, prices, budget=budget, max_lots=4)
+        poly = m.endswith("polygon")
+        sd = [net["alice"], net["bob"]] if poly else seeders
+        # Only two wallets hold USDC: more orders each to keep 5-10 per side.
+        mid, placed = meshmm.seed_book(sd, m, prices, per_wallet=(3, 5) if poly else (2, 3), budget=budget, max_lots=4)
         books[m] = {"midRate": mid, "seeded": len(placed)}
     for m in MARKETS:
-        if m.endswith("polygon"):
-            continue  # the mm wallet has no polygon wallet
         mm = meshmm.MeshMM(net["mm"], m, lambda: net.prices, levels=3, lots=1)
         mm.start()
         net.mms.append(mm)
