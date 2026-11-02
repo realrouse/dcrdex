@@ -54,6 +54,34 @@ export interface MeshStatus {
   minProtocolVersion: number
   appVersion: string
   markets: MeshMarketInfo[] | null
+  epochs?: EpochStatus
+}
+
+export interface EpochStatus {
+  release: string
+  releaseHash: string
+  role: string
+  params: { epochMs: number, signWindowMs: number, quorumNum: number, quorumDen: number, floorNum: number, floorDen: number, maxClockSkewMs: number }
+  now: number
+  currentEpoch: number
+  lastFinalized: number
+  haveFinalized: boolean
+  lastFinalAt: number
+  lastSigners: number
+  finalized: number
+  skipped: number
+  unfinalizedSinceLast: number
+  pool: number
+  resting: number
+  clockSkewMs: number
+  clockPeers: number
+  clockOK: boolean
+  signing: boolean
+  activePower: number
+  bondedPower: number
+  canFinalize: boolean
+  validators: { peerID: string, name: string, bond: number, active: boolean, self: boolean, omissions: number }[] | null
+  flags: { epoch: number, kind: string, peer: string, detail: string }[] | null
 }
 
 export interface ViewOrder {
@@ -296,6 +324,48 @@ export default class MeshPage extends BasePage {
     this.updateViz()
   }
 
+  renderEpochs (ep?: EpochStatus) {
+    const page = this.page
+    Doc.setVis(!!ep, page.epochCard)
+    if (!ep) return
+    const p = ep.params
+    const behind = ep.unfinalizedSinceLast
+    const ok = ep.haveFinalized && behind <= 1
+    page.epochPill.className = `mesh-pill ${ok ? 'good' : ep.canFinalize ? 'degraded' : 'offline'}`
+    page.epochPill.textContent = ok ? 'finalizing' : ep.canFinalize ? 'catching up' : 'not finalizing'
+    page.epochRole.textContent = ep.role === 'validator' ? (ep.signing ? 'validator node (signing)' : 'validator node (NOT signing)') : 'trader'
+    page.epochRelease.textContent = `release ${ep.release} ${ep.releaseHash.substring(0, 8)}`
+    page.epochSummary.textContent = `Epoch ${ep.currentEpoch} (${p.epochMs / 1000} s epochs, ${p.signWindowMs / 1000} s signing window). ` +
+      (ep.haveFinalized ? `Last finalized ${ep.lastFinalized} with ${ep.lastSigners} signatures; ` : 'Nothing finalized yet; ') +
+      `${ep.finalized} finalized, ${ep.skipped} skipped. Active power ${ep.activePower} of ${ep.bondedPower} bonded ` +
+      `(needs ${p.quorumNum}/${p.quorumDen} of active and more than ${p.floorNum}/${p.floorDen} of bonded). ` +
+      `${ep.pool} order${ep.pool === 1 ? '' : 's'} waiting, ${ep.resting} resting.`
+    const skew = ep.clockPeers === 0 ? 'unknown (no validator stamps yet)' : `${ep.clockSkewMs > 0 ? '+' : ''}${ep.clockSkewMs} ms vs ${ep.clockPeers} peer${ep.clockPeers === 1 ? '' : 's'}`
+    page.epochClock.textContent = `Clock: ${skew}, limit ±${p.maxClockSkewMs} ms` + (ep.clockOK ? '' : ' — CLOCK OFF: not signing orders or epochs until the system clock is fixed')
+    page.epochClock.className = `fs13 mb-1 ${ep.clockOK ? 'grey' : 'text-danger demi'}`
+    Doc.empty(page.epochVals)
+    for (const v of ep.validators || []) {
+      const tr = document.createElement('tr')
+      if (!v.active) tr.classList.add('offline')
+      tr.appendChild(this.td(v.name + (v.self ? ' (you)' : '')))
+      const idTd = this.td(shortID(v.peerID), 'mono')
+      idTd.title = v.peerID
+      tr.appendChild(idTd)
+      tr.appendChild(this.td(String(v.bond)))
+      tr.appendChild(this.td(v.active ? 'active' : 'silent'))
+      tr.appendChild(this.td(String(v.omissions), v.omissions > 0 ? 'text-danger demi' : ''))
+      page.epochVals.appendChild(tr)
+    }
+    Doc.empty(page.epochFlags)
+    for (const f of (ep.flags || []).slice(-5)) {
+      const d = document.createElement('div')
+      d.className = 'text-danger'
+      const who = (ep.validators || []).find(v => v.peerID === f.peer)
+      d.textContent = `epoch ${f.epoch}: ${f.kind} by ${who ? who.name : shortID(f.peer)} — ${f.detail}`
+      page.epochFlags.appendChild(d)
+    }
+  }
+
   health (): Health {
     const st = this.status
     if (!st || !st.connected) return 'offline'
@@ -314,6 +384,7 @@ export default class MeshPage extends BasePage {
     page.selfID.title = st.peerID
     page.protoBadge.textContent = `protocol v${st.protocolVersion}`
     page.protoBadge.title = `mesh trading protocol v${st.protocolVersion} (trades with v${st.minProtocolVersion}+), app ${st.appVersion}`
+    this.renderEpochs(st.epochs)
     const peers = st.peers || []
     const online = peers.filter(p => p.online).length
     page.peerCount.textContent = `${online} peer${online === 1 ? '' : 's'} online, ${(st.nodes || []).length} mesh node${(st.nodes || []).length === 1 ? '' : 's'}`

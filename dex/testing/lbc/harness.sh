@@ -513,6 +513,19 @@ for w in beta gamma; do
   fi
 done
 
+# Realistic test balances (bisonary, 2026-11-02): test wallets get 1-5 million
+# LBC each, so alpha needs ~15M LBC. Regtest pays 1 LBC/block to 5100, then
+# 1+(h-5001)/100 LBC rising to ~500 at 55000; mining to ~60500 gives ~15M.
+# Takes ~10 min. LBC_SUPPLY_HEIGHT=0 skips it.
+LBC_SUPPLY_HEIGHT="${LBC_SUPPLY_HEIGHT:-60500}"
+if [ "${LBC_SUPPLY_HEIGHT}" -gt 0 ]; then
+  while [ "$(node_height alpha)" -lt "${LBC_SUPPLY_HEIGHT}" ]; do
+    ./alpha-node generatetoaddress 1000 "${ALPHA_ADDR}" >/dev/null
+    echo "  LBC supply: height $(node_height alpha) of ${LBC_SUPPLY_HEIGHT}"
+  done
+  echo "alpha balance after supply mining: $(wallet_balance alpha) LBC"
+fi
+
 # Optional background miner
 if [ -z "$NOMINER" ]; then
   tmux new-window -t "${SESSION}:7" -n miner "${SHELL}"

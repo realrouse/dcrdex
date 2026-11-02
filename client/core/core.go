@@ -1678,6 +1678,16 @@ type Config struct {
 	MeshBootstrap []string
 	// MeshPort is the mesh client's libp2p listen port (0: library default).
 	MeshPort int
+	// MeshRelease is the path of a signed bisonary release file. If set,
+	// mesh trading runs in epoch mode (validator-signed matching, S0-S2)
+	// and a release that fails verification keeps the mesh off.
+	MeshRelease string
+	// MeshValidator runs this node as a validator (proposes and signs
+	// epochs) if its mesh peer ID is in the release.
+	MeshValidator bool
+	// MeshNTP is an optional SNTP server (host:port) for the epoch clock
+	// check. Without it the clock is checked against validator stamps.
+	MeshNTP string
 	// AppVersion is the app version announced to mesh peers.
 	AppVersion string
 	// MaxActiveMatches is the maximum number of active swap matches allowed
@@ -1762,6 +1772,8 @@ type Core struct {
 	requestedActions   map[string]*asset.ActionRequiredNote
 
 	meshMtx sync.RWMutex
+	// meshRelease is the verified bisonary release (epoch mode), or nil.
+	meshRelease *mesh.Release
 	// Quick Swap runs (quickswap.go), created on first use.
 	qsOnce sync.Once
 	qs     *quickSwapper
@@ -4932,6 +4944,17 @@ func (c *Core) Login(pw []byte) error {
 				if meshBootstrap, err = c.meshBootstrap(); err != nil {
 					// Don't block login; the mesh just stays off.
 					c.log.Errorf("Mesh disabled: %v", err)
+				}
+			}
+			if len(meshBootstrap) > 0 && c.cfg.MeshRelease != "" {
+				rel, err := mesh.LoadRelease(c.cfg.MeshRelease)
+				if err != nil {
+					// S0: never trade with a release that doesn't verify.
+					c.log.Errorf("Mesh disabled: release file %s rejected: %v", c.cfg.MeshRelease, err)
+					meshBootstrap = nil
+				} else {
+					c.log.Infof("Mesh release %q verified: %d validators, epoch %d ms", rel.Name, len(rel.Validators), rel.Params.EpochMs)
+					c.meshRelease = rel
 				}
 			}
 			if bootstrap := meshBootstrap; len(bootstrap) > 0 {

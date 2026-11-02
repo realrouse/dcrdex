@@ -28,9 +28,13 @@ import (
 // peers are compatible when each one's version is at least the other's
 // minimum. Bump ProtocolVersion (and MinProtocolVersion for breaking
 // changes) whenever a wire message or a swap rule changes.
+//
+// Version 2 (bisonary S0-S2): matches only come from finalized validator
+// epochs, so a version 1 maker would accept proposals a version 2 network
+// forbids. The two don't trade.
 const (
-	ProtocolVersion    uint32 = 1
-	MinProtocolVersion uint32 = 1
+	ProtocolVersion    uint32 = 2
+	MinProtocolVersion uint32 = 2
 )
 
 const (

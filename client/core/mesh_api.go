@@ -64,6 +64,8 @@ type MeshStatus struct {
 	MinProtocolVersion uint32              `json:"minProtocolVersion"`
 	AppVersion         string              `json:"appVersion"`
 	Markets            []*MeshMarketInfo   `json:"markets"`
+	// Epochs is the epoch consensus status (bisonary epoch mode), or nil.
+	Epochs *meshpkg.EpochStatus `json:"epochs,omitempty"`
 }
 
 // MeshOrderForm is a standing order posted from the UI. Rate is in the
@@ -172,6 +174,9 @@ func (c *Core) MeshStatus() *MeshStatus {
 		AppVersion:         c.cfg.AppVersion,
 	}
 	st.Connected = st.Node != ""
+	if e := m.OrderBooks.Epochs(); e != nil {
+		st.Epochs = e.Status()
+	}
 	seen := make(map[string]bool)
 	add := func(name string) {
 		if seen[name] {

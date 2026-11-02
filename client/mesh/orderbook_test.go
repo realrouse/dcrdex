@@ -7,6 +7,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -281,6 +282,9 @@ type fakeClient struct {
 func (f *fakeMesh) client(id peer.ID) *fakeClient { return &fakeClient{m: f, id: id} }
 
 func (c *fakeClient) Broadcast(_ context.Context, topic string, data []byte) error {
+	if (topic == EpochTopic || strings.HasPrefix(topic, InboxTopicPrefix)) && !fitsPublish(topic, data) {
+		return fmt.Errorf("message size %d exceeds max size %d", len(data)+len(topic), meshMaxPublish)
+	}
 	c.m.mtx.Lock()
 	if c.m.drop || (c.m.dropFn != nil && c.m.dropFn(topic, c.id)) {
 		c.m.mtx.Unlock()

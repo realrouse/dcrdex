@@ -202,7 +202,11 @@ setup_wallets() { # name
 fund_spv() { # name lbc btc dcr (whole coins)
   local n=$1 addr
   [ "$(kind_of "$n")" = spv ] || return 0
-  addr=$(deposit_addr "$n" 140); log "$n lbc $addr <- $2 LBC: $("$LBCCTL/alpha" sendtoaddress "$addr" "$2" | py 'import sys,json; print(json.load(sys.stdin)["result"])')"
+  # LBC in 50,000 LBC chunks: alpha's coins are many small coinbase outputs.
+  addr=$(deposit_addr "$n" 140); local left=$2 c ntx=0
+  "$LBCCTL/alpha" walletpassphrase abc 600 >/dev/null 2>&1 || true
+  while [ "$left" -gt 0 ]; do c=$(( left < 50000 ? left : 50000 )); "$LBCCTL/alpha" sendtoaddress "$addr" "$c" >/dev/null; left=$((left - c)); ntx=$((ntx + 1)); done
+  log "$n lbc $addr <- $2 LBC in $ntx txs"
   addr=$(deposit_addr "$n" 0);   log "$n btc $addr <- $3 BTC: $("$BTCCTL/alpha" sendtoaddress "$addr" "$3")"
   addr=$(deposit_addr "$n" 42);  log "$n dcr $addr <- $4 DCR: $("$DCRCTL/alpha" sendtoaddress "$addr" "$4")"
 }
@@ -228,8 +232,9 @@ setup_wallets a; setup_wallets b
 # The background miner confirms the funding and keeps the SPV wallets' filters coming.
 start_miner
 log "background miner: 1 dcr + 1 btc + 1 lbc block every ~3s"
-fund_spv a 40 1 60; fund_spv b 8 2 30
-wait_funded a 39 0 59; wait_funded b 7 1 29
+# Realistic balances (2026-11-02): 1-5 M LBC (varied), ~200 DCR, ~0.355 BTC.
+fund_spv a 1000000 0.355 200; fund_spv b 2500000 0.355 200
+wait_funded a 999000 0 199; wait_funded b 2499000 0 199
 subscribe_all a; subscribe_all b
 : > "$RUN/events.txt"
 

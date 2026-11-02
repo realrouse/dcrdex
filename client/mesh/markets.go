@@ -14,13 +14,17 @@ type MarketDefaults struct {
 
 // DefaultMarkets are the markets a mesh client subscribes to on connect.
 var DefaultMarkets = []MarketDefaults{
-	{Name: "dcr_btc", LotSize: 1e8, TestRate: 1_000_000},
-	{Name: "lbc_btc", LotSize: 1e8, TestRate: 10_000},
-	{Name: "lbc_dcr", LotSize: 1e8, TestRate: 1_000_000},
-	// USDC on Polygon (6 decimals): 20 USDC per DCR; LBC-USDC lot 5,000 LBC at
-	// 0.01 USDC per LBC (PLAN.md lot sizes).
-	{Name: "dcr_usdc.polygon", LotSize: 1e8, TestRate: 20_000_000},
-	{Name: "lbc_usdc.polygon", LotSize: 5_000e8, TestRate: 10_000},
+	// Lot sizes per PLAN.md release-1 decisions (LBC-BTC 100,000 LBC,
+	// LBC-DCR 1,000 LBC, LBC-USDC 5,000 LBC). Test rates are real-world
+	// prices of 2026-11-02 (CoinGecko: DCR $12.95, BTC $76,883,
+	// LBC $0.000504, USDC $0.9995). LBC-BTC is below the rate resolution
+	// (1 sat per LBC = $0.00077); 1 is the smallest representable rate.
+	{Name: "dcr_btc", LotSize: 1e8, TestRate: 16_844},
+	{Name: "lbc_btc", LotSize: 100_000e8, TestRate: 1},
+	{Name: "lbc_dcr", LotSize: 1_000e8, TestRate: 3_894},
+	// USDC on Polygon has 6 decimals: rate = USDC atoms per base coin.
+	{Name: "dcr_usdc.polygon", LotSize: 1e8, TestRate: 12_956_000},
+	{Name: "lbc_usdc.polygon", LotSize: 5_000e8, TestRate: 504},
 }
 
 // MarketDefault returns the defaults for a market, if it has any.

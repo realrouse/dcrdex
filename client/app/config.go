@@ -114,6 +114,9 @@ type CoreConfig struct {
 	Mesh          bool   `long:"mesh" description:"Enable Tatanka Mesh for peer-to-peer trading. This is experimental and not recommended for production use."`
 	MeshName      string `long:"meshname" description:"Display name shown to other Tatanka Mesh peers (max 32 bytes). Default: a random name such as calm-otter-4821, kept in the data dir (never the computer or user name)."`
 	MeshPort      int    `long:"meshport" description:"TCP port the Tatanka Mesh client listens on (all interfaces). Default 7565. Use different ports to run several mesh-enabled bisonw on one computer."`
+	MeshRelease   string `long:"meshrelease" description:"Signed bisonary release file. Enables epoch mode: matches only from validator-finalized epochs (simnet only). A file that fails signature verification keeps the mesh off."`
+	MeshValidator bool   `long:"meshvalidator" description:"Run as a validator node (propose and sign epochs) if this node's mesh peer ID is listed in the release."`
+	MeshNTP       string `long:"meshntp" description:"Optional SNTP server host:port for the epoch clock check (default: compare against validator stamps)."`
 	MeshBootstrap string `long:"meshbootstrap" description:"Comma-separated Tatanka Mesh node multiaddrs to connect to, each ending in /p2p/<peer ID> (simnet only). Overrides TATANKA_SIMNET_ADDR."`
 
 	MaxActiveMatches int `long:"max-active-matches" description:"Maximum number of active swap matches per DEX connection before deferring new orders. Default 48."`
@@ -234,6 +237,9 @@ func (cfg *Config) Core(log dex.Logger) *core.Config {
 		MeshName:           cfg.MeshName,
 		MeshBootstrap:      splitList(cfg.MeshBootstrap),
 		MeshPort:           cfg.MeshPort,
+		MeshRelease:        cfg.MeshRelease,
+		MeshValidator:      cfg.MeshValidator,
+		MeshNTP:            cfg.MeshNTP,
 		AppVersion:         Version,
 		MaxActiveMatches:   cfg.MaxActiveMatches,
 	}

@@ -93,6 +93,8 @@ type OrderBooks struct {
 	histReply map[Market]time.Time
 	// reach answers and sends mesh node reachability probes (reach.go).
 	reach *reach
+	// epochs is the epoch consensus engine (epoch.go); nil in legacy mode.
+	epochs *EpochEngine
 }
 
 // NewOrderBooks constructs an OrderBooks.
@@ -244,6 +246,11 @@ func (ob *OrderBooks) PostOrder(ctx context.Context, m Market, sell bool, qty, l
 	if err := ob.SubscribeMarket(ctx, m); err != nil {
 		return nil, err
 	}
+	if ob.epochs != nil {
+		if skew, _, ok := ob.epochs.ClockSkew(); !ok {
+			return nil, fmt.Errorf("clock is %d ms off the mesh (limit %d ms): fix the system clock before trading", skew, ob.epochs.p.MaxClockSkewMs)
+		}
+	}
 	now := ob.now()
 	ord := &MeshOrder{
 		Market:    m,
@@ -269,6 +276,11 @@ func (ob *OrderBooks) PostOrder(ctx context.Context, m Market, sell bool, qty, l
 	ob.own[ord.ID()] = &ownOrder{ord: ord, topic: topic, remaining: qty}
 	ob.mtx.Unlock()
 	ob.broadcast(ctx, topic, &bookMsg{Type: msgTypeOrder, Order: ord})
+	if ob.epochs != nil {
+		if err := ob.epochs.SubmitOrder(ctx, ord); err != nil {
+			ob.log.Errorf("Error submitting order %s to the epoch pool: %v", ord.ID(), err)
+		}
+	}
 	ob.emitOrder(EventOrder, ord, qty, true)
 	return ord, nil
 }
@@ -297,6 +309,9 @@ func (ob *OrderBooks) CancelOrder(ctx context.Context, id OrderID) error {
 		return err
 	}
 	ob.broadcast(ctx, oo.topic, &bookMsg{Type: msgTypeCancel, Cancel: c})
+	if ob.epochs != nil {
+		ob.epochs.SubmitCancel(ctx, c)
+	}
 	ob.emit(&Event{Kind: EventCancel, Market: marketName(oo.ord.Market), Peer: ob.self.String(), OrderID: id.String(), Own: true})
 	return nil
 }

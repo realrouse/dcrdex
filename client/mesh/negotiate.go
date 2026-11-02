@@ -148,6 +148,9 @@ func (ob *OrderBooks) Take(ctx context.Context, m Market, sell bool, qty, rate, 
 	if err := ob.SubscribeMarket(ctx, m); err != nil {
 		return nil, err
 	}
+	if ob.epochs != nil {
+		return ob.takeEpoch(ctx, m, sell, qty, rate, lotSize, standing, lifetime)
+	}
 	book, err := ob.Book(m)
 	if err != nil {
 		return nil, err
@@ -202,6 +205,14 @@ func (ob *OrderBooks) Take(ctx context.Context, m Market, sell bool, qty, rate, 
 // MatchBook results; it is exported for tests and the debug API, so it does
 // not check lot or rate compatibility itself (the maker does).
 func (ob *OrderBooks) Propose(ctx context.Context, bo *BookOrder, qty, rate uint64) (MatchID, chan struct{}, error) {
+	stamp := ob.now().UnixMilli()
+	nonce := binary.BigEndian.Uint64(encode.RandomBytes(8))
+	return ob.proposeWith(ctx, bo, qty, rate, stamp, nonce, nil)
+}
+
+// proposeWith sends a proposal with the given stamp and nonce. ref is the
+// finalized epoch record of the match (S2), nil for legacy proposals.
+func (ob *OrderBooks) proposeWith(ctx context.Context, bo *BookOrder, qty, rate uint64, stamp int64, nonce uint64, ref *EpochRef) (MatchID, chan struct{}, error) {
 	if bo.Owner == ob.self.String() {
 		return MatchID{}, nil, errors.New("can't match own order")
 	}
@@ -213,8 +224,6 @@ func (ob *OrderBooks) Propose(ctx context.Context, bo *BookOrder, qty, rate uint
 	if err != nil {
 		return MatchID{}, nil, fmt.Errorf("bad maker encryption key: %w", err)
 	}
-	stamp := ob.now().UnixMilli()
-	nonce := binary.BigEndian.Uint64(encode.RandomBytes(8))
 	policy := ob.LockPolicy(bo.Market)
 	if err := policy.Validate(); err != nil {
 		return MatchID{}, nil, fmt.Errorf("lock policy for market %d-%d: %w", bo.Market.Base, bo.Market.Quote, err)
@@ -231,6 +240,7 @@ func (ob *OrderBooks) Propose(ctx context.Context, bo *BookOrder, qty, rate uint
 		Nonce:          nonce,
 		MakerLockTime:  mlt,
 		TakerLockTime:  tlt,
+		Epoch:          ref,
 	}
 	match := Match{
 		ID: p.MatchID, Market: bo.Market, MakerOrderID: p.MakerOrderID, Maker: bo.Owner, Taker: p.Taker,
@@ -242,6 +252,10 @@ func (ob *OrderBooks) Propose(ctx context.Context, bo *BookOrder, qty, rate uint
 	st := &matchState{side: sideTaker, status: MatchProposed, match: match, prop: p, peer: makerID,
 		peerEnc: makerEnc, lotSize: bo.LotSize, updated: stamp, done: make(chan struct{})}
 	ob.mtx.Lock()
+	if _, dup := ob.matches[p.MatchID]; dup {
+		ob.mtx.Unlock()
+		return p.MatchID, nil, errors.New("match already proposed")
+	}
 	ob.matches[p.MatchID] = st
 	ob.mtx.Unlock()
 	ob.log.Infof("Proposing match %s: %d @ %d against order %s of %s", p.MatchID, qty, rate, bo.ID(), bo.Owner)
@@ -378,6 +392,10 @@ func (ob *OrderBooks) handlePropose(ctx context.Context, from peer.ID, p *MatchP
 		}
 		makerAddr = ob.receiveAddr(receives)
 	}
+	if ob.epochs != nil && p.Epoch != nil && oo0 != nil && !dup {
+		// S2: the referenced record may reach us a moment after the taker.
+		ob.epochs.AwaitRecord(ctx, p.Epoch.Epoch, 4*time.Second)
+	}
 
 	ob.mtx.Lock()
 	if st, found := ob.matches[p.MatchID]; found {
@@ -404,7 +422,15 @@ func (ob *OrderBooks) handlePropose(ctx context.Context, from peer.ID, p *MatchP
 		st.match.Market, st.match.MakerSell, st.lotSize = oo.ord.Market, oo.ord.Sell, oo.ord.LotSize
 	}
 	ob.matches[p.MatchID] = st
-	if reason := ob.checkProposal(p, oo); reason != "" {
+	reason := ob.checkProposal(p, oo)
+	if reason == "" && ob.epochs != nil {
+		// S2: in epoch mode only matches from finalized epochs are traded.
+		reason = ob.epochs.VerifyMatchProposal(p)
+		if reason != "" {
+			ob.log.Warnf("Rejecting proposal %s from %s: %s", p.MatchID, from, reason)
+		}
+	}
+	if reason != "" {
 		ob.setStatus(st, MatchRejected, reason)
 		ob.mtx.Unlock()
 		ob.sendInbox(ctx, from, takerEnc, msgMatchReject, &MatchReject{MatchID: p.MatchID, Reason: reason})
@@ -581,6 +607,12 @@ func (ob *OrderBooks) TakeOrder(ctx context.Context, m Market, id OrderID, qty u
 	}
 	if ok, reason := OrderIsMatchable(qty, bo, &ob.cfg.Fees); !ok {
 		return MatchID{}, fmt.Errorf("order not matchable: %s", reason)
+	}
+	if ob.epochs != nil {
+		// Epoch mode: post a crossing order; the match (and its ID) comes
+		// from the epoch it finalizes in.
+		_, err := ob.PostOrder(ctx, m, !bo.Sell, qty, bo.LotSize, bo.Rate, ob.epochTakeLifetime())
+		return MatchID{}, err
 	}
 	mid, _, err := ob.Propose(ctx, bo, qty, bo.Rate)
 	return mid, err

@@ -36,6 +36,11 @@ import (
 //	GET  /mesh/policy?market=dcr_btc  -> {"makerLockSec":...,"takerLockSec":...}
 //	POST /mesh/presence/fakeproto {"proto":9,"minProto":9}  (announce fake versions; 0,0 restores)
 //	GET  /mesh/peers                  -> {"peers":[...]}
+//	GET  /mesh/epochs/status          -> epoch engine status (S1)
+//	GET  /mesh/epochs/records?from=N&limit=M -> finalized records (summaries; full=1 for proposals)
+//	GET  /mesh/epochs/order?id=<order id> -> {"status":"pool|resting|done|unknown"}
+//	POST /mesh/epochs/omit {"owner":"<peer id>"}  (adversary proposer: leave out owner's orders; "" clears)
+//	POST /mesh/epochs/forge {"market":"dcr_btc","orderID":"...","qty":1}  (adversary: forged single-signer match)
 type DebugServer struct {
 	ob     *OrderBooks
 	peerID func() string
@@ -333,6 +338,7 @@ func (s *DebugServer) Handler(ctx context.Context) http.Handler {
 	mux.HandleFunc("GET /mesh/peers", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]any{"peers": s.ob.Peers()})
 	})
+	s.epochHandlers(ctx, mux)
 	mux.HandleFunc("GET /mesh/matches", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]any{"matches": s.ob.Matches()})
 	})

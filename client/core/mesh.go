@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"time"
 
 	meshpkg "decred.org/dcrdex/client/mesh"
@@ -74,6 +75,11 @@ func (c *Core) connectMesh(ctx context.Context, crypter encrypt.Crypter) {
 	c.meshMtx.RLock()
 	mesh, meshCM := c.mesh, c.meshCM
 	c.meshMtx.RUnlock()
+	if mesh == nil || meshCM == nil {
+		// Mesh disabled at login (e.g. a release file that failed S0
+		// verification). Nothing to connect.
+		return
+	}
 	var err error
 	if err = meshCM.ConnectOnce(c.ctx); err != nil {
 		c.log.Errorf("error connecting mesh: %v", err)
@@ -87,6 +93,24 @@ func (c *Core) connectMesh(ctx context.Context, crypter encrypt.Crypter) {
 	}()
 
 	c.log.Infof("Connected to Mesh")
+
+	// S0-S2 epoch mode with a verified release.
+	if rel := c.meshRelease; rel != nil {
+		if v := os.Getenv("TATANKA_CLOCK_OFFSET_MS"); v != "" {
+			if ms, perr := strconv.ParseInt(v, 10, 64); perr == nil {
+				c.log.Warnf("SIMNET: mesh clock offset %d ms (TATANKA_CLOCK_OFFSET_MS)", ms)
+				mesh.OrderBooks.SetNowOffset(time.Duration(ms) * time.Millisecond)
+			}
+		}
+		rh := rel.Hash()
+		store := filepath.Join(filepath.Dir(c.cfg.DBPath), "mesh", fmt.Sprintf("epochs-%x.jsonl", rh[:4]))
+		_ = os.MkdirAll(filepath.Dir(store), 0o700)
+		if _, err = mesh.OrderBooks.EnableEpochs(ctx, rel, meshpkg.EpochConfig{
+			Validator: c.cfg.MeshValidator, StorePath: store, NTPServer: c.cfg.MeshNTP,
+		}); err != nil {
+			return
+		}
+	}
 
 	// Mesh activity goes to the UI as data notifications. The sink must not
 	// block; notify never does.

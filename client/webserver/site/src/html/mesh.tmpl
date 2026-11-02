@@ -24,6 +24,22 @@
     address (<span class="mono">--meshbootstrap</span> or <span class="mono">TATANKA_SIMNET_ADDR</span>) to trade peer to peer.
   </div>
 
+  <section id="epochCard" class="mesh-card p-3 mb-3 d-hide">
+    <div class="d-flex align-items-center mb-1">
+      <span class="demi me-2">Validator epochs</span>
+      <span id="epochPill" class="mesh-pill offline"></span>
+      <span id="epochRole" class="mesh-badge ms-2"></span>
+      <span id="epochRelease" class="fs12 grey ms-2"></span>
+    </div>
+    <div id="epochSummary" class="fs14 mb-1"></div>
+    <div id="epochClock" class="fs13 mb-1"></div>
+    <table class="mesh-peers fs13">
+      <thead><tr><th>Validator</th><th>Peer ID</th><th>Bond</th><th>State</th><th>Omissions</th></tr></thead>
+      <tbody id="epochVals"></tbody>
+    </table>
+    <div id="epochFlags" class="fs12 mt-1"></div>
+  </section>
+
   <section id="meshNodeCard" class="mesh-card p-3 mb-3 d-hide">
     <div class="demi mb-1">Your mesh node</div>
     <div id="meshNodePanel"></div>

@@ -220,6 +220,8 @@ type MatchProposal struct {
 	TakerAddr      string  `json:"takerAddr"`
 	MakerLockTime  int64   `json:"makerLockTime"`
 	TakerLockTime  int64   `json:"takerLockTime"`
+	// Epoch proves the match came from a finalized epoch (S2, epoch mode).
+	Epoch *EpochRef `json:"epoch,omitempty"`
 }
 
 // MatchAccept is sent maker -> taker. Qty may be lower than proposed (partial
