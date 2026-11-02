@@ -37,10 +37,31 @@ NODE_PATH = "/workspace/tatanka-dev/scratch/uicheck/node_modules"
 MARKETS = ["dcr_btc", "lbc_btc", "lbc_dcr", "dcr_usdc.polygon", "lbc_usdc.polygon"]
 SWAP_MARKETS = ["dcr_btc", "lbc_btc", "lbc_dcr", "dcr_usdc.polygon"]
 RESULTS = {}
+RUN_STAMP = time.strftime("%Y%m%d-%H%M%S")
+
+def save_results():
+    """results-<stamp>.json for this run; results.json keeps the latest
+    result and pass/fail of every phase across runs."""
+    json.dump(RESULTS, open(os.path.join(EVID, "results-%s.json" % RUN_STAMP), "w"), indent=2)
+    path = os.path.join(EVID, "results.json")
+    try:
+        allr = json.load(open(path))
+    except Exception:
+        allr = {}
+    status = allr.setdefault("status", {})
+    for name in RESULTS.get("pass", []):
+        status[name] = {"ok": True, "run": RUN_STAMP}
+    for f in RESULTS.get("fail", []):
+        for name, why in f.items():
+            status[name] = {"ok": False, "run": RUN_STAMP, "error": why}
+    for k, v in RESULTS.items():
+        if k not in ("pass", "fail"):
+            allr[k] = v
+    json.dump(allr, open(path, "w"), indent=2)
 
 def result(k, v):
     RESULTS[k] = v
-    json.dump(RESULTS, open(os.path.join(EVID, "results.json"), "w"), indent=2)
+    save_results()
     log("RESULT %s: %s" % (k, json.dumps(v)[:600]))
 
 def mesh_addr(n):
@@ -515,6 +536,8 @@ PHASES = [("s0", phase_s0), ("final", phase_final), ("book", phase_book), ("swap
 def main():
     signal.signal(signal.SIGTERM, lambda *a: sys.exit(143))  # still clean up
     want = sys.argv[1:] or [p for p, _ in PHASES]
+    if set(want) & {"swaps", "refund", "kill", "omit", "forge"} and "book" not in want:
+        want.append("book")  # these phases trade against the realistic books
     os.makedirs(EVID, exist_ok=True)
     net = Net()
     ok = True
@@ -534,7 +557,7 @@ def main():
                 ok = False
                 RESULTS.setdefault("fail", []).append({name: str(e)})
                 log("FAIL %s: %s" % (name, e))
-            json.dump(RESULTS, open(os.path.join(EVID, "results.json"), "w"), indent=2)
+            save_results()
     finally:
         for m in net.mms:
             json.dump(m.log, open(os.path.join(EVID, "mm-%s.log.json" % m.mkt), "w"), indent=1)
