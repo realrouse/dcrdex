@@ -112,7 +112,7 @@ type CoreConfig struct {
 	ExtensionModeFile string `long:"extension-mode-file" description:"path to a file that specifies options for running core as an extension."`
 
 	Mesh          bool   `long:"mesh" description:"Enable Tatanka Mesh for peer-to-peer trading. This is experimental and not recommended for production use."`
-	MeshName      string `long:"meshname" description:"Display name shown to other Tatanka Mesh peers (max 32 bytes). Default: a short peer ID."`
+	MeshName      string `long:"meshname" description:"Display name shown to other Tatanka Mesh peers (max 32 bytes). Default: a random name such as calm-otter-4821, kept in the data dir (never the computer or user name)."`
 	MeshPort      int    `long:"meshport" description:"TCP port the Tatanka Mesh client listens on (all interfaces). Default 7565. Use different ports to run several mesh-enabled bisonw on one computer."`
 	MeshBootstrap string `long:"meshbootstrap" description:"Comma-separated Tatanka Mesh node multiaddrs to connect to, each ending in /p2p/<peer ID> (simnet only). Overrides TATANKA_SIMNET_ADDR."`
 

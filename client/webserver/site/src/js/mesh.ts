@@ -4,6 +4,7 @@ import { getJSON } from './http'
 import { app, PageElement, CoreNote, UnitInfo } from './registry'
 import MeshViz, { VizPeer, Health } from './meshviz'
 import MeshNodePanel from './meshnode'
+import { showNetDetails, setShowNetDetails, netText } from './netdetails'
 
 export interface MeshMarketInfo {
   name: string
@@ -203,6 +204,15 @@ export default class MeshPage extends BasePage {
     this.nodePanel = new MeshNodePanel(page.meshNodePanel)
     this.nodePanel.onChange = info => Doc.setVis(info.available, page.meshNodeCard)
     this.nodePanel.start()
+    const tog = page.netDetailsToggle as HTMLInputElement
+    tog.checked = showNetDetails()
+    Doc.bind(tog, 'change', () => {
+      setShowNetDetails(tog.checked)
+      this.renderStatus()
+      this.updateViz()
+      this.renderActivity()
+      this.nodePanel.render()
+    })
 
     app().registerNoteFeeder({
       mesh: (n: CoreNote) => { this.handleMeshNote(n as MeshNote) }
@@ -321,7 +331,7 @@ export default class MeshPage extends BasePage {
       const badge = document.createElement('span')
       badge.className = `mesh-badge ${verCls}`
       badge.textContent = ver
-      badge.title = p.reason || (p.app ? `app ${p.app}` : '')
+      badge.title = netText(p.reason || (p.app ? `app ${p.app}` : ''))
       vtd.appendChild(badge)
       tr.appendChild(vtd)
       tr.appendChild(this.td(p.node ? shortID(p.node) : '—', 'mono'))
@@ -329,7 +339,8 @@ export default class MeshPage extends BasePage {
       page.peerRows.appendChild(tr)
     }
     Doc.setVis(peers.length === 0, page.noPeers)
-    page.nodeList.textContent = 'Mesh nodes: ' + ((st.nodes || []).map(n => `${shortID(n.id)}${n.connected ? ' (connected)' : ''}`).join(', ') || 'none')
+    const net = showNetDetails()
+    page.nodeList.textContent = 'Mesh nodes: ' + ((st.nodes || []).map(n => `${shortID(n.id)}${net && n.addr ? ' ' + n.addr : ''}${n.connected ? ' (connected)' : ''}`).join(', ') || 'none')
   }
 
   td (text: string, cls?: string): HTMLElement {
@@ -352,7 +363,7 @@ export default class MeshPage extends BasePage {
       keep.add(n.id)
       viz.upsert({
         id: n.id, kind: 'node', label: 'node ' + shortID(n.id), sub: n.connected ? 'connected' : n.source,
-        online: true, connected: n.connected, title: n.addr || n.id
+        online: true, connected: n.connected, title: showNetDetails() && n.addr ? n.addr : n.id
       })
     }
     for (const p of st.peers || []) {
@@ -362,7 +373,7 @@ export default class MeshPage extends BasePage {
         id: p.id, kind: 'peer', label: p.name || shortID(p.id),
         sub: p.proto === 0 ? 'no presence' : incompatible ? `v${p.proto} incompatible` : `v${p.proto}`,
         online: p.online, incompatible, unknownVersion: p.proto === 0, node: p.node,
-        title: `${p.id}${p.app ? ' · app ' + p.app : ''}${p.reason ? ' · ' + p.reason : ''}`
+        title: netText(`${p.id}${p.app ? ' · app ' + p.app : ''}${p.reason ? ' · ' + p.reason : ''}`)
       })
     }
     for (const id of Array.from(viz.nodes.keys())) if (!keep.has(id)) viz.remove(id)
@@ -371,7 +382,7 @@ export default class MeshPage extends BasePage {
   showTip (p: VizPeer | null, x: number, y: number) {
     const tip = this.page.vizTip
     if (!p) { Doc.hide(tip); return }
-    tip.textContent = `${p.label}${p.sub ? ' (' + p.sub + ')' : ''}: ${p.title || p.id}`
+    tip.textContent = netText(`${p.label}${p.sub ? ' (' + p.sub + ')' : ''}: ${p.title || p.id}`)
     tip.style.left = `${Math.min(x + 12, 300)}px`
     tip.style.top = `${y + 12}px`
     Doc.show(tip)
@@ -448,10 +459,10 @@ export default class MeshPage extends BasePage {
       const last = (swap.events || [])[(swap.events || []).length - 1]
       if (swap.reason) info += ` ${swap.reason}`
       else if (last && !finalSwap.includes(status)) info += ` Last: ${last.msg}`
-      tmpl.info.textContent = info
+      tmpl.info.textContent = netText(info)
     } else {
       Doc.hide(tmpl.steps)
-      tmpl.info.textContent = rec && rec.reason ? rec.reason : 'Negotiating the match over the encrypted inbox…'
+      tmpl.info.textContent = rec && rec.reason ? netText(rec.reason) : 'Negotiating the match over the encrypted inbox…'
     }
     return div
   }

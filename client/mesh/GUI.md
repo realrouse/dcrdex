@@ -121,3 +121,11 @@ default; simnet with `--mesh` only for now. The setting is kept in
   `POST /api/quickswap/start {from, to, amount, driftPct, minOut}` (refuses if
   the books no longer give `minOut`), `POST /api/quickswap/status {id}` (no id:
   all runs), `POST /api/quickswap/stop {id}`.
+
+## Privacy (screenshot-safe Mesh page)
+- Display names: `--meshname` if given, else a random `adjective-animal-NNNN` name created once and kept in
+  `<data dir>/mesh/name`. bisonw never announces the host or user name.
+- The Mesh page shows no IP addresses or ports by default: mesh node tooltips show the node ID, the node
+  list shows IDs only, and the "Your mesh node" card hides the port, public address and LAN addresses.
+  Error texts and peer answers are filtered (`netdetails.ts` `redactNet`). The "Show network details"
+  switch at the top (off by default, kept in the browser's localStorage) shows them.

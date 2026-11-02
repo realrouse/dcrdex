@@ -4936,7 +4936,7 @@ func (c *Core) Login(pw []byte) error {
 				mesh, err := mesh.NewClient(&mesh.ClientConfig{
 					Seed:           seed,
 					BootstrapPeers: bootstrap,
-					Name:           c.cfg.MeshName,
+					Name:           c.meshDisplayName(),
 					AppVersion:     c.cfg.AppVersion,
 					ListenPort:     c.cfg.MeshPort,
 					Bonds:          todoBonds,

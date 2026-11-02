@@ -1,5 +1,6 @@
 import Doc from './doc'
 import { getJSON, postJSON } from './http'
+import { showNetDetails, netText } from './netdetails'
 
 /* The optional embedded mesh node ("Help the network: run a mesh node"). */
 
@@ -195,7 +196,7 @@ export default class MeshNodePanel {
       return
     }
     if (st.error) {
-      body.appendChild(el('div', 'text-danger fs14', `The node is not running: ${st.error}`))
+      body.appendChild(el('div', 'text-danger fs14', netText(`The node is not running: ${st.error}`)))
       return
     }
     if (st.starting && !st.running) {
@@ -222,7 +223,7 @@ export default class MeshNodePanel {
       case 'checking': summary = 'Asking other bisonw peers to connect to your node…'; break
       default: summary = st.reachNote || 'Not checked yet.'
     }
-    verdict.appendChild(el('span', 'fs14 ms-2', summary))
+    verdict.appendChild(el('span', 'fs14 ms-2', netText(summary)))
     body.appendChild(verdict)
 
     const peers = el('span', 'mnp-value')
@@ -230,14 +231,16 @@ export default class MeshNodePanel {
     peers.textContent = `${st.meshPeers} of ${st.meshNodes} mesh nodes, ${st.clients} other connection${st.clients === 1 ? '' : 's'}`
     body.appendChild(this.row('Peers', peers))
     body.appendChild(this.row('Node ID', el('span', 'mnp-value mono user-select-all text-break', st.peerID || '')))
-    body.appendChild(this.row('Port', `TCP ${st.port}`))
+    const net = showNetDetails()
+    const hiddenNote = 'hidden (turn on Show network details)'
+    body.appendChild(this.row('Port', net ? `TCP ${st.port}` : hiddenNote))
     let mapping = 'not opened'
     if (st.portMapErr) mapping = /no UPnP router found/.test(st.portMapErr) && /NAT-PMP/.test(st.portMapErr) ? 'not opened: no UPnP or NAT-PMP router answered' : 'not opened: ' + st.portMapErr
     if (st.portMap) mapping = `opened with ${methodName[st.portMap] || st.portMap}`
     else if (st.ipSource === 'manual') mapping = 'not used (manual public IP)'
-    body.appendChild(this.row('Router', mapping, st.portMapErr || ''))
+    body.appendChild(this.row('Router', netText(mapping), netText(st.portMapErr || '')))
     body.appendChild(this.row('Public address', st.publicAddr
-      ? `${st.publicAddr} (${methodName[st.ipSource || ''] || st.ipSource || '?'})`
+      ? (net ? st.publicAddr : hiddenNote) + ` (${methodName[st.ipSource || ''] || st.ipSource || '?'})`
       : 'unknown'))
 
     // The permissioned mesh.
@@ -273,17 +276,20 @@ export default class MeshNodePanel {
     d.appendChild(el('summary', 'demi pointer', 'How to make your node reachable'))
     const lan = (st.listen || []).map(a => a.split('/')[2]).filter(ip => ip && ip !== '0.0.0.0' && ip !== '127.0.0.1')
     const ol = el('ol', 'mb-1')
-    const li1 = el('li', '', `Port forward: open your router's admin page and forward TCP port ${st.port} to this computer` +
-      (lan.length ? ` (${lan.join(', ')})` : '') + '. Or switch on UPnP / NAT-PMP there and turn the node off and on again.')
-    const li2 = el('li', '', `Firewall: allow incoming TCP ${st.port} to bisonw.`)
-    const li3 = el('li', '', 'No access to the router, or your provider uses carrier-grade NAT? Run the node on a VPS with a public IP instead, ' +
-      `open TCP ${st.port} there, and set TATANKA_MESH_NODE_IP to the VPS IP (simnet test setting).`)
+    const li1 = el('li', '', netText(`Port forward: open your router's admin page and forward TCP port ${st.port} to this computer` +
+      (lan.length ? ` (${lan.join(', ')})` : '') + '. Or switch on UPnP / NAT-PMP there and turn the node off and on again.'))
+    const li2 = el('li', '', netText(`Firewall: allow incoming TCP ${st.port} to bisonw.`))
+    const li3 = el('li', '', netText('No access to the router, or your provider uses carrier-grade NAT? Run the node on a VPS with a public IP instead, ' +
+      `open TCP ${st.port} there, and set TATANKA_MESH_NODE_IP to the VPS IP (simnet test setting).`))
     const li4 = el('li', '', 'Then press "Check again".')
     ol.appendChild(li1); ol.appendChild(li2); ol.appendChild(li3); ol.appendChild(li4)
     d.appendChild(ol)
     const fails = (st.reachResults || []).filter(r => !r.ok)
     if (fails.length) {
-      d.appendChild(el('div', 'grey', 'Peer answers: ' + fails.map(r => `${r.name || r.peer.slice(-6)}: ${r.err || 'failed'}`).join('; ')))
+      d.appendChild(el('div', 'grey', netText('Peer answers: ' + fails.map(r => `${r.name || r.peer.slice(-6)}: ${r.err || 'failed'}`).join('; '))))
+    }
+    if (!showNetDetails()) {
+      d.appendChild(el('div', 'grey fs12 mt-1', 'Addresses and port numbers are hidden. Turn on "Show network details" at the top of the Mesh page to see them.'))
     }
     return d
   }

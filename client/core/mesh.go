@@ -220,3 +220,17 @@ func (c *Core) unlockMeshWallets(crypter encrypt.Crypter) {
 		}
 	}
 }
+
+// meshDisplayName is the name announced to mesh peers: --meshname if set,
+// else a random adjective-animal-NNNN name kept in <data dir>/mesh/name.
+// Never the host or user name.
+func (c *Core) meshDisplayName() string {
+	if n := meshpkg.SanitizeName(c.cfg.MeshName); n != "" {
+		return n
+	}
+	name, err := meshpkg.LoadOrCreateName(filepath.Join(filepath.Dir(c.cfg.DBPath), "mesh", "name"))
+	if err != nil {
+		c.log.Errorf("Error saving the random mesh name: %v", err)
+	}
+	return name
+}
