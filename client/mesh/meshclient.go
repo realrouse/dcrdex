@@ -243,9 +243,13 @@ func (c *Client) Connect(ctx context.Context) (*sync.WaitGroup, error) {
 			_ = c.OrderBooks.SubscribeMarket(ctx, m)
 		}
 	}
-	wg.Add(4)
+	wg.Add(5)
 	go func() {
 		c.monitorConnection(ctx)
+		wg.Done()
+	}()
+	go func() {
+		runBondRefresh(ctx, c.Client, func() bool { return c.ConnectedNode() != "" }, DefaultBondRefreshInterval, c.log)
 		wg.Done()
 	}()
 	go func() {
@@ -263,6 +267,56 @@ func (c *Client) Connect(ctx context.Context) (*sync.WaitGroup, error) {
 		wg.Done()
 	}()
 	return &wg, nil
+}
+
+// DefaultBondRefreshInterval is how often the client re-posts its bond to the
+// connected mesh node. See runBondRefresh.
+var DefaultBondRefreshInterval = time.Minute
+
+type bondPoster interface {
+	PostBond(ctx context.Context) error
+}
+
+// runBondRefresh re-posts the client's bond to the connected node every
+// interval. The mesh library posts the bond only when a connection is set up,
+// and a node keeps a bond until the expiry it set when the bond ID was first
+// posted (12 h for today's placeholder bond), even across reconnects. A
+// client that stays connected that long silently loses the right to publish
+// and subscribe: the node rejects those streams, the library does not read
+// the rejection, and the still-open push stream keeps delivering, so the
+// client sees the mesh but nobody hears it (match proposals time out with "no
+// answer from maker"). Re-posting is a no-op while the bond is still stored
+// and stores it again with a fresh expiry once the node dropped it.
+func runBondRefresh(ctx context.Context, p bondPoster, connected func() bool, interval time.Duration, log dex.Logger) {
+	if interval <= 0 {
+		return
+	}
+	tick := time.NewTicker(interval)
+	defer tick.Stop()
+	var failing bool
+	for {
+		select {
+		case <-tick.C:
+		case <-ctx.Done():
+			return
+		}
+		if !connected() {
+			continue
+		}
+		pctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+		err := p.PostBond(pctx)
+		cancel()
+		switch {
+		case err != nil && !failing:
+			log.Warnf("Error refreshing mesh bond (will retry): %v", err)
+			failing = true
+		case err != nil:
+			log.Debugf("Error refreshing mesh bond: %v", err)
+		case failing:
+			log.Infof("Mesh bond refreshed")
+			failing = false
+		}
+	}
 }
 
 type TickerPriceUpdate struct {
