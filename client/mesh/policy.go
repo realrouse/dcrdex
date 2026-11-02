@@ -57,6 +57,9 @@ var DefaultLockPolicies = map[string]LockPolicy{
 	"lbc_dcr": {Maker: 3 * time.Hour, Taker: 90 * time.Minute},
 	"dcr_lbc": {Maker: 3 * time.Hour, Taker: 90 * time.Minute},
 	"btc_lbc": {Maker: 3 * time.Hour, Taker: 90 * time.Minute},
+	// EVM chains are fast; the lock is set by the UTXO side.
+	"dcr_usdc.polygon": {Maker: 2 * time.Hour, Taker: time.Hour},
+	"lbc_usdc.polygon": {Maker: 3 * time.Hour, Taker: 90 * time.Minute},
 }
 
 // policyLocked returns the lock policy for a market. ob.mtx must be held.

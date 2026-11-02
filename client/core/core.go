@@ -5835,17 +5835,24 @@ func (c *Core) ApproveToken(appPW []byte, assetID uint32, dexAddr string, onConf
 		return "", err
 	}
 
-	dex, connected, err := c.dex(dexAddr)
-	if err != nil {
-		return "", err
-	}
-	if !connected {
-		return "", fmt.Errorf("not connected to %s", dexAddr)
-	}
-
-	asset, found := dex.assets[assetID]
-	if !found {
-		return "", fmt.Errorf("asset %d not found for %s", assetID, dexAddr)
+	// The Tatanka mesh markets (Trade page host MeshHost) swap with the
+	// mesh's contract version instead of a server's.
+	var assetVer uint32
+	if dexAddr == MeshHost {
+		assetVer = meshSwapAssetVersion
+	} else {
+		dex, connected, err := c.dex(dexAddr)
+		if err != nil {
+			return "", err
+		}
+		if !connected {
+			return "", fmt.Errorf("not connected to %s", dexAddr)
+		}
+		asset, found := dex.assets[assetID]
+		if !found {
+			return "", fmt.Errorf("asset %d not found for %s", assetID, dexAddr)
+		}
+		assetVer = asset.Version
 	}
 
 	walletOnConfirm := func() {
@@ -5853,7 +5860,7 @@ func (c *Core) ApproveToken(appPW []byte, assetID uint32, dexAddr string, onConf
 		go c.notify(newTokenApprovalNote(wallet.state()))
 	}
 
-	txID, err := wallet.ApproveToken(asset.Version, walletOnConfirm)
+	txID, err := wallet.ApproveToken(assetVer, walletOnConfirm)
 	if err != nil {
 		return "", err
 	}

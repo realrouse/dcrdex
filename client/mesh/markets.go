@@ -17,6 +17,10 @@ var DefaultMarkets = []MarketDefaults{
 	{Name: "dcr_btc", LotSize: 1e8, TestRate: 1_000_000},
 	{Name: "lbc_btc", LotSize: 1e8, TestRate: 10_000},
 	{Name: "lbc_dcr", LotSize: 1e8, TestRate: 1_000_000},
+	// USDC on Polygon (6 decimals): 20 USDC per DCR; LBC-USDC lot 5,000 LBC at
+	// 0.01 USDC per LBC (PLAN.md lot sizes).
+	{Name: "dcr_usdc.polygon", LotSize: 1e8, TestRate: 20_000_000},
+	{Name: "lbc_usdc.polygon", LotSize: 5_000e8, TestRate: 10_000},
 }
 
 // MarketDefault returns the defaults for a market, if it has any.

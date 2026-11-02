@@ -2091,7 +2091,10 @@ export class TokenApprovalForm {
 
     Doc.empty(page.tokenSymbol)
     page.tokenSymbol.appendChild(Doc.symbolize(tokenAsset, true))
-    const protocolVersion = app().exchanges[host].assets[assetID].version
+    // Tatanka mesh markets (no DEX server, not in app().exchanges) swap with
+    // contract version 0.
+    const xc = app().exchanges[host]
+    const protocolVersion = xc ? xc.assets[assetID].version : 0
     const res = await postJSON('/api/approvetokenfee', {
       assetID: tokenAsset.id,
       version: protocolVersion,

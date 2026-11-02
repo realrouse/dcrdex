@@ -70,6 +70,9 @@ func (w *meshSwapWallet) Initiate(ctx context.Context, sc *meshpkg.SwapContract,
 			return nil, fmt.Errorf("%w: %v", meshpkg.ErrFundingSpent, err)
 		}
 	} else {
+		if err := w.ensureTokenApproved(xw); err != nil {
+			return nil, err
+		}
 		coins, _, _, err = xw.FundOrder(&asset.Order{
 			Value:         sc.Value,
 			MaxSwapCount:  1,
@@ -124,12 +127,55 @@ func (w *meshSwapWallet) Initiate(ctx context.Context, sc *meshpkg.SwapContract,
 	return sw, nil
 }
 
-func (w *meshSwapWallet) Audit(_ context.Context, coinID, contract []byte) (*meshpkg.SwapAudit, error) {
+// meshSwapAssetVersion is the asset (swap contract) version mesh swaps use.
+// For EVM tokens it selects the token's v0 swap contract.
+const meshSwapAssetVersion = 0
+
+// ensureTokenApproved makes sure an EVM token wallet may spend its tokens
+// through the swap contract. The first mesh swap sends the approval
+// transaction; until it confirms, funding fails with a retryable error so the
+// swap engine tries again (the counterparty's init timeout still applies).
+func (w *meshSwapWallet) ensureTokenApproved(xw *xcWallet) error {
+	approver, is := xw.Wallet.(asset.TokenApprover)
+	if !is {
+		return nil
+	}
+	switch approver.ApprovalStatus()[meshSwapAssetVersion] {
+	case asset.Approved:
+		return nil
+	case asset.Pending:
+		return fmt.Errorf("waiting for the %s token approval transaction to confirm", xw.Symbol)
+	}
+	txID, err := approver.ApproveToken(meshSwapAssetVersion, func() {
+		w.c.log.Infof("Mesh swap: %s token approval confirmed", xw.Symbol)
+	})
+	if err != nil {
+		return fmt.Errorf("error approving %s token for swaps: %w", xw.Symbol, err)
+	}
+	w.c.log.Infof("Mesh swap: sent %s token approval tx %s", xw.Symbol, txID)
+	return fmt.Errorf("sent %s token approval transaction %s, waiting for it to confirm", xw.Symbol, txID)
+}
+
+// onChainAuditor is implemented by account-based (EVM) wallets, whose
+// AuditContract parses the counterparty's tx bytes. Mesh swaps have no
+// server vouching for those bytes, so the contract is read from chain state.
+type onChainAuditor interface {
+	AuditContractOnChain(ctx context.Context, coinID, contract dex.Bytes) (*asset.AuditInfo, error)
+}
+
+func (w *meshSwapWallet) audit(ctx context.Context, xw *xcWallet, coinID, contract []byte) (*asset.AuditInfo, error) {
+	if a, is := xw.Wallet.(onChainAuditor); is {
+		return a.AuditContractOnChain(ctx, coinID, contract)
+	}
+	return xw.AuditContract(coinID, contract, nil, false)
+}
+
+func (w *meshSwapWallet) Audit(ctx context.Context, coinID, contract []byte) (*meshpkg.SwapAudit, error) {
 	xw, err := w.wallet()
 	if err != nil {
 		return nil, err
 	}
-	ai, err := xw.AuditContract(coinID, contract, nil, false)
+	ai, err := w.audit(ctx, xw, coinID, contract)
 	if err != nil {
 		return nil, err
 	}
@@ -149,7 +195,7 @@ func (w *meshSwapWallet) Redeem(ctx context.Context, coinID, contract, secret []
 	if err != nil {
 		return nil, err
 	}
-	ai, err := xw.AuditContract(coinID, contract, nil, false)
+	ai, err := w.audit(ctx, xw, coinID, contract)
 	if err != nil {
 		return nil, err
 	}

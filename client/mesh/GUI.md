@@ -156,3 +156,14 @@ While the node runs, the card shows its state with Run checks again, Change sett
 - Quick Swap shows "Waiting for X to lock their coins" with a countdown ring, and on abandonment logs
   the reason and takes the next best order within the drift tolerance.
 - Old makers (no `swap_abort`) are handled by the taker timeout alone.
+
+## USDC on Polygon (P18)
+- Mesh markets `dcr_usdc.polygon` (lot 1 DCR) and `lbc_usdc.polygon` (lot 5,000 LBC) appear on the
+  Trade page under tatanka-mesh like the other mesh markets.
+- EVM tokens swap with the token's v0 swap contract. The first trade needs the one-time token
+  approval: the Trade page's "Approve USDC.POLYGON" button works for mesh markets, and a mesh swap
+  that finds the token unapproved sends the approval itself and retries once it confirms.
+- Audits of EVM contracts read value, recipient, secret hash and lock time from the swap contract's
+  on-chain state (`AuditContractOnChain`); the counterparty's tx bytes are never trusted.
+- Gas: the native Polygon wallet (POL) pays for approval, swap, redeem and refund.
+- Simnet test: dex/testing/meshdex/p18-usdc-polygon.sh (needs the dcr and polygon harnesses).

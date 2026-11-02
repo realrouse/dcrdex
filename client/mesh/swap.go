@@ -32,6 +32,7 @@ import (
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
+	"decred.org/dcrdex/client/asset"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -261,12 +262,28 @@ func (c *SwapConfig) makerGiveUp() time.Duration {
 
 // expectedBlockTime is the mainnet block interval per asset (BIP IDs).
 var expectedBlockTime = map[uint32]time.Duration{
-	0:   10 * time.Minute,  // btc
-	42:  5 * time.Minute,   // dcr
-	140: 150 * time.Second, // lbc
-	2:   150 * time.Second, // ltc
-	3:   time.Minute,       // doge
-	145: 10 * time.Minute,  // bch
+	0:    10 * time.Minute,  // btc
+	42:   5 * time.Minute,   // dcr
+	140:  150 * time.Second, // lbc
+	2:    150 * time.Second, // ltc
+	3:    time.Minute,       // doge
+	145:  10 * time.Minute,  // bch
+	60:   12 * time.Second,  // eth
+	966:  2 * time.Second,   // polygon
+	8453: 2 * time.Second,   // base
+}
+
+// blockTime is the expected block interval of an asset, using the parent
+// chain for tokens (e.g. usdc.polygon -> polygon).
+func blockTime(assetID uint32) (time.Duration, bool) {
+	if bt, ok := expectedBlockTime[assetID]; ok {
+		return bt, true
+	}
+	if tkn := asset.TokenInfo(assetID); tkn != nil {
+		bt, ok := expectedBlockTime[tkn.ParentID]
+		return bt, ok
+	}
+	return 0, false
 }
 
 // MakerContractTimeout is how long a taker waits for a maker contract it
@@ -274,7 +291,7 @@ var expectedBlockTime = map[uint32]time.Duration{
 // intervals of the asset, at least 10 minutes. SPV wallets only see a
 // contract once it is mined.
 func MakerContractTimeout(assetID uint32) time.Duration {
-	bt, ok := expectedBlockTime[assetID]
+	bt, ok := blockTime(assetID)
 	if !ok {
 		bt = 10 * time.Minute
 	}
@@ -1109,6 +1126,15 @@ func (ob *OrderBooks) stepTaker(ctx context.Context, sw *swapper, s *swapState, 
 	}
 }
 
+// sameAddr compares swap addresses. EVM (0x) addresses are hex and their
+// letter case is only an EIP-55 checksum.
+func sameAddr(a, b string) bool {
+	if strings.HasPrefix(a, "0x") && strings.HasPrefix(b, "0x") {
+		return strings.EqualFold(a, b)
+	}
+	return a == b
+}
+
 func sha256Sum(b []byte) []byte {
 	h := sha256.Sum256(b)
 	return h[:]
@@ -1117,7 +1143,7 @@ func sha256Sum(b []byte) []byte {
 // checkAudit returns a rejection reason or "".
 func checkAudit(a *SwapAudit, recipient string, value uint64, secretHash []byte, lockTime int64) string {
 	switch {
-	case a.Recipient != recipient:
+	case !sameAddr(a.Recipient, recipient):
 		return fmt.Sprintf("recipient %s, want %s", a.Recipient, recipient)
 	case a.Value < value:
 		return fmt.Sprintf("value %d, want %d", a.Value, value)
