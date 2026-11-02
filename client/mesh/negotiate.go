@@ -307,7 +307,7 @@ func (ob *OrderBooks) handleInboxMsg(ctx context.Context, msg *inboxMsg) {
 			return
 		}
 		ob.handleReject(ctx, from, &r)
-	case swapMsgInit, swapMsgPart, swapMsgRedeem, swapMsgDone:
+	case swapMsgInit, swapMsgPart, swapMsgRedeem, swapMsgDone, swapMsgAbort:
 		ob.handleSwapMsg(from, msg.Type, msg.Payload)
 	default:
 		ob.log.Debugf("Unknown inbox message type %q from %s", msg.Type, from)

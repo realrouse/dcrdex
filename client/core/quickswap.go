@@ -99,6 +99,7 @@ type QuickSwapTake struct {
 // countdown (0: none).
 type QuickSwapWait struct {
 	Until int64  `json:"until"`
+	From  int64  `json:"from,omitempty"` // countdown start (unix ms)
 	Msg   string `json:"msg"`
 }
 
@@ -172,8 +173,9 @@ type qsBackend interface {
 	meshTake(market, orderID string, lots uint64) (string, error)
 	// meshMatch is a match's negotiation status.
 	meshMatch(matchID string) (status, reason string, qty, quoteQty uint64, ok bool)
-	// meshSwap is a swap's status, and whether it is final.
-	meshSwap(matchID string) (status string, final, ok bool)
+	// meshSwap is a swap's status, its latest event, and whether it is
+	// final.
+	meshSwap(matchID string) (status, reason string, final, ok bool)
 	// serverTrade places an immediate limit order, returning the order ID.
 	serverTrade(st *QuickSwapStepPlan, qty, rate uint64) (string, error)
 	// serverOrder reports a server order: done when it no longer trades
@@ -188,10 +190,13 @@ type qsTiming struct {
 	poll            time.Duration
 	proposalTimeout time.Duration
 	stepTimeout     time.Duration
+	// makerInit is how long a maker has to lock its coins after the match
+	// before the mesh swapper gives up on it (shown as a countdown).
+	makerInit time.Duration
 }
 
 var qsDefaultTiming = qsTiming{poll: 700 * time.Millisecond, proposalTimeout: meshpkg.DefaultNegotiationConfig.ProposalTimeout,
-	stepTimeout: 2 * time.Hour}
+	stepTimeout: 2 * time.Hour, makerInit: meshpkg.DefaultSwapConfig.MakerInitWait()}
 
 // quickSwapper keeps the runs.
 type quickSwapper struct {
@@ -541,7 +546,7 @@ func (r *qsRun) runMeshStep(idx int) string {
 					needRound = true
 				}
 			case qsTakeSwapping:
-				status, final, ok := r.be.meshSwap(t.MatchID)
+				status, reason, final, ok := r.be.meshSwap(t.MatchID)
 				if !ok {
 					break
 				}
@@ -560,7 +565,17 @@ func (r *qsRun) runMeshStep(idx int) string {
 					exclude[t.OrderID] = true
 					failedRates = append(failedRates, t.Rate)
 					needRound = true
-					r.logf("bad", "Swap with %s ended %s; the coins are back in your wallet", t.OwnerName, status)
+					if status == meshpkg.SwapAbandoned {
+						// Nothing of ours was locked: an unfunded or
+						// unresponsive maker (P17).
+						if reason != "" {
+							t.Reason = reason
+						}
+						r.logf("warn", "%s did not lock their coins in time (%s); nothing was spent, taking the next best order",
+							t.OwnerName, qsShortReason(reason))
+					} else {
+						r.logf("bad", "Swap with %s ended %s; the coins are back in your wallet", t.OwnerName, status)
+					}
 				}
 			}
 			switch t.Status {
@@ -583,6 +598,10 @@ func (r *qsRun) runMeshStep(idx int) string {
 				step.Wait = &QuickSwapWait{Until: waitTake.Deadline,
 					Msg: fmt.Sprintf("Waiting for %s to accept order %s. If they don't answer, Quick Swap retries with the next best order (attempt %d of %d).",
 						waitTake.OwnerName, short(waitTake.OrderID), step.Round, step.MaxRounds)}
+			} else if (waitTake.SwapStatus == meshpkg.SwapNew || waitTake.SwapStatus == "") && r.timing.makerInit > 0 {
+				step.Wait = &QuickSwapWait{Until: waitTake.Started + r.timing.makerInit.Milliseconds(), From: waitTake.Started,
+					Msg: fmt.Sprintf("Waiting for %s to lock their coins. If they don't within %s, Quick Swap takes the next best order instead (nothing of yours is locked yet).",
+						waitTake.OwnerName, qsDur(r.timing.makerInit))}
 			} else {
 				step.Wait = &QuickSwapWait{Msg: fmt.Sprintf("Atomic swap with %s: %s", waitTake.OwnerName, qsSwapWords(waitTake.SwapStatus))}
 			}
@@ -634,6 +653,24 @@ func (r *qsRun) runMeshStep(idx int) string {
 	}
 	r.mtx.Unlock()
 	return stopMsg
+}
+
+// qsShortReason strips the status prefix from a swap event.
+func qsShortReason(reason string) string {
+	if i := strings.Index(reason, ": "); i > 0 && i < 20 {
+		reason = reason[i+2:]
+	}
+	if reason == "" {
+		return "no contract"
+	}
+	return reason
+}
+
+func qsDur(d time.Duration) string {
+	if d >= time.Minute && d%time.Minute == 0 {
+		return fmt.Sprintf("%d min", int(d/time.Minute))
+	}
+	return d.Round(time.Second).String()
 }
 
 func qsFailWord(status, reason string) string {
@@ -990,20 +1027,24 @@ func (b *qsCore) meshMatch(matchID string) (string, string, uint64, uint64, bool
 	return rec.Status, rec.Reason, rec.Match.Qty, rec.Match.QuoteQty, true
 }
 
-func (b *qsCore) meshSwap(matchID string) (string, bool, bool) {
+func (b *qsCore) meshSwap(matchID string) (string, string, bool, bool) {
 	m, err := b.c.meshClient()
 	if err != nil {
-		return "", false, false
+		return "", "", false, false
 	}
 	id, err := meshpkg.ParseOrderID(matchID)
 	if err != nil {
-		return "", false, false
+		return "", "", false, false
 	}
 	rec, ok := m.SwapRecord(id)
 	if !ok {
-		return "", false, false
+		return "", "", false, false
 	}
-	return rec.Status, rec.Final(), true
+	reason := rec.Reason
+	if rec.Final() && len(rec.Events) > 0 {
+		reason = rec.Events[len(rec.Events)-1].Msg
+	}
+	return rec.Status, reason, rec.Final(), true
 }
 
 func (b *qsCore) serverTrade(st *QuickSwapStepPlan, qty, rate uint64) (string, error) {

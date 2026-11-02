@@ -38,6 +38,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -108,7 +109,10 @@ const (
 	swapMsgPart     = "swap_part"
 	swapMsgRedeem   = "swap_redeem"
 	swapMsgDone     = "swap_done"
-	swapEventsMax   = 64
+	// swapMsgAbort tells the other side that we gave up on a swap before
+	// locking any coins (P17). Peers without it ignore it.
+	swapMsgAbort  = "swap_abort"
+	swapEventsMax = 64
 )
 
 // Debug halt points to simulate a silent counterparty (simnet tests).
@@ -207,6 +211,12 @@ type SwapDoneMsg struct {
 	CoinID  []byte  `json:"coinID"`
 }
 
+// SwapAbortMsg says the sender abandoned the swap with nothing locked.
+type SwapAbortMsg struct {
+	MatchID MatchID `json:"matchID"`
+	Reason  string  `json:"reason"`
+}
+
 // SwapConfig is swap policy.
 type SwapConfig struct {
 	// SwapConfs is the confirmations required on a counterparty contract
@@ -221,6 +231,54 @@ type SwapConfig struct {
 	// to the wallet (not on chain, not in the mempool), after its lock time,
 	// before the swap is abandoned as never broadcast. Zero means 10 minutes.
 	MissingContractTimeout time.Duration
+	// MakerInitTimeout is how long, from the match, a maker has to lock its
+	// coins and send the contract. A taker gives up after it (nothing of
+	// its own is locked yet) instead of waiting until its lock time; a maker
+	// that could not fund its contract by then gives up too, and both tell
+	// the other side. Zero means DefaultMakerInitTimeout.
+	MakerInitTimeout time.Duration
+}
+
+// DefaultMakerInitTimeout: a funded maker broadcasts its contract seconds
+// after the match (no confirmation is needed for that), so 3 minutes leaves
+// room for retries, wallet hiccups and slow message delivery.
+const DefaultMakerInitTimeout = 3 * time.Minute
+
+// MakerInitWait is the maker's time to lock its coins (MakerInitTimeout).
+func (c *SwapConfig) MakerInitWait() time.Duration {
+	if c.MakerInitTimeout > 0 {
+		return c.MakerInitTimeout
+	}
+	return DefaultMakerInitTimeout
+}
+
+// makerGiveUp is when a maker that still could not fund its contract gives
+// up: a little before the taker does, so the taker hears it first.
+func (c *SwapConfig) makerGiveUp() time.Duration {
+	w := c.MakerInitWait()
+	return w - min(w/6, 30*time.Second)
+}
+
+// expectedBlockTime is the mainnet block interval per asset (BIP IDs).
+var expectedBlockTime = map[uint32]time.Duration{
+	0:   10 * time.Minute,  // btc
+	42:  5 * time.Minute,   // dcr
+	140: 150 * time.Second, // lbc
+	2:   150 * time.Second, // ltc
+	3:   time.Minute,       // doge
+	145: 10 * time.Minute,  // bch
+}
+
+// MakerContractTimeout is how long a taker waits for a maker contract it
+// was told about (swap_init) to show up on chain before giving up: 3 block
+// intervals of the asset, at least 10 minutes. SPV wallets only see a
+// contract once it is mined.
+func MakerContractTimeout(assetID uint32) time.Duration {
+	bt, ok := expectedBlockTime[assetID]
+	if !ok {
+		bt = 10 * time.Minute
+	}
+	return max(3*bt, 10*time.Minute)
 }
 
 func (c *SwapConfig) missingTimeout() time.Duration {
@@ -349,9 +407,11 @@ type swapState struct {
 
 type swapInbound struct {
 	init   *SwapInitMsg
+	initAt time.Time // when the first swap_init arrived
 	part   *SwapPartMsg
 	redeem *SwapRedeemMsg
 	done   *SwapDoneMsg
+	abort  *SwapAbortMsg
 }
 
 // dropIn clears rejected inbound data so a later message can replace it.
@@ -598,11 +658,18 @@ func (ob *OrderBooks) stepSwap(ctx context.Context, sw *swapper, s *swapState) {
 	s.inMtx.Lock()
 	in := s.in
 	s.inMtx.Unlock()
+	if in.abort != nil && !s.rec.Final() {
+		if s.rec.Status == SwapNew {
+			ob.setSwapStatus(sw, s, SwapAbandoned, "the %s gave up before locking coins: %s", otherSide(s.rec.Side), in.abort.Reason)
+			return
+		}
+		ob.swapWarn(sw, s, "the %s gave up (%s); our contract is locked, so we wait for the swap or the refund", otherSide(s.rec.Side), in.abort.Reason)
+	}
 	halt, _ := sw.halt.Load().(string)
 	if s.rec.Side == sideMaker {
 		ob.stepMaker(ctx, sw, s, halt, in.part, in.done)
 	} else {
-		ob.stepTaker(ctx, sw, s, halt, in.init, in.redeem)
+		ob.stepTaker(ctx, sw, s, halt, in.init, in.initAt, in.redeem)
 	}
 }
 
@@ -650,6 +717,19 @@ func (ob *OrderBooks) stepMaker(ctx context.Context, sw *swapper, s *swapState, 
 		}
 		if now.Add(sw.cfg.SafetyMargin).Unix() >= m.TakerLockTime {
 			ob.setSwapStatus(sw, s, SwapAbandoned, "too late to initiate")
+			return
+		}
+		// Could not fund the contract in time (e.g. not enough coins): give
+		// up before the taker does and tell it, so it can take another
+		// order and we don't lock coins for a taker that already left.
+		if giveUp := sw.cfg.makerGiveUp(); now.Sub(time.UnixMilli(m.Stamp)) > giveUp {
+			why := fmt.Sprintf("maker could not lock its coins within %s", giveUp.Round(time.Second))
+			local := why
+			if r.Reason != "" {
+				local += " (" + r.Reason + ")" // wallet details stay local
+			}
+			ob.setSwapStatus(sw, s, SwapAbandoned, "%s", local)
+			ob.sendSwapMsg(context.Background(), s, swapMsgAbort, &SwapAbortMsg{MatchID: m.ID, Reason: why})
 			return
 		}
 		if r.Secret == nil {
@@ -882,7 +962,20 @@ func (ob *OrderBooks) sendContract(ctx context.Context, sw *swapper, s *swapStat
 	return true
 }
 
-func (ob *OrderBooks) stepTaker(ctx context.Context, sw *swapper, s *swapState, halt string, init *SwapInitMsg, redeem *SwapRedeemMsg) {
+func otherSide(side string) string {
+	if side == sideMaker {
+		return "taker"
+	}
+	return "maker"
+}
+
+// giveUp abandons a swap with nothing of ours locked and tells the peer.
+func (ob *OrderBooks) giveUp(sw *swapper, s *swapState, why string) {
+	ob.setSwapStatus(sw, s, SwapAbandoned, "%s", why)
+	ob.sendSwapMsg(context.Background(), s, swapMsgAbort, &SwapAbortMsg{MatchID: s.rec.Match.ID, Reason: why})
+}
+
+func (ob *OrderBooks) stepTaker(ctx context.Context, sw *swapper, s *swapState, halt string, init *SwapInitMsg, initAt time.Time, redeem *SwapRedeemMsg) {
 	r := s.rec
 	m := &r.Match
 	sendW, err := sw.wallet(m.MakerReceives()) // taker sends what the maker receives
@@ -910,12 +1003,26 @@ func (ob *OrderBooks) stepTaker(ctx context.Context, sw *swapper, s *swapState, 
 			ob.setSwapStatus(sw, s, SwapAbandoned, "%s", why)
 			return
 		}
+		// An unfunded or unresponsive maker: give up long before the lock
+		// time (P17).
 		if init == nil {
+			if wait := sw.cfg.MakerInitWait(); now.Sub(time.UnixMilli(m.Stamp)) > wait {
+				ob.giveUp(sw, s, fmt.Sprintf("maker did not lock their coins within %s", wait))
+			}
+			return
+		}
+		contractWait := MakerContractTimeout(m.TakerReceives())
+		contractLate := !initAt.IsZero() && now.Sub(initAt) > contractWait
+		if s.badInit && contractLate {
+			ob.giveUp(sw, s, fmt.Sprintf("no valid maker contract within %s", contractWait))
 			return
 		}
 		a, err := recvW.Audit(ctx, init.CoinID, init.Contract)
 		if err != nil {
 			ob.log.Debugf("Swap %s: audit of maker contract not ready: %v", m.ID, err)
+			if contractLate {
+				ob.giveUp(sw, s, fmt.Sprintf("maker contract %s not found on chain within %s", coinTxID(init.CoinID), contractWait))
+			}
 			return
 		}
 		if reason := checkAudit(a, m.TakerAddr, m.MakerSends(), init.SecretHash, m.MakerLockTime); reason != "" {
@@ -1055,6 +1162,9 @@ func (ob *OrderBooks) handleSwapMsg(from peer.ID, typ string, payload []byte) {
 				return false
 			}
 			s.in.init = &msg
+			if s.in.initAt.IsZero() {
+				s.in.initAt = time.Now()
+			}
 			return true
 		}
 	case swapMsgPart:
@@ -1094,6 +1204,28 @@ func (ob *OrderBooks) handleSwapMsg(from peer.ID, typ string, payload []byte) {
 				return false
 			}
 			s.in.done = &msg
+			return true
+		}
+	case swapMsgAbort:
+		var msg SwapAbortMsg
+		if json.Unmarshal(payload, &msg) != nil {
+			return
+		}
+		id = msg.MatchID
+		if len(msg.Reason) > 200 {
+			msg.Reason = msg.Reason[:200]
+		}
+		msg.Reason = strings.Map(func(r rune) rune {
+			if r < 0x20 || r == 0x7f {
+				return -1
+			}
+			return r
+		}, msg.Reason)
+		store = func(s *swapState) bool {
+			if s.in.abort != nil {
+				return false
+			}
+			s.in.abort = &msg
 			return true
 		}
 	default:

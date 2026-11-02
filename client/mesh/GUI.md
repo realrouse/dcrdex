@@ -145,3 +145,14 @@ the node is off. It opens a 4-step overlay (meshnode.ts `MeshNodeWizard`):
 4. Result with a verdict, the node ID, the port-forward / VPS guide when not reachable, and Retry,
    Change settings, Done.
 While the node runs, the card shows its state with Run checks again, Change settings and Stop node.
+
+## Unfunded makers (Quick Swap stall, P17)
+- `SwapConfig.MakerInitTimeout` (default 3 min): a taker that has matched but has not received the
+  maker's `swap_init` within it abandons the swap (nothing of the taker's is locked yet) and sends
+  `swap_abort`. A maker that cannot fund its contract gives up after `MakerInitWait() - 30 s` (2m30s)
+  and sends `swap_abort` with the reason, so an up-to-date maker frees the taker sooner.
+- `MakerContractTimeout(asset)`: a maker contract that was announced but never shows up on chain is
+  abandoned after 3 expected blocks, at least 10 min (btc 30 min, dcr 15 min, lbc 10 min).
+- Quick Swap shows "Waiting for X to lock their coins" with a countdown ring, and on abandonment logs
+  the reason and takes the next best order within the drift tolerance.
+- Old makers (no `swap_abort`) are handled by the taker timeout alone.

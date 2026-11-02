@@ -258,22 +258,25 @@ func (b *tBackend) meshMatch(id string) (string, string, uint64, uint64, bool) {
 	return m.status, m.reason, m.qty, m.quote, true
 }
 
-func (b *tBackend) meshSwap(id string) (string, bool, bool) {
+func (b *tBackend) meshSwap(id string) (string, string, bool, bool) {
 	b.mtx.Lock()
 	defer b.mtx.Unlock()
 	m := b.matches[id]
 	if m == nil || m.swap == "" {
-		return "", false, false
+		return "", "", false, false
 	}
 	m.polls++
 	if m.polls > 3 && m.swap == meshpkg.SwapNew {
 		if b.behave[m.order] == "refund" {
 			m.swap = meshpkg.SwapRefunded
+		} else if b.behave[m.order] == "unfunded" {
+			m.swap = meshpkg.SwapAbandoned
+			return m.swap, "abandoned: maker did not lock their coins within 3m0s", true, true
 		} else {
 			m.swap = meshpkg.SwapComplete
 		}
 	}
-	return m.swap, m.swap != meshpkg.SwapNew, true
+	return m.swap, "", m.swap != meshpkg.SwapNew, true
 }
 
 func (b *tBackend) serverTrade(*QuickSwapStepPlan, uint64, uint64) (string, error) {
@@ -401,6 +404,34 @@ func TestQuickSwapRefundReplaced(t *testing.T) {
 	s := tRun(t, be, &QuickSwapForm{From: tDCR, To: tLBC, Amount: 1_000_000, DriftPct: 1})
 	if s.Status != QuickSwapComplete || s.Received != tLot || s.Steps[0].Takes[1].OrderID != "b" {
 		t.Fatalf("status %s received %d: %s", s.Status, s.Received, s.Message)
+	}
+}
+
+// P17: a maker that never locks its coins (the mesh swapper abandons the
+// swap after the maker init timeout) is replaced with the next best order.
+func TestQuickSwapUnfundedMakerReplaced(t *testing.T) {
+	be := &tBackend{behave: map[string]string{"a": "unfunded"}, matches: map[string]*tMatch{},
+		mkts: []*qsMarket{tMkt("lbc_dcr", tLBC, tDCR).tSell("a", 1_000_000, 1).tSell("b", 1_002_000, 1)}}
+	s := tRun(t, be, &QuickSwapForm{From: tDCR, To: tLBC, Amount: 1_002_000, DriftPct: 1})
+	if s.Status != QuickSwapComplete || s.Received != tLot || len(s.Steps[0].Takes) != 2 || s.Steps[0].Takes[1].OrderID != "b" {
+		t.Fatalf("status %s received %d takes %+v: %s", s.Status, s.Received, s.Steps[0].Takes, s.Message)
+	}
+	if !tLogHas(s, "did not lock their coins in time (maker did not lock their coins within 3m0s); nothing was spent") {
+		t.Fatalf("log: %+v", s.Log)
+	}
+	if s.Steps[0].Takes[0].Reason != "abandoned: maker did not lock their coins within 3m0s" {
+		t.Fatalf("reason %q", s.Steps[0].Takes[0].Reason)
+	}
+	// Two hops, the unfunded maker in step 2 and the replacement beyond the
+	// tolerance: stop and keep the intermediate coin.
+	be = &tBackend{behave: map[string]string{"q": "unfunded"}, matches: map[string]*tMatch{},
+		mkts: []*qsMarket{
+			tMkt("dcr_btc", tDCR, tBTC).tSell("p", 1_000_000, 10),
+			tMkt("lbc_dcr", tLBC, tDCR).tSell("q", 1_000_000, 100).tSell("r", 1_050_000, 100),
+		}}
+	s = tRun(t, be, &QuickSwapForm{From: tBTC, To: tLBC, Amount: 1_000_000, DriftPct: 1})
+	if s.Status != QuickSwapStopped || len(s.Kept) != 1 || s.Kept[0].Asset != tDCR || s.Kept[0].Amount != tLot {
+		t.Fatalf("status %s kept %+v: %s", s.Status, s.Kept, s.Message)
 	}
 }
 

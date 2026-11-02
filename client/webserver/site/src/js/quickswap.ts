@@ -80,7 +80,7 @@ interface StepRun {
   takes: Take[] | null
   round: number
   maxRounds: number
-  wait?: { until: number, msg: string }
+  wait?: { until: number, from?: number, msg: string }
   note?: string
   worsePct: number
   serverOrder?: string
@@ -533,7 +533,7 @@ export default class QuickSwapPage extends BasePage {
       }
       if (s.wait && s.status === 'running') {
         if (s.wait.until) {
-          h += `<div class="qs-count"><svg class="qs-ring" viewBox="0 0 38 38"><circle cx="19" cy="19" r="16" class="bg"/><circle cx="19" cy="19" r="16" class="fg" data-until="${s.wait.until}" data-start="${(takes.find(t => t.deadline === s.wait?.until)?.started) || (s.wait.until - 20000)}"/>` +
+          h += `<div class="qs-count"><svg class="qs-ring" viewBox="0 0 38 38"><circle cx="19" cy="19" r="16" class="bg"/><circle cx="19" cy="19" r="16" class="fg" data-until="${s.wait.until}" data-start="${s.wait.from || (takes.find(t => t.deadline === s.wait?.until)?.started) || (s.wait.until - 20000)}"/>` +
             `<text x="19" y="23" text-anchor="middle" data-cd="${s.wait.until}"></text></svg><span>${esc(s.wait.msg)}</span></div>`
         } else {
           h += `<div class="qs-count"><span class="qs-spin"></span><span>${esc(s.wait.msg)}</span></div>`
@@ -590,7 +590,7 @@ export default class QuickSwapPage extends BasePage {
     const now = Date.now()
     for (const t of Doc.applySelector(this.page.runTl, 'text[data-cd]')) {
       const left = Math.max(0, Math.ceil((Number(t.dataset.cd) - now) / 1000))
-      t.textContent = `0:${String(left).padStart(2, '0')}`
+      t.textContent = `${Math.floor(left / 60)}:${String(left % 60).padStart(2, '0')}`
     }
     for (const c of Doc.applySelector(this.page.runTl, 'circle[data-until]')) {
       const until = Number(c.dataset.until)
