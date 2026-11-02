@@ -20,6 +20,7 @@ Phases (default all, in order):
   det500   500 epochs at 2 s: identical records on all nodes
 Usage: ./s012.py [phase ...]
 """
+import signal
 import json, os, shutil, subprocess, sys, time, random
 import harness as h
 from harness import log, Fail
@@ -125,6 +126,8 @@ def setup(net):
     if os.path.exists(RUN):
         os.rename(RUN, RUN + time.strftime(".%Y%m%d-%H%M%S"))   # never delete appdata with possible contracts
     os.makedirs(RUN)
+    for n in net.nodes.values():
+        n.pw = None
     # 1. Learn the validators' mesh peer IDs (derived from their app seeds).
     for v in net.vals:
         net.start(v)
@@ -177,15 +180,18 @@ def phase_s0(net):
     verify = subprocess.run([RELTOOL, "verify", bad], capture_output=True, text=True)
     t = h.Bisonw("tamper", RUN, "127.0.0.1:16120", "127.0.0.1:16220", net.addr[1], BISONW, 16320)
     t.start(["--meshrelease", bad])
-    t.pw = random.randbytes(8).hex()
-    open(os.path.join(t.dir, ".testpw"), "w").write(t.pw)
-    t.api("init", {"pass": t.pw})
-    time.sleep(5)
-    st = t.api("mesh/status")["status"]
-    con = open(os.path.join(t.dir, "console.log")).read()
-    line = [l for l in con.splitlines() if "release file" in l and "rejected" in l]
-    shot(t, "/mesh", "s0-tampered-release-mesh-off", 3000)
-    t.stop()
+    try:
+        t.pw = random.randbytes(8).hex()
+        open(os.path.join(t.dir, ".testpw"), "w").write(t.pw)
+        t.api("init", {"pass": t.pw})
+        time.sleep(5)
+        st = t.api("mesh/status")["status"]
+        con = open(os.path.join(t.dir, "console.log")).read()
+        line = [l for l in con.splitlines() if "release file" in l and "rejected" in l]
+        shot(t, "/mesh", "s0-tampered-release-mesh-off", 3000)
+    finally:
+        t.stop()
+        shutil.copy(os.path.join(t.dir, "console.log"), os.path.join(EVID, "console-tamper.log"))
     if st.get("enabled") or not line:
         raise Fail("tampered release accepted: %s" % st)
     st2 = net["alice"].api("mesh/status")["status"]
@@ -480,6 +486,7 @@ PHASES = [("s0", phase_s0), ("final", phase_final), ("book", phase_book), ("swap
           ("kill", phase_kill), ("clock", phase_clock), ("omit", phase_omit), ("forge", phase_forge), ("det500", phase_det500)]
 
 def main():
+    signal.signal(signal.SIGTERM, lambda *a: sys.exit(143))  # still clean up
     want = sys.argv[1:] or [p for p, _ in PHASES]
     os.makedirs(EVID, exist_ok=True)
     net = Net()

@@ -45,7 +45,10 @@ def run(cmd, cwd=None, timeout=120, check=True):
     return r.stdout.strip()
 
 def jrpc(out):
-    d = json.loads(out)
+    try:
+        d = json.loads(out)
+    except ValueError:
+        return out  # bare results such as a txid
     if isinstance(d, dict) and "result" in d and "jsonrpc" in d:
         if d.get("error"):
             raise Fail(str(d["error"]))
@@ -175,6 +178,7 @@ class Bisonw:
         e.update(env or {})
         args = [self.binary, "--simnet", "--mesh", "--appdata", self.dir, "--webaddr", self.web, "--meshport", str(self.meshport),
                 "--meshname", self.name, "--log=debug"] + self.extra + (extra or [])
+        os.makedirs(self.dir, exist_ok=True)
         self.console = open(os.path.join(self.dir, "console.log"), "a")
         self.console.write("\n==== %s start %s\n" % (time.strftime("%F %T"), " ".join(args[1:])))
         self.console.flush()
@@ -231,6 +235,7 @@ class Bisonw:
         return self._req(self.dbg, path, body)
 
     def init(self):
+        os.makedirs(self.dir, exist_ok=True)
         self.pw = random.randbytes(12).hex()
         open(os.path.join(self.dir, ".testpw"), "w").write(self.pw)
         os.chmod(os.path.join(self.dir, ".testpw"), 0o600)
