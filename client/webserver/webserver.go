@@ -214,6 +214,11 @@ type clientCore interface {
 	MeshNodeStatus() *core.MeshNodeInfo
 	SetMeshNode(enabled bool) (*core.MeshNodeInfo, error)
 	MeshNodeCheck() (*core.MeshNodeInfo, error)
+	QuickSwapQuote(form *core.QuickSwapForm) (*core.QuickSwapQuote, error)
+	QuickSwapStart(form *core.QuickSwapForm) (*core.QuickSwapRun, error)
+	QuickSwapRuns() []*core.QuickSwapRun
+	QuickSwapRun(id string) (*core.QuickSwapRun, error)
+	QuickSwapStop(id string) (*core.QuickSwapRun, error)
 }
 
 type MMCore interface {
@@ -555,6 +560,7 @@ func New(cfg *Config) (*WebServer, error) {
 					webAuth.Get(proposalsRoute, s.handleProposals)
 					webAuth.Get("/generatecompanionappqrcode", s.handleGenerateCompanionAppQRCode)
 					webAuth.Get(meshRoute, s.handleMesh)
+					webAuth.Get(quickSwapRoute, s.handleQuickSwap)
 				})
 			})
 
@@ -697,6 +703,10 @@ func New(cfg *Config) (*WebServer, error) {
 			apiAuth.Get("/mesh/node", s.apiMeshNode)
 			apiAuth.Post("/mesh/node", s.apiSetMeshNode)
 			apiAuth.Post("/mesh/node/check", s.apiMeshNodeCheck)
+			apiAuth.Post("/quickswap/quote", s.apiQuickSwapQuote)
+			apiAuth.Post("/quickswap/start", s.apiQuickSwapStart)
+			apiAuth.Post("/quickswap/status", s.apiQuickSwapStatus)
+			apiAuth.Post("/quickswap/stop", s.apiQuickSwapStop)
 			apiAuth.Post("/unpaircompanionapp", s.apiUnpairCompanionApp)
 		})
 	})
@@ -785,6 +795,7 @@ func (s *WebServer) buildTemplates(lang string) error {
 		addTemplate("register", bb, "forms").
 		addTemplate("markets", bb, "forms").
 		addTemplate("mesh", bb).
+		addTemplate("quickswap", bb).
 		addTemplate("wallets", bb, "forms", "docs").
 		addTemplate("settings", bb, "forms").
 		addTemplate("orders", bb).

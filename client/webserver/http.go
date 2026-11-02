@@ -31,6 +31,7 @@ const (
 	loginRoute       = "/login"
 	marketsRoute     = "/markets"
 	meshRoute        = "/mesh"
+	quickSwapRoute   = "/quickswap"
 	walletsRoute     = "/wallets"
 	walletLogRoute   = "/wallets/logfile"
 	settingsRoute    = "/settings"
@@ -139,6 +140,12 @@ func (s *WebServer) knownUnregisteredExchanges(registeredExchanges map[string]*c
 // handleMarkets is the handler for the '/markets' page request.
 func (s *WebServer) handleMarkets(w http.ResponseWriter, r *http.Request) {
 	s.sendTemplate(w, "markets", s.commonArgs(r, "Markets | Bison Wallet"))
+}
+
+// handleQuickSwap is the handler for the '/quickswap' page request: swap any
+// coin for another over the mesh and server markets.
+func (s *WebServer) handleQuickSwap(w http.ResponseWriter, r *http.Request) {
+	s.sendTemplate(w, "quickswap", s.commonArgs(r, "Quick Swap | Bison Wallet"))
 }
 
 // handleMesh is the handler for the '/mesh' page request: peer-to-peer

@@ -16,6 +16,7 @@ import InitPage from './init'
 import ProposalPage from './proposal'
 import ProposalsPage from './proposals'
 import MeshPage from './mesh'
+import QuickSwapPage from './quickswap'
 import MeshConnectOverlay from './meshconnect'
 import { MM } from './mmutil'
 import { RateEncodingFactor, StatusExecuted, hasActiveMatches } from './orderutil'
@@ -109,6 +110,7 @@ const constructors: Record<string, PageClass> = {
   register: RegistrationPage,
   markets: MarketsPage,
   mesh: MeshPage,
+  quickswap: QuickSwapPage,
   wallets: WalletsPage,
   settings: SettingsPage,
   orders: OrdersPage,
@@ -980,7 +982,7 @@ export default class Application {
     }
     if (!authed) {
       page.profileBox.classList.remove('authed')
-      Doc.hide(page.noteBell, page.walletsMenuEntry, page.marketsMenuEntry, page.meshMenuEntry)
+      Doc.hide(page.noteBell, page.walletsMenuEntry, page.marketsMenuEntry, page.meshMenuEntry, page.quickSwapMenuEntry)
       return
     }
     Doc.setVis(Object.keys(this.exchanges).length > 0, page.marketsMenuEntry, page.mmLink)
@@ -990,6 +992,8 @@ export default class Application {
     // With the Tatanka mesh running (simnet --mesh), the Mesh tab shows the
     // mesh connectivity. Trading stays on the Trade page.
     Doc.setVis(Boolean(this.user && this.user.mesh), page.meshMenuEntry)
+    // Quick Swap routes over the mesh and server markets.
+    Doc.setVis(Boolean(this.user && this.user.mesh) || Object.keys(this.exchanges).length > 0, page.quickSwapMenuEntry)
     Doc.setVis(mmStatus, page.mmLink)
   }
 

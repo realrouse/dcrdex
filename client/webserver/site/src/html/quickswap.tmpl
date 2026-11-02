@@ -1,0 +1,98 @@
+{{define "quickswap"}}
+{{template "top" .}}
+<div id="main" data-handler="quickswap" class="overflow-y-auto">
+<div id="qsPage" class="qs-page">
+
+  <div id="qsNoMarkets" class="qs-panel qs-card p-3 d-hide">
+    <div class="qs-h">Quick Swap</div>
+    <div class="qs-sub">No markets yet. Quick Swap uses the Tatanka mesh markets and the markets of your DEX servers.
+      Start bisonw with the mesh, or add a DEX server, and create wallets for the coins you want to swap.</div>
+  </div>
+
+  <!-- Swap form -->
+  <div id="qsFormView" class="qs-wrap d-hide">
+    <div class="qs-panel qs-card">
+      <div class="qs-h">Quick Swap</div>
+      <div class="qs-sub">Swap any coin for another. We find the route; every step is an atomic swap.</div>
+
+      <div class="qs-box">
+        <div class="qs-lbl"><span>From</span><span><span id="fromBal"></span> · <a id="maxBtn" class="pointer subtlelink">Max</a></span></div>
+        <div class="qs-line">
+          <input id="amountIn" class="qs-amt" type="text" inputmode="decimal" autocomplete="off" placeholder="0" spellcheck="false">
+          <label class="qs-coinsel"><img id="fromLogo" class="qs-logo" alt=""><select id="fromSel"></select><span class="ico-arrowdown fs10 grey"></span></label>
+        </div>
+      </div>
+      <div class="qs-flip"><span id="flipBtn" class="pointer" title="Swap direction">⇅</span></div>
+      <div class="qs-box">
+        <div class="qs-lbl"><span>To (estimated)</span><span id="toBal"></span></div>
+        <div class="qs-line">
+          <span id="amountOut" class="qs-amt qs-out">0</span>
+          <label class="qs-coinsel"><img id="toLogo" class="qs-logo" alt=""><select id="toSel"></select><span class="ico-arrowdown fs10 grey"></span></label>
+        </div>
+      </div>
+
+      <div id="routeChips" class="qs-route"></div>
+      <div id="quoteErr" class="qs-err d-hide"></div>
+      <div id="quoteInfo" class="d-hide">
+        <div class="qs-kv"><span>Estimated receive</span><b id="estOut"></b></div>
+        <div class="qs-kv"><span>Rate</span><b id="estRate"></b></div>
+        <div class="qs-kv"><span>Spends</span><b id="estIn"></b></div>
+        <div class="qs-kv d-hide" id="leftoverRow"><span>Left over (stays in your wallet)</span><b id="estLeft"></b></div>
+        <div class="qs-kv"><span>Network fees</span><b>paid by each swap from your wallets</b></div>
+        <div class="qs-guar"><span class="ico-check"></span><span>You'll receive at least <b id="minOut"></b></span><span class="grey ms-auto fs12">or the swap stops safely</span></div>
+      </div>
+
+      <div class="qs-tol">
+        <span>Drift tolerance</span>
+        <button class="qs-opt" data-tol="0.5">0.5%</button>
+        <button class="qs-opt on" data-tol="1">1%</button>
+        <button class="qs-opt" data-tol="custom" id="tolCustomBtn">Custom</button>
+        <input id="tolCustom" class="qs-tolin d-hide" type="text" inputmode="decimal" placeholder="%">
+        <span class="grey ms-auto fs12">max price change across all steps</span>
+      </div>
+      <div id="riskNote" class="qs-risk d-hide"><span class="ico-info"></span><span id="riskText"></span></div>
+      <div id="startErr" class="qs-err d-hide"></div>
+      <button id="swapBtn" class="qs-bigbtn" disabled>Enter an amount</button>
+    </div>
+
+    <div class="qs-panel qs-side">
+      <div class="qs-stephead">How this swap runs</div>
+      <div id="planTl" class="qs-tl"></div>
+      <div id="noPlan" class="fs13 grey mb-3">Pick two coins and an amount to see the route.</div>
+      <div class="qs-stephead mt-2">Other routes considered</div>
+      <div id="otherRoutes"></div>
+      <div id="noOthers" class="fs13 grey">None.</div>
+      <div class="grey fs12 mt-3 lh15">Your coins never leave your wallets except inside an atomic swap. Each step either
+        completes or refunds. Routes use the Tatanka mesh and your DEX servers, with at most two swaps. If an order
+        disappears or a maker doesn't answer, Quick Swap takes the next best orders, but only within your drift tolerance.</div>
+      <div id="pastRuns" class="mt-3"></div>
+    </div>
+  </div>
+
+  <!-- Swap in progress -->
+  <div id="qsRunView" class="qs-wrap d-hide">
+    <div class="qs-panel qs-card qs-wide">
+      <div class="qs-h"><span id="runTitle"></span><span id="runBadge" class="qs-badge"></span></div>
+      <div class="qs-sub" id="runSub"></div>
+      <div id="runChips" class="qs-route"></div>
+      <div id="runTl" class="qs-tl mt-3"></div>
+      <div id="runMsg" class="qs-msg d-hide"></div>
+      <div class="d-flex justify-content-between mt-2 gap-2 flex-wrap">
+        <button id="stopBtn" class="qs-btn">Stop</button>
+        <button id="newSwapBtn" class="qs-btn feature d-hide">New swap</button>
+        <button id="tradeBtn" class="qs-btn">View on Trade page</button>
+      </div>
+    </div>
+    <div class="qs-panel qs-side">
+      <div class="qs-stephead">Activity</div>
+      <div id="runLog" class="qs-log"></div>
+      <div class="qs-stephead mt-3">Price drift so far</div>
+      <div id="driftRows"></div>
+      <div class="qs-driftbar"><div id="driftFill"></div></div>
+    </div>
+  </div>
+
+</div>
+</div>
+{{template "bottom"}}
+{{end}}

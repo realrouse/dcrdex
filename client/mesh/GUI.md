@@ -12,6 +12,9 @@
     (`/api/mesh/order`, one hour lifetime). A market order only takes.
   - Cancel uses `/api/mesh/cancel`.
   - There is no price history (candles) or server tier limit on mesh markets.
+- **Quick Swap** (`/quickswap`, header entry "Quick Swap", shown when the mesh
+  is on or a DEX server is added): swap any coin for another. See "Quick Swap"
+  below.
 - **Mesh** (`/mesh`, header entry "Mesh", shown only when the mesh is on) is
   connectivity only: animated map of you, the mesh nodes and the peers,
   peer/version table, and the list of mesh matches and swaps.
@@ -81,3 +84,40 @@ default; simnet with `--mesh` only for now. The setting is kept in
 - Test settings: `TATANKA_MESH_NODE_IP`, `TATANKA_MESH_NODE_PEERS` (extra
   node multiaddrs, dialed and whitelisted), `TATANKA_MESH_NODE_WHITELIST`,
   `TATANKA_MESH_NODE_NOPORTMAP=1`.
+
+## Quick Swap
+
+`client/core/quickswap_route.go` (route finder, pure), `client/core/quickswap.go`
+(executor and Core glue), `site/src/js/quickswap.ts`, `site/src/html/quickswap.tmpl`.
+
+- The user picks a "from" coin, a "to" coin, an amount and a drift tolerance
+  (0.5%, 1% (default) or custom, at most 10%).
+- **Routes.** Every market with wallets for both coins: the mesh markets
+  (`DefaultMarkets`) and the markets of connected DEX servers. Direct routes
+  and two-step routes through one intermediate coin. Each step walks the
+  current book (best price first, whole lots of each order, our own orders
+  skipped). Routes are ranked by expected output; ties go to fewer steps, then
+  to the one that spends less. In a two-step route, step 1 only buys what step
+  2 can use. If the wallet holds less than 0.001 of the intermediate coin, that
+  much is kept back for the second swap's fees. Network fees are not in the
+  estimate; each swap pays its own.
+- **Guaranteed minimum** = expected output x (1 - tolerance).
+- **Execution.** The steps run in turn. A mesh step takes the planned orders
+  with the normal mesh take flow (`MeshTakeOrder`, then the atomic swap). If
+  a take fails (maker says the order is gone, no answer in 20 s, or the swap
+  refunds), the step re-walks the current book without the failed orders and
+  takes the next best ones, but only if the projected final output of the whole
+  route stays at or above the guaranteed minimum. At most 3 replacement rounds
+  per step. Otherwise the run stops, and the user keeps what they have: the
+  intermediate coin after step 1, or the unspent "from" coin. Swaps already
+  agreed always finish (they are atomic). "Stop and keep <coin>" stops taking
+  new orders.
+- A server step places one immediate (time-in-force now) limit order at the
+  worst rate the tolerance still allows, and waits for its matches to finish.
+  Not yet tested end to end (the test chains have no DEX server).
+- Runs are kept in memory only; after a restart the mesh swaps resume as usual
+  (Mesh tab), but the Quick Swap view of them is gone.
+- API: `POST /api/quickswap/quote {from, to, amount, driftPct}`,
+  `POST /api/quickswap/start {from, to, amount, driftPct, minOut}` (refuses if
+  the books no longer give `minOut`), `POST /api/quickswap/status {id}` (no id:
+  all runs), `POST /api/quickswap/stop {id}`.

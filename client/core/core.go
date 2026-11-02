@@ -1762,6 +1762,9 @@ type Core struct {
 	requestedActions   map[string]*asset.ActionRequiredNote
 
 	meshMtx sync.RWMutex
+	// Quick Swap runs (quickswap.go), created on first use.
+	qsOnce sync.Once
+	qs     *quickSwapper
 	mesh    *mesh.Client
 	meshCM  *dex.ConnectionMaster
 

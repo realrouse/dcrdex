@@ -2792,3 +2792,84 @@ func (s *WebServer) apiMeshNodeCheck(w http.ResponseWriter, r *http.Request) {
 		Node *core.MeshNodeInfo `json:"node"`
 	}{OK: true, Node: info})
 }
+
+// apiQuickSwapQuote is the handler for the '/quickswap/quote' API request:
+// the best route (at most 2 swaps) for a swap and the others considered.
+func (s *WebServer) apiQuickSwapQuote(w http.ResponseWriter, r *http.Request) {
+	form := new(core.QuickSwapForm)
+	if !readPost(w, r, form) {
+		return
+	}
+	q, err := s.core.QuickSwapQuote(form)
+	if err != nil {
+		s.writeAPIError(w, fmt.Errorf("quick swap: %w", err))
+		return
+	}
+	writeJSON(w, &struct {
+		OK    bool                 `json:"ok"`
+		Quote *core.QuickSwapQuote `json:"quote"`
+	}{OK: true, Quote: q})
+}
+
+// apiQuickSwapStart is the handler for the '/quickswap/start' API request.
+func (s *WebServer) apiQuickSwapStart(w http.ResponseWriter, r *http.Request) {
+	form := new(core.QuickSwapForm)
+	if !readPost(w, r, form) {
+		return
+	}
+	run, err := s.core.QuickSwapStart(form)
+	if err != nil {
+		s.writeAPIError(w, fmt.Errorf("quick swap: %w", err))
+		return
+	}
+	writeJSON(w, &struct {
+		OK  bool               `json:"ok"`
+		Run *core.QuickSwapRun `json:"run"`
+	}{OK: true, Run: run})
+}
+
+// apiQuickSwapStatus is the handler for the '/quickswap/status' API request:
+// one run by ID, or all runs of this session (newest first) without an ID.
+func (s *WebServer) apiQuickSwapStatus(w http.ResponseWriter, r *http.Request) {
+	form := &struct {
+		ID string `json:"id"`
+	}{}
+	if !readPost(w, r, form) {
+		return
+	}
+	res := &struct {
+		OK   bool                 `json:"ok"`
+		Run  *core.QuickSwapRun   `json:"run,omitempty"`
+		Runs []*core.QuickSwapRun `json:"runs,omitempty"`
+	}{OK: true}
+	if form.ID != "" {
+		run, err := s.core.QuickSwapRun(form.ID)
+		if err != nil {
+			s.writeAPIError(w, fmt.Errorf("quick swap: %w", err))
+			return
+		}
+		res.Run = run
+	} else {
+		res.Runs = s.core.QuickSwapRuns()
+	}
+	writeJSON(w, res)
+}
+
+// apiQuickSwapStop is the handler for the '/quickswap/stop' API request.
+func (s *WebServer) apiQuickSwapStop(w http.ResponseWriter, r *http.Request) {
+	form := &struct {
+		ID string `json:"id"`
+	}{}
+	if !readPost(w, r, form) {
+		return
+	}
+	run, err := s.core.QuickSwapStop(form.ID)
+	if err != nil {
+		s.writeAPIError(w, fmt.Errorf("quick swap: %w", err))
+		return
+	}
+	writeJSON(w, &struct {
+		OK  bool               `json:"ok"`
+		Run *core.QuickSwapRun `json:"run"`
+	}{OK: true, Run: run})
+}

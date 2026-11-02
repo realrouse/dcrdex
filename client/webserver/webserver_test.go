@@ -1286,3 +1286,12 @@ func (*TCore) MeshSpots() (map[string]*msgjson.Spot, error) { return nil, nil }
 func (*TCore) MeshNodeStatus() *core.MeshNodeInfo           { return &core.MeshNodeInfo{} }
 func (*TCore) SetMeshNode(bool) (*core.MeshNodeInfo, error) { return &core.MeshNodeInfo{}, nil }
 func (*TCore) MeshNodeCheck() (*core.MeshNodeInfo, error)   { return &core.MeshNodeInfo{}, nil }
+func (*TCore) QuickSwapQuote(*core.QuickSwapForm) (*core.QuickSwapQuote, error) {
+	return &core.QuickSwapQuote{}, nil
+}
+func (*TCore) QuickSwapStart(*core.QuickSwapForm) (*core.QuickSwapRun, error) {
+	return &core.QuickSwapRun{}, nil
+}
+func (*TCore) QuickSwapRuns() []*core.QuickSwapRun              { return nil }
+func (*TCore) QuickSwapRun(string) (*core.QuickSwapRun, error)  { return &core.QuickSwapRun{}, nil }
+func (*TCore) QuickSwapStop(string) (*core.QuickSwapRun, error) { return &core.QuickSwapRun{}, nil }

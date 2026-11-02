@@ -27,6 +27,7 @@ import (
 	"errors"
 	"fmt"
 	"sort"
+	"strings"
 	"time"
 
 	"decred.org/dcrdex/dex/calc"
@@ -318,6 +319,12 @@ const (
 	rejectUnknownOrder = "unknown, filled or cancelled order"
 	rejectOrderExpired = "order expired"
 )
+
+// OrderGoneReason is true if a match rejection reason means the maker no
+// longer has the order (Quick Swap reports those orders as vanished).
+func OrderGoneReason(reason string) bool {
+	return strings.Contains(reason, rejectUnknownOrder) || strings.Contains(reason, rejectOrderExpired)
+}
 
 // checkProposal returns a rejection reason or "". ob.mtx must be held.
 func (ob *OrderBooks) checkProposal(p *MatchProposal, oo *ownOrder) string {
