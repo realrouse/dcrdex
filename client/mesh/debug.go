@@ -291,6 +291,61 @@ func (s *DebugServer) Handler(ctx context.Context) http.Handler {
 		}
 		writeJSON(w, http.StatusOK, res)
 	})
+	// S8 resilience campaign (simnet): fault injection, epoch-topic floods
+	// and a fake relay.
+	mux.HandleFunc("GET /mesh/faults", func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, http.StatusOK, s.ob.Faults())
+	})
+	mux.HandleFunc("POST /mesh/faults", func(w http.ResponseWriter, r *http.Request) {
+		var f MeshFaults
+		if err := json.NewDecoder(r.Body).Decode(&f); err != nil {
+			writeErr(w, http.StatusBadRequest, err)
+			return
+		}
+		s.ob.SetFaults(f)
+		s.ob.log.Warnf("FAULTS: drop in %.1f%% out %.1f%%, delay %d+%d ms, %d blocked peers, epoch only %v",
+			f.DropInPct, f.DropOutPct, f.DelayMs, f.JitterMs, len(f.Block), f.EpochOnly)
+		writeJSON(w, http.StatusOK, s.ob.Faults())
+	})
+	mux.HandleFunc("POST /mesh/epochs/flood", func(w http.ResponseWriter, r *http.Request) {
+		e := s.ob.Epochs()
+		if e == nil {
+			writeErr(w, http.StatusBadRequest, errors.New("epoch mode is off"))
+			return
+		}
+		var req struct {
+			Mode string `json:"mode"`
+			N    int    `json:"n"`
+			Size int    `json:"size"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			writeErr(w, http.StatusBadRequest, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, e.FloodEpochs(ctx, req.Mode, req.N, req.Size))
+	})
+	mux.HandleFunc("POST /mesh/epochs/fakerelay", func(w http.ResponseWriter, r *http.Request) {
+		e := s.ob.Epochs()
+		if e == nil {
+			writeErr(w, http.StatusBadRequest, errors.New("epoch mode is off"))
+			return
+		}
+		var req struct {
+			Capture bool `json:"capture"`
+			N       int  `json:"n"`
+			Tamper  bool `json:"tamper"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			writeErr(w, http.StatusBadRequest, err)
+			return
+		}
+		if req.Capture {
+			e.EnableEpochCapture()
+			writeJSON(w, http.StatusOK, map[string]bool{"capturing": true})
+			return
+		}
+		writeJSON(w, http.StatusOK, e.FakeRelay(ctx, req.N, req.Tamper))
+	})
 	mux.HandleFunc("GET /mesh/inbox/dropped", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]uint64{"dropped": s.ob.InboxDropped()})
 	})

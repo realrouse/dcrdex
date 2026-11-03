@@ -443,6 +443,7 @@ type epochMsg struct {
 	Proof    *EquivocationProof `json:"eqv,omitempty"`   // S5
 	UBond    *UserBond          `json:"ubond,omitempty"` // S6
 	Trade    *TradeProof        `json:"trade,omitempty"` // S7
+	Book     *BookDigest        `json:"book,omitempty"`  // S7 book cross-check
 }
 
 const (

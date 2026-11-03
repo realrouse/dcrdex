@@ -275,6 +275,29 @@ func (s *DebugServer) epochHandlers(ctx context.Context, mux *http.ServeMux) {
 		s.ob.log.Warnf("ADVERSARY: proposals will leave out orders of %q", req.Owner)
 		writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
 	})
+	// S7 book cross-checks: this node's view of every validator's digests,
+	// and the adversary mode that hides an owner's orders.
+	mux.HandleFunc("GET /mesh/epochs/bookcheck", func(w http.ResponseWriter, r *http.Request) {
+		if e := eng(w); e != nil {
+			writeJSON(w, http.StatusOK, e.BookCheck())
+		}
+	})
+	mux.HandleFunc("POST /mesh/epochs/hide", func(w http.ResponseWriter, r *http.Request) {
+		e := eng(w)
+		if e == nil {
+			return
+		}
+		var req struct {
+			Owner string `json:"owner"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			writeErr(w, http.StatusBadRequest, err)
+			return
+		}
+		e.SetHideOwner(req.Owner)
+		s.ob.log.Warnf("ADVERSARY: hiding the orders of %q from proposals and book digests", req.Owner)
+		writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
+	})
 	mux.HandleFunc("POST /mesh/epochs/forge", func(w http.ResponseWriter, r *http.Request) {
 		if eng(w) == nil {
 			return

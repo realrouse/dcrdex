@@ -65,6 +65,7 @@ var DefaultNegotiationConfig = NegotiationConfig{
 // subscribes to the market, so late subscribers get the current book.
 type OrderBooks struct {
 	ps      pubSub
+	faults  *faultPS
 	priv    libp2pcrypto.PrivKey
 	encPriv *secp256k1.PrivateKey
 	self    peer.ID
@@ -100,8 +101,10 @@ type OrderBooks struct {
 // NewOrderBooks constructs an OrderBooks.
 func NewOrderBooks(ps pubSub, priv libp2pcrypto.PrivKey, encPriv *secp256k1.PrivateKey, log dex.Logger) *OrderBooks {
 	self, _ := peer.IDFromPrivateKey(priv)
+	fps := newFaultPS(ps) // S8 simnet fault injection (pass-through unless set)
 	return &OrderBooks{
-		ps:        ps,
+		ps:        fps,
+		faults:    fps,
 		priv:      priv,
 		encPriv:   encPriv,
 		self:      self,

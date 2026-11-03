@@ -201,6 +201,14 @@ type EpochEngine struct {
 	equivocated  int
 	forgeAgainst string
 	forgeMode    string
+	// S7 book cross-checks (bookcheck.go)
+	book *bookCheck
+	// S8 fake relay capture (epoch_adversary.go, debug only)
+	advCapOn bool
+	advCap   []*epochMsg
+	// S8: newest signed stamp per validator (heardFrom) and stale ones ignored
+	lastStamp map[string]int64
+	replays   int
 }
 
 // NewEpochEngine creates an engine. Call Run to start it.
@@ -247,6 +255,8 @@ func NewEpochEngine(rel *Release, cfg EpochConfig, ps pubSub, priv libp2pcrypto.
 		tradePool:    make(map[string]*tradeEntry),
 		tradeRefused: make(map[string]string),
 		ownTrades:    make(map[string]*TradeProof),
+		book:         newBookCheck(),
+		lastStamp:    make(map[string]int64),
 	}
 	e.lastFP = e.genesis
 	// S4: with bond rules a node that is not seeded can become a validator
@@ -474,12 +484,23 @@ func (e *EpochEngine) SubmitCancel(ctx context.Context, c *MeshCancel) {
 }
 
 func (e *EpochEngine) admitOrder(o *MeshOrder) error {
+	return e.admitOrderRepair(o, false)
+}
+
+// admitOrderRepair admits an order. A repair (S7 book cross-check: an order
+// re-sent because a validator's digest lacked it) may be older than the
+// clock limit, as long as it is not from the future and not expired.
+func (e *EpochEngine) admitOrderRepair(o *MeshOrder, repair bool) error {
 	now := e.now()
 	nowMs := now.UnixMilli()
 	if err := o.Validate(now); err != nil {
 		return err
 	}
-	if abs64(o.Stamp-nowMs) > e.p.MaxClockSkewMs {
+	if repair {
+		if o.Stamp-nowMs > e.p.MaxClockSkewMs {
+			return fmt.Errorf("repaired order stamp is %d ms in the future (limit %d ms)", o.Stamp-nowMs, e.p.MaxClockSkewMs)
+		}
+	} else if abs64(o.Stamp-nowMs) > e.p.MaxClockSkewMs {
 		return fmt.Errorf("order stamp is %d ms off our clock (limit %d ms)", o.Stamp-nowMs, e.p.MaxClockSkewMs)
 	}
 	id := o.ID()
@@ -520,10 +541,13 @@ func (e *EpochEngine) handleMsg(ctx context.Context, from string, b []byte) {
 			return
 		}
 	}
+	e.mtx.Lock()
+	e.captureLocked(&m) // S8 fake relay (debug; off unless enabled)
+	e.mtx.Unlock()
 	switch m.Type {
-	case epMsgOrder:
+	case epMsgOrder, epMsgOrderRepair:
 		if m.Order != nil {
-			if err := e.admitOrder(m.Order); err != nil {
+			if err := e.admitOrderRepair(m.Order, m.Type == epMsgOrderRepair); err != nil {
 				e.log.Debugf("Epoch pool rejected order from %s: %v", m.Order.Owner, err)
 			}
 		}
@@ -558,6 +582,10 @@ func (e *EpochEngine) handleMsg(ctx context.Context, from string, b []byte) {
 			e.mtx.Lock()
 			e.addTradeLocked(m.Trade)
 			e.mtx.Unlock()
+		}
+	case epMsgBookDigest:
+		if m.Book != nil {
+			e.handleBookDigest(ctx, m.Book)
 		}
 	case epMsgProof:
 		if m.Proof != nil {
@@ -597,12 +625,27 @@ func (e *EpochEngine) isValidatorNow(id string) bool {
 	return e.valsLocked(e.p.EpochOf(e.nowMs())).IsValidator(id)
 }
 
+// clockSampleMaxAgeMs: signed stamps further than this from our clock are
+// not clock samples (replays; a clock that far off is caught by the rest).
+const clockSampleMaxAgeMs = 30_000
+
 func (e *EpochEngine) heardFrom(v string, stamp int64) {
 	nowMs := e.nowMs()
-	e.clock.add(v, stamp, nowMs)
 	e.mtx.Lock()
+	// S8 (fake relay): a replayed heartbeat or attestation carries a valid
+	// signature but an old stamp. Only stamps newer than the last one from
+	// the validator, and within clockSampleMaxAgeMs, are clock samples;
+	// otherwise a relay replaying old messages could push every validator
+	// past the clock limit and stop all signing.
+	if stamp <= e.lastStamp[v] || abs64(stamp-nowMs) > clockSampleMaxAgeMs {
+		e.replays++
+		e.mtx.Unlock()
+		return
+	}
+	e.lastStamp[v] = stamp
 	e.heard[v] = nowMs
 	e.mtx.Unlock()
+	e.clock.add(v, stamp, nowMs)
 }
 
 // tick runs heartbeats, proposals, sync and cleanup.
@@ -617,6 +660,8 @@ func (e *EpochEngine) tick(ctx context.Context) {
 	e.s7Gossip(ctx, cur)
 	e.s7Scan(ctx, cur)
 	e.tradeChecks(ctx, nowMs)
+	e.bookGossip(ctx, cur)
+	e.bookLater(ctx)
 	e.mtx.Lock()
 	member := e.isMemberLocked(cur)
 	var retry []*epochCandidate
@@ -754,7 +799,7 @@ func (e *EpochEngine) maybePropose(ctx context.Context, n uint64, nowMs int64) {
 		if _, seen := e.state.seen[po.id]; seen || po.ord.Stamp >= end || po.ord.Expiry <= end {
 			continue
 		}
-		if e.omitOwner != "" && po.ord.Owner == e.omitOwner {
+		if (e.omitOwner != "" && po.ord.Owner == e.omitOwner) || e.hiddenLocked(po.ord) {
 			continue
 		}
 		if reason := e.gateOrderLocked(po.ord, n); reason != "" { // S6
@@ -935,7 +980,9 @@ func (e *EpochEngine) handleProposal(ctx context.Context, p *EpochProposal) {
 // checkOmissionsLocked flags a proposal that leaves out orders we had well
 // before the epoch end.
 func (e *EpochEngine) checkOmissionsLocked(p *EpochProposal) {
-	if !e.signer || p.Proposer == e.self {
+	// S7: clients check too (they compare what validators propose with the
+	// orders they hold); only the counts differ in meaning, not the rule.
+	if p.Proposer == e.self {
 		return
 	}
 	end := e.p.EpochEnd(p.Epoch)
@@ -963,6 +1010,7 @@ func (e *EpochEngine) checkOmissionsLocked(p *EpochProposal) {
 	}
 	if missing > 0 {
 		e.omissions[p.Proposer]++
+		e.noteOmissionLocked(p.Epoch, p.Proposer)
 		e.addFlagLocked(&EpochFlag{Epoch: p.Epoch, Kind: "omission", Peer: p.Proposer,
 			Detail: fmt.Sprintf("proposal left out %d order(s) we had for >%d ms, e.g. %s", missing, e.p.OmissionGraceMs, example)})
 	}
@@ -1146,6 +1194,7 @@ func (e *EpochEngine) commitLocked(rec *EpochRecord, res *epochResult, synced bo
 	e.afterUserBondsLocked(rec)
 	e.afterTradesLocked(rec)
 	e.resetCreditsLocked(rec)
+	e.bookAfterCommitLocked(rec)
 	for _, o := range rec.Proposal.Orders {
 		delete(e.pool, o.ID())
 	}
@@ -1520,6 +1569,8 @@ type EpochStatus struct {
 	Bonds          *BondSwitchStatus       `json:"bonds,omitempty"`    // S4 bond switch (nil: release without bonds)
 	Banned         []string                `json:"banned"`             // S5 validators banned in our chain
 	SignHold       string                  `json:"signHold,omitempty"` // S5 why we do not sign now
+	BookSuspects   []string                `json:"bookSuspects"`       // S7 book cross-check suspects
+	StaleStamps    int                     `json:"staleStamps"`        // S8 replayed/old heartbeat or attestation stamps ignored
 }
 
 // Status returns the engine status.
@@ -1594,6 +1645,14 @@ func (e *EpochEngine) Status() *EpochStatus {
 	}
 	st.CanFinalize = thresholdMet(&e.p, st.ActivePower, st.ActivePower, st.BondedPower)
 	st.Flags = append([]*EpochFlag(nil), e.flags...)
+	st.StaleStamps = e.replays
+	st.BookSuspects = []string{}
+	for id, bp := range e.book.peers {
+		if bp.suspect {
+			st.BookSuspects = append(st.BookSuspects, e.nameOf(id))
+		}
+	}
+	sort.Strings(st.BookSuspects)
 	return st
 }
 
