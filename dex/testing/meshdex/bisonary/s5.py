@@ -340,7 +340,9 @@ def phase_restart(net):
     time.sleep(10)
     row = snap(net, "restart")
     f0 = finalized(al)
-    time.sleep(30)
+    # Wait by epochs, not wall time: a box pause (VM snapshot) freezes every
+    # node and the harness alike.
+    h.wait_until(lambda: finalized(al) >= f0 + 15, 300, "15 more records after the restart", 2)
     stats = chain_stats(al, f0)
     recs = stats.pop("recs")
     with_v5 = [e for e in recs if e > f0 and (v5.peer_id in recs[e]["activeSet"] or v5.peer_id in recs[e]["signers"])]
