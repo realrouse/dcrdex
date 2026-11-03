@@ -350,6 +350,7 @@ def phase_swaps(net):
 def phase_refund(net):
     mkt = "dcr_btc"
     a, b = net["alice"], net["bob"]
+    orig = {n.name: n.dbgapi("/mesh/policy?market=" + mkt) for n in (a, b)}
     for n in (a, b):
         n.dbgapi("/mesh/config", {"market": mkt, "makerLockSec": 240, "takerLockSec": 120})
     a.dbgapi("/mesh/swap/halt", {"stage": "redeem"})
@@ -358,6 +359,8 @@ def phase_refund(net):
     h.wait_until(lambda: (b.swap(mid) or {}).get("status") == "refunded", 600, "taker refund", 3)
     h.wait_until(lambda: (a.swap(mid) or {}).get("status") == "refunded", 600, "maker refund", 3)
     a.dbgapi("/mesh/swap/halt", {"stage": ""})
+    for n in (a, b):  # later phases (forge) must see the market's normal lock policy
+        n.dbgapi("/mesh/config", dict(orig[n.name], market=mkt))
     sa, sb = a.swap(mid), b.swap(mid)
     result("refund", {"match": mid, "maker": sa["status"], "taker": sb["status"],
                       "txs": {k: sa[k]["txid"] for k in ("makerSwap", "takerSwap", "makerRefund", "takerRefund") if sa.get(k)}})
@@ -486,6 +489,9 @@ def phase_forge(net):
                      "makerSwaps": len([s for s in al.swaps() if s["match"]["id"] in (fid, lid)])})
     if f["status"] != "rejected" or l["status"] != "rejected":
         raise Fail("forged/legacy not rejected")
+    for what, m in (("forged", f), ("legacy", l)):  # rejected by the S2 epoch gate, not by some other check
+        if "epoch" not in (m.get("reason") or ""):
+            raise Fail("%s match rejected for the wrong reason: %s" % (what, m.get("reason")))
 
 def phase_det500(net):
     for m in net.mms:
