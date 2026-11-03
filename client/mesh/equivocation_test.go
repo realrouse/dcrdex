@@ -336,7 +336,7 @@ func TestDuplicateKey(t *testing.T) {
 		return b
 	}
 	v.e.mtx.Lock()
-	v.e.noteSentLocked(now - 5)
+	v.e.noteSentLocked(hbKey(now-5), now-5)
 	started := v.e.startedAt
 	v.e.mtx.Unlock()
 	v.e.ownKeyMsg(hb(now - 5))      // our own echo
@@ -402,7 +402,7 @@ func TestDuplicateKeyTwin(t *testing.T) {
 	s := newEpochSim(t, 4, 0, s3Params())
 	s.epochs(15)
 	v := s.vals[1]
-	twin := &simNode{name: "twin", priv: v.priv, id: v.id, key: peer.ID("twin-of-" + string(v.id))}
+	twin := &simNode{name: "twin", priv: v.priv, id: v.id, key: peer.ID("twin-of-" + string(v.id)), listen: true}
 	s.net.mtx.Lock()
 	s.net.real[twin.key] = v.id
 	s.net.mtx.Unlock()
@@ -437,4 +437,39 @@ func TestDuplicateKeyTwin(t *testing.T) {
 			t.Fatalf("%s after takeover: banned %v held %v", n.name, bs.Banned, bs.Held)
 		}
 	}
+}
+
+// TestStartListen: a restarted validator signs only after it checked peers'
+// signer lists; a whole network started at once signs after the maximum.
+func TestStartListen(t *testing.T) {
+	s := newEpochSim(t, 4, 0, s3Params())
+	s.epochs(10)
+	v := s.vals[2]
+	v.listen = true
+	s.net.setDown(v.id, true)
+	s.epochs(2)
+	s.net.setDown(v.id, false)
+	s.startNode(v, true, "")
+	g0 := v.e.BansStatus().GuardEpoch
+	s.epochs(StartListenEpochs)
+	if h := v.e.BansStatus().SignHold; !strings.Contains(h, "listening") {
+		t.Fatalf("hold after %d epochs: %q", StartListenEpochs, h)
+	}
+	s.epochs(StartListenProposals + 2)
+	bs := v.e.BansStatus()
+	if bs.SignHold != "" || bs.GuardEpoch == g0 {
+		t.Fatalf("restarted validator not signing: %+v", bs)
+	}
+	// All validators restart at once: nobody proposes for StartListenEpochs,
+	// then proposals flow and everyone signs again.
+	for _, n := range s.vals {
+		n.listen = true
+		s.startNode(n, true, "")
+	}
+	last := lastEpoch(s.vals[0].e)
+	s.epochs(StartListenEpochs + StartListenProposals + 6)
+	if got := lastEpoch(s.vals[0].e); got <= last {
+		t.Fatalf("network restarted at once never finalized again (%d)", got)
+	}
+	s.checkAgreement(s.all())
 }

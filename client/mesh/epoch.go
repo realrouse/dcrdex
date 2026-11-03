@@ -94,6 +94,9 @@ type EpochConfig struct {
 	NTPServer string
 	// TickMs is the engine's timer resolution (default 50).
 	TickMs int64
+	// SkipStartListen (in-memory tests only) signs right after start,
+	// without the S5 listen period for another instance of our key.
+	SkipStartListen bool
 }
 
 // EpochEngine runs epoch consensus for one node.
@@ -160,18 +163,20 @@ type EpochEngine struct {
 	s4SentAt    uint64
 	peerNames   map[string]string
 	// S5 equivocation proofs and bans (equivocation.go)
-	proofs     map[string]*proofEntry // verified proofs we hold, by validator
-	firstSigs  map[string]*firstSig   // validator|epoch -> first signature seen
-	penalty    PenaltyHook
-	badProofs  int
-	guardEpoch uint64
-	guardFP    EpochHash
-	startedAt  int64
-	sentStamps map[int64]bool // stamps of our own signed messages
-	dupAt      int64          // last message from another instance of our key
-	dupFlagAt  int64
-	dupCount   int
-	s5SentAt   uint64
+	proofs      map[string]*proofEntry // verified proofs we hold, by validator
+	firstSigs   map[string]*firstSig   // validator|epoch -> first signature seen
+	penalty     PenaltyHook
+	badProofs   int
+	guardEpoch  uint64
+	guardFP     EpochHash
+	startedAt   int64
+	sentMsgs    map[string]int64 // our own signed messages (key -> stamp)
+	dupAt       int64            // last message from another instance of our key
+	dupFlagAt   int64
+	dupCount    int
+	credChecks  int // peers' proposals on our tip whose credits we checked since start
+	credCheckAt uint64
+	s5SentAt    uint64
 	// debug (simnet adversary tests)
 	omitOwner    string
 	equivocate   int
@@ -217,7 +222,7 @@ func NewEpochEngine(rel *Release, cfg EpochConfig, ps pubSub, priv libp2pcrypto.
 		peerNames:   make(map[string]string),
 		proofs:      make(map[string]*proofEntry),
 		firstSigs:   make(map[string]*firstSig),
-		sentStamps:  make(map[int64]bool),
+		sentMsgs:    make(map[string]int64),
 	}
 	e.lastFP = e.genesis
 	// S4: with bond rules a node that is not seeded can become a validator
@@ -595,7 +600,7 @@ func (e *EpochEngine) tick(ctx context.Context) {
 			if sig, err := e.priv.Sign(h.msg()); err == nil {
 				h.Sig = sig
 				e.mtx.Lock()
-				e.noteSentLocked(h.Stamp)
+				e.noteSentLocked(hbKey(h.Stamp), h.Stamp)
 				e.mtx.Unlock()
 				e.send(ctx, &epochMsg{Type: epMsgHB, HB: h})
 			}
@@ -667,7 +672,7 @@ func (e *EpochEngine) maybePropose(ctx context.Context, n uint64, nowMs int64) {
 		e.mtx.Unlock()
 		return
 	}
-	if e.signHoldLocked(nowMs) != "" { // S5: not while our key may run twice
+	if e.proposeHoldLocked(nowMs) != "" { // S5: not while our key may run twice
 		e.mtx.Unlock()
 		return
 	}
@@ -733,7 +738,7 @@ func (e *EpochEngine) maybePropose(ctx context.Context, n uint64, nowMs int64) {
 	}
 	e.s4ProposalLocked(prop)
 	e.s5ProposalLocked(prop)
-	e.noteSentLocked(prop.Stamp)
+	e.noteSentLocked(propKey(prop.Epoch, prop.Stamp), prop.Stamp)
 	e.mtx.Unlock()
 	if err := prop.sign(e.priv); err != nil {
 		e.log.Errorf("Error signing epoch proposal: %v", err)
@@ -839,7 +844,13 @@ func (e *EpochEngine) handleProposal(ctx context.Context, p *EpochProposal) {
 		}
 		e.checkOmissionsLocked(p)
 		e.checkCreditsLocked(p)
-		if e.signer && e.last != nil && p.Prev == e.lastFP {
+		if e.signer && p.Prev == e.lastFP && p.Proposer != e.self {
+			if p.Epoch > e.p.EpochOf(e.startedAt) && p.Epoch != e.credCheckAt {
+				e.credChecks++ // S5 listen period: a peer's signer list checked
+				e.credCheckAt = p.Epoch
+			}
+		}
+		if e.signer && e.last != nil && p.Prev == e.lastFP && p.Proposer != e.self {
 			for _, cr := range p.Credits {
 				if cr.Validator == e.self {
 					e.ownSigsLocked([]*EpochAttestation{{Epoch: e.last.Epoch, Fingerprint: e.lastFP, Validator: cr.Validator, Stamp: cr.Stamp, Sig: cr.Sig}})
@@ -947,7 +958,7 @@ func (e *EpochEngine) considerSign(ctx context.Context, c *epochCandidate) {
 		return
 	}
 	e.signed[n] = c.res.fp
-	e.noteSentLocked(nowMs)
+	e.noteSentLocked(attKey(n, c.res.fp, nowMs), nowMs)
 	alt := e.equivocateLocked(c, nowMs)
 	e.mtx.Unlock()
 	a := &EpochAttestation{Epoch: n, Fingerprint: c.res.fp, Stamp: nowMs}
@@ -1148,8 +1159,8 @@ func (e *EpochEngine) handleRecord(ctx context.Context, rec *EpochRecord, synced
 		// S5: our key's signatures we did not make (another instance).
 		e.mtx.Lock()
 		e.ownSigsLocked(rec.Sigs)
-		if rec.Proposer == e.self && !e.proposed[rec.Epoch] && rec.Proposal.Stamp >= e.startedAt && !e.sentStamps[rec.Proposal.Stamp] {
-			e.dupSeenLocked(rec.Proposal.Stamp, fmt.Sprintf("proposal for epoch %d in a peer's record", rec.Epoch))
+		if rec.Proposer == e.self {
+			e.dupSeenLocked(propKey(rec.Epoch, rec.Proposal.Stamp), rec.Proposal.Stamp, fmt.Sprintf("proposal for epoch %d in a peer's record", rec.Epoch))
 		}
 		e.mtx.Unlock()
 	}

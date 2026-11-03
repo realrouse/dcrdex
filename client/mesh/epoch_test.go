@@ -160,6 +160,7 @@ type simNode struct {
 	priv   libp2pcrypto.PrivKey
 	id     peer.ID
 	key    peer.ID // sim routing key ("" = id); a twin shares id, not key
+	listen bool    // S5 start listen period (off in most sims)
 	e      *EpochEngine
 	offset time.Duration
 	finals []*EpochFinal
@@ -230,7 +231,7 @@ func newEpochSim(t *testing.T, nVals, nTraders int, params EpochParams) *epochSi
 
 func (s *epochSim) startNode(n *simNode, validator bool, store string) {
 	nn := n
-	e, err := NewEpochEngine(s.rel, EpochConfig{Validator: validator, StorePath: store}, &epochNetClient{s.net, n.netKey()}, n.priv,
+	e, err := NewEpochEngine(s.rel, EpochConfig{Validator: validator, StorePath: store, SkipStartListen: !n.listen}, &epochNetClient{s.net, n.netKey()}, n.priv,
 		func() time.Time { return s.clock.now().Add(nn.offset) }, s.quiet)
 	if err != nil {
 		s.t.Fatal(err)

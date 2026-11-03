@@ -24,10 +24,16 @@ package mesh
 //   - the engine signs at most one fingerprint per epoch (signed map), and a
 //     sign guard file keeps the highest signed epoch and fingerprint across
 //     restarts, so a restart inside a signing window cannot sign twice;
-//   - a started validator listens for StartListenEpochs before it signs; if
-//     it hears messages signed with its own key that it did not send (the
-//     same key started twice), it does not sign until that has been quiet
-//     for DupQuietEpochs. The other instance sees the same and stops too.
+//   - a started validator does not sign before it has checked the signer
+//     lists (credits) of StartListenProposals peers' proposals built on its
+//     chain tip, and at least StartListenEpochs have passed (at most
+//     StartListenMaxEpochs, so a network restarted all at once recovers).
+//     The mesh never delivers a peer's own messages to it, so another
+//     instance of the key shows up as signatures of our key, inside peers'
+//     records and credits, that we did not make. Then we neither sign nor
+//     propose until that has been quiet for DupQuietEpochs. Two instances
+//     started at the same moment can still both pass the listen period; the
+//     ban then removes the key (the operator's fault, by design).
 // A validator holding a proof does not sign a proposal that leaves it out
 // (for proofs it held before the epoch ended), so an equivocating proposer
 // cannot keep itself in the set by omitting the proof.
@@ -51,6 +57,12 @@ const (
 	// StartListenEpochs: a started validator listens this long for another
 	// instance of its own key before it signs.
 	StartListenEpochs = 2
+	// StartListenProposals: peers' proposals (with their credits) we check
+	// for our key before we sign after a start.
+	StartListenProposals = 3
+	// StartListenMaxEpochs: we sign anyway after this long (nobody else is
+	// proposing, e.g. every validator restarted).
+	StartListenMaxEpochs = 12
 	// DupQuietEpochs: after messages from another instance of our key, we
 	// sign again only once it has been quiet this long.
 	DupQuietEpochs = 15
@@ -484,30 +496,37 @@ func (e *EpochEngine) ownKeyMsg(b []byte) {
 		return
 	}
 	var stamp int64
-	var what string
+	var what, key string
 	switch {
 	case m.Type == epMsgHB && m.HB != nil && m.HB.Validator == e.self:
 		if verifySig(m.HB.Validator, m.HB.PubKey, m.HB.msg(), m.HB.Sig) != nil {
 			return
 		}
-		stamp, what = m.HB.Stamp, "heartbeat"
+		stamp, what, key = m.HB.Stamp, "heartbeat", hbKey(m.HB.Stamp)
 	case m.Type == epMsgAtt && m.Att != nil && m.Att.Validator == e.self:
 		if m.Att.verify() != nil {
 			return
 		}
-		stamp, what = m.Att.Stamp, fmt.Sprintf("signature of epoch %d", m.Att.Epoch)
+		stamp, what, key = m.Att.Stamp, fmt.Sprintf("signature of epoch %d", m.Att.Epoch), attKey(m.Att.Epoch, m.Att.Fingerprint, m.Att.Stamp)
 	case m.Type == epMsgProp && m.Prop != nil && m.Prop.Proposer == e.self:
 		if h := m.Prop.Hash(); verifySig(m.Prop.Proposer, m.Prop.PubKey, h[:], m.Prop.Sig) != nil {
 			return
 		}
-		stamp, what = m.Prop.Stamp, fmt.Sprintf("proposal for epoch %d", m.Prop.Epoch)
+		stamp, what, key = m.Prop.Stamp, fmt.Sprintf("proposal for epoch %d", m.Prop.Epoch), propKey(m.Prop.Epoch, m.Prop.Stamp)
 	default:
 		return
 	}
 	e.mtx.Lock()
 	defer e.mtx.Unlock()
-	e.dupSeenLocked(stamp, what)
+	e.dupSeenLocked(key, stamp, what)
 }
+
+// Keys of our own signed messages (sentMsgs).
+func hbKey(stamp int64) string { return fmt.Sprintf("h|%d", stamp) }
+func attKey(epoch uint64, fp EpochHash, stamp int64) string {
+	return fmt.Sprintf("a|%d|%s|%d", epoch, fp, stamp)
+}
+func propKey(epoch uint64, stamp int64) string { return fmt.Sprintf("p|%d|%d", epoch, stamp) }
 
 // ownSigsLocked checks signatures of our key that peers relay to us inside
 // records (sigs) and proposals (credits): the mesh does not deliver
@@ -515,18 +534,22 @@ func (e *EpochEngine) ownKeyMsg(b []byte) {
 // seen this way (signer = true, valid signatures only).
 func (e *EpochEngine) ownSigsLocked(atts []*EpochAttestation) {
 	for _, a := range atts {
-		if a == nil || a.Validator != e.self || e.sentStamps[a.Stamp] || a.Stamp < e.startedAt {
+		if a == nil || a.Validator != e.self || a.Stamp < e.startedAt {
+			continue
+		}
+		k := attKey(a.Epoch, a.Fingerprint, a.Stamp)
+		if _, ours := e.sentMsgs[k]; ours {
 			continue
 		}
 		if a.verify() == nil {
-			e.dupSeenLocked(a.Stamp, fmt.Sprintf("signature of epoch %d in a peer's record", a.Epoch))
+			e.dupSeenLocked(k, a.Stamp, fmt.Sprintf("signature of epoch %d in a peer's record", a.Epoch))
 		}
 	}
 }
 
-// dupSeenLocked notes a message signed with our key at stamp.
-func (e *EpochEngine) dupSeenLocked(stamp int64, what string) {
-	if e.sentStamps[stamp] || stamp < e.startedAt {
+// dupSeenLocked notes a message signed with our key (key, at stamp).
+func (e *EpochEngine) dupSeenLocked(key string, stamp int64, what string) {
+	if _, ours := e.sentMsgs[key]; ours || stamp < e.startedAt {
 		return // ours (echo), or from before we started (a previous run)
 	}
 	nowMs := e.nowMs()
@@ -542,7 +565,18 @@ func (e *EpochEngine) dupSeenLocked(stamp int64, what string) {
 
 // signHoldLocked is why we may not sign now ("" if we may).
 func (e *EpochEngine) signHoldLocked(nowMs int64) string {
-	if nowMs < e.startedAt+StartListenEpochs*e.p.EpochMs {
+	if h := e.proposeHoldLocked(nowMs); h != "" {
+		return h
+	}
+	if !e.cfg.SkipStartListen && e.credChecks < StartListenProposals && nowMs < e.startedAt+StartListenMaxEpochs*e.p.EpochMs {
+		return fmt.Sprintf("listening for another instance of our key after start (checked %d of %d peers' signer lists)", e.credChecks, StartListenProposals)
+	}
+	return ""
+}
+
+// proposeHoldLocked is why we may not propose now ("" if we may).
+func (e *EpochEngine) proposeHoldLocked(nowMs int64) string {
+	if !e.cfg.SkipStartListen && nowMs < e.startedAt+StartListenEpochs*e.p.EpochMs {
 		return "listening for another instance of our key after start"
 	}
 	if e.dupAt > 0 && nowMs-e.dupAt < DupQuietEpochs*e.p.EpochMs {
@@ -551,13 +585,14 @@ func (e *EpochEngine) signHoldLocked(nowMs int64) string {
 	return ""
 }
 
-func (e *EpochEngine) noteSentLocked(stamp int64) {
-	e.sentStamps[stamp] = true
-	if len(e.sentStamps) > 4000 {
+// noteSentLocked remembers one of our own signed messages.
+func (e *EpochEngine) noteSentLocked(key string, stamp int64) {
+	e.sentMsgs[key] = stamp
+	if len(e.sentMsgs) > 4000 {
 		cut := e.nowMs() - 600*e.p.EpochMs
-		for s := range e.sentStamps {
+		for k, s := range e.sentMsgs {
 			if s < cut {
-				delete(e.sentStamps, s)
+				delete(e.sentMsgs, k)
 			}
 		}
 	}
@@ -676,7 +711,7 @@ func (e *EpochEngine) equivocateLocked(c *epochCandidate, nowMs int64) *EpochAtt
 	if err := a.sign(e.priv); err != nil {
 		return nil
 	}
-	e.noteSentLocked(a.Stamp)
+	e.noteSentLocked(attKey(a.Epoch, a.Fingerprint, a.Stamp), a.Stamp)
 	e.log.Warnf("ADVERSARY: signed a second result for epoch %d (%s besides %s)", c.prop.Epoch, fp, c.res.fp)
 	return a
 }
