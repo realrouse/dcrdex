@@ -77,6 +77,21 @@ func (c *epochNetClient) Subscribe(_ context.Context, topic string, h mc.TopicHa
 	return nil
 }
 
+func (c *epochNetClient) Unsubscribe(_ context.Context, topic string) error {
+	c.n.mtx.Lock()
+	defer c.n.mtx.Unlock()
+	delete(c.n.subs[topic], c.id)
+	return nil
+}
+
+// loseSub drops id's subscription at the "mesh node" only, like a subscribe
+// that raced the connection setup: the node still publishes but hears nothing.
+func (n *epochNet) loseSub(topic string, id peer.ID) {
+	n.mtx.Lock()
+	delete(n.subs[topic], id)
+	n.mtx.Unlock()
+}
+
 func (n *epochNet) pump() {
 	for i := 0; i < 20000000; i++ {
 		n.mtx.Lock()
@@ -536,6 +551,28 @@ func TestEpochKillValidators(t *testing.T) {
 	s.epochs(5)
 	s.checkAgreement(s.all())
 	t.Logf("resumed after restart: finalized to %d, rolled orders matched, v3 synced", lastEpoch(s.vals[0].e))
+}
+
+// TestEpochLostSubscription: a validator whose epoch subscription was lost
+// by the mesh node (it publishes but hears nothing) renews it after the
+// topic stays quiet and catches up by sync.
+func TestEpochLostSubscription(t *testing.T) {
+	s := newEpochSim(t, 4, 1, DefaultEpochParams)
+	s.epochs(3)
+	deaf := s.vals[3]
+	s.net.loseSub(EpochTopic, deaf.id)
+	s.epochs(2)
+	if a, b := lastEpoch(deaf.e), lastEpoch(s.vals[0].e); a >= b {
+		t.Fatalf("deaf validator kept up: %d vs %d", a, b)
+	}
+	gap := time.Duration(deaf.e.epochResubscribeMs()) * time.Millisecond
+	s.step(gap + 3*s.rel.EpochDuration())
+	time.Sleep(50 * time.Millisecond) // the resubscribe runs in a goroutine
+	s.epochs(2)
+	if a, b := lastEpoch(deaf.e), lastEpoch(s.vals[0].e); a+1 < b {
+		t.Fatalf("validator did not recover after resubscribing: %d vs %d", a, b)
+	}
+	s.checkAgreement(s.all())
 }
 
 // TestEpochClockSkew: a validator whose clock is 3 s ahead stops signing;

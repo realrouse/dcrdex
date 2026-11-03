@@ -134,6 +134,8 @@ type EpochEngine struct {
 	lastFinAt int64
 	clockBad  bool
 	syncAt    int64
+	recvAt    int64 // last epoch-topic message from another peer
+	resubAt   int64 // last epoch-topic resubscribe
 	served    map[string]int64
 	frags     map[string]*fragBuf // incomplete fragmented messages (epoch_frag.go)
 	store     *os.File
@@ -221,21 +223,10 @@ func (e *EpochEngine) Run(ctx context.Context) error {
 
 // start subscribes to the epoch topic and asks for the record chain.
 func (e *EpochEngine) start(ctx context.Context) {
-	err := e.ps.Subscribe(ctx, EpochTopic, func(ev mc.TopicEvent) {
-		if ev.Type != mc.TopicEventData {
-			if ev.Type == mc.TopicEventPeerSubscribed {
-				go e.requestSync(ctx, true)
-			}
-			return
-		}
-		if ev.Peer.String() == e.self {
-			return
-		}
-		e.handleMsg(ctx, ev.Peer.String(), ev.Data)
-	})
-	if err != nil && !errors.Is(err, mc.ErrRedundantSubscription) {
-		e.log.Warnf("Error subscribing to %s: %v", EpochTopic, err)
-	}
+	e.mtx.Lock()
+	e.recvAt = e.nowMs()
+	e.mtx.Unlock()
+	e.subscribe(ctx)
 	e.mtx.Lock()
 	e.started = e.p.EpochOf(e.nowMs())
 	e.mtx.Unlock()
@@ -249,6 +240,70 @@ func (e *EpochEngine) start(ctx context.Context) {
 	if e.cfg.NTPServer != "" {
 		go e.ntpLoop(ctx)
 	}
+}
+
+// subscribe registers the epoch topic handler.
+func (e *EpochEngine) subscribe(ctx context.Context) {
+	err := e.ps.Subscribe(ctx, EpochTopic, func(ev mc.TopicEvent) {
+		if ev.Type != mc.TopicEventData {
+			if ev.Type == mc.TopicEventPeerSubscribed {
+				go e.requestSync(ctx, true)
+			}
+			return
+		}
+		if ev.Peer.String() == e.self {
+			return
+		}
+		e.mtx.Lock()
+		e.recvAt = e.nowMs()
+		e.mtx.Unlock()
+		e.handleMsg(ctx, ev.Peer.String(), ev.Data)
+	})
+	if err != nil && !errors.Is(err, mc.ErrRedundantSubscription) {
+		e.log.Warnf("Error subscribing to %s: %v", EpochTopic, err)
+	}
+}
+
+// epochResubscribeMs is the minimum quiet time on the epoch topic before the
+// subscription is renewed (see maybeResubscribe).
+func (e *EpochEngine) epochResubscribeMs() int64 {
+	if ms := 5 * e.p.EpochMs; ms > 30_000 {
+		return ms
+	}
+	return 30_000
+}
+
+// maybeResubscribe renews the epoch topic subscription when nothing arrived
+// on it for a while. A subscription made while the mesh connection is still
+// being set up can be lost by the mesh node (the client registers it, but it
+// never reaches the node), leaving a restarted validator deaf to the chain:
+// it cannot sync, sign or finalize, though its own broadcasts still go out.
+// Validators heartbeat every epoch, so a quiet topic means we are cut off.
+func (e *EpochEngine) maybeResubscribe(ctx context.Context, nowMs int64) {
+	gap := e.epochResubscribeMs()
+	e.mtx.Lock()
+	if nowMs-e.recvAt < gap || nowMs-e.resubAt < gap {
+		e.mtx.Unlock()
+		return
+	}
+	e.resubAt = nowMs
+	quiet := nowMs - e.recvAt
+	e.mtx.Unlock()
+	type unsubscriber interface {
+		Unsubscribe(ctx context.Context, topic string) error
+	}
+	u, ok := e.ps.(unsubscriber)
+	if !ok {
+		return
+	}
+	e.log.Infof("No epoch messages for %d s; renewing the %s subscription", quiet/1000, EpochTopic)
+	go func() {
+		if err := u.Unsubscribe(ctx, EpochTopic); err != nil {
+			e.log.Debugf("Error unsubscribing from %s: %v", EpochTopic, err)
+		}
+		e.subscribe(ctx)
+		e.requestSync(ctx, true)
+	}()
 }
 
 func (e *EpochEngine) ntpLoop(ctx context.Context) {
@@ -458,6 +513,9 @@ func (e *EpochEngine) tick(ctx context.Context) {
 	}
 	stale := e.last == nil || cur > lastEpoch+3
 	needSync := stale && nowMs-e.syncAt > e.p.EpochMs*2
+	if e.signer || stale {
+		defer e.maybeResubscribe(ctx, nowMs)
+	}
 	for n := range e.cands {
 		if n+10 < cur {
 			delete(e.cands, n)
