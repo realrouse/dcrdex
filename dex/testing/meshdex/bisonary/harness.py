@@ -351,9 +351,16 @@ def wait_funded(bw, need, timeout=600):
         time.sleep(3)
     raise Fail("%s not funded: have %s need %s" % (bw.name, have, need))
 
+PAUSES = []   # box pauses seen by wait_until: (start, seconds)
+
 def wait_until(fn, timeout, what, every=1.0):
+    """Poll fn until it returns something true. A box pause (the whole VM
+    stopped, every node and this harness frozen) does not eat the timeout:
+    when one poll round took far longer than expected, the deadline moves
+    by the gap."""
     end = time.time() + timeout
     last = None
+    t_prev = time.time()
     while time.time() < end:
         try:
             last = fn()
@@ -364,4 +371,11 @@ def wait_until(fn, timeout, what, every=1.0):
         except Exception as e:
             last = e
         time.sleep(every)
+        now = time.time()
+        gap = now - t_prev - every
+        if gap > 20 and gap > 4 * every:
+            end += gap
+            PAUSES.append((time.strftime("%T", time.localtime(t_prev)), round(gap)))
+            log("box pause of ~%d s while waiting for %s; deadline extended" % (gap, what))
+        t_prev = now
     raise Fail("timeout waiting for %s (last %r)" % (what, last))

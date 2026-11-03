@@ -114,7 +114,7 @@ def phase_xhide(net):
     _NET["net"] = net
     bad, dv = net["v2"], net["dave"]
     others = [n for n in s6.peers(net) if n is not bad]
-    f0 = s3.finalized(net["v1"])
+    f0, c0 = s3.finalized(net["v1"]), s3.st(net["v1"])["currentEpoch"]
     bad.dbgapi("/mesh/epochs/hide", {"owner": dv.peer_id})
     oids = far_orders(dv, 6)
     seen = wait_suspect(net, bad, others, 120, "hiddenNow", 6)
@@ -128,10 +128,10 @@ def phase_xhide(net):
     res = {"hider": bad.name, "owner": "dave", "orders": len(oids), "detectedBy": seen, "peersChecking": [n.name for n in others],
            "notDetectedBy": [n.name for n in others if n.name not in seen], "daveOrdersRestingOnBooks": resting,
            "honestSuspected": honest_suspected, "bookFlags": flags,
-           "epochsFinalizedMeanwhile": s3.finalized(net["v1"]) - f0}
+           "epochsFinalizedMeanwhile": s3.finalized(net["v1"]) - f0, "epochsMeanwhile": s3.st(net["v1"])["currentEpoch"] - c0}
     b.result("xhide", res)
     net.hidden_oids = oids
-    if res["notDetectedBy"] or honest_suspected or any(v != len(oids) for v in resting.values()) or res["epochsFinalizedMeanwhile"] < 10:
+    if res["notDetectedBy"] or honest_suspected or any(v != len(oids) for v in resting.values()) or res["epochsFinalizedMeanwhile"] < 0.7 * res["epochsMeanwhile"]:
         raise Fail("xhide: %s" % res)
 
 def phase_xwithhold(net):
