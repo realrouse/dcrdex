@@ -61,7 +61,10 @@ export interface EpochStatus {
   release: string
   releaseHash: string
   role: string
-  params: { epochMs: number, signWindowMs: number, quorumNum: number, quorumDen: number, floorNum: number, floorDen: number, maxClockSkewMs: number }
+  params: {
+ epochMs: number, signWindowMs: number, quorumNum: number, quorumDen: number, floorNum: number, floorDen: number, maxClockSkewMs: number,
+    activeWindowEpochs: number, activeLagEpochs: number, activePct: number, activeMinEpochs: number
+}
   now: number
   currentEpoch: number
   lastFinalized: number
@@ -80,7 +83,8 @@ export interface EpochStatus {
   activePower: number
   bondedPower: number
   canFinalize: boolean
-  validators: { peerID: string, name: string, bond: number, active: boolean, self: boolean, omissions: number }[] | null
+  validators: { peerID: string, name: string, bond: number, active: boolean, self: boolean, omissions: number, credits: number, creditPct: number }[] | null
+  activeSet?: { epoch: number, asOf: number, windowFrom: number, windowTo: number, sample: number, fallback: boolean }
   flags: { epoch: number, kind: string, peer: string, detail: string }[] | null
 }
 
@@ -338,11 +342,18 @@ export default class MeshPage extends BasePage {
     page.epochSummary.textContent = `Epoch ${ep.currentEpoch} (${p.epochMs / 1000} s epochs, ${p.signWindowMs / 1000} s signing window). ` +
       (ep.haveFinalized ? `Last finalized ${ep.lastFinalized} with ${ep.lastSigners} signatures; ` : 'Nothing finalized yet; ') +
       `${ep.finalized} finalized, ${ep.skipped} skipped. Active power ${ep.activePower} of ${ep.bondedPower} bonded ` +
-      `(needs ${p.quorumNum}/${p.quorumDen} of active and more than ${p.floorNum}/${p.floorDen} of bonded). ` +
+      `(needs ${p.quorumNum}/${p.quorumDen} of active, and active at least ${p.floorNum}/${p.floorDen} of bonded). ` +
       `${ep.pool} order${ep.pool === 1 ? '' : 's'} waiting, ${ep.resting} resting.`
     const skew = ep.clockPeers === 0 ? 'unknown (no validator stamps yet)' : `${ep.clockSkewMs > 0 ? '+' : ''}${ep.clockSkewMs} ms vs ${ep.clockPeers} peer${ep.clockPeers === 1 ? '' : 's'}`
     page.epochClock.textContent = `Clock: ${skew}, limit ±${p.maxClockSkewMs} ms` + (ep.clockOK ? '' : ' — CLOCK OFF: not signing orders or epochs until the system clock is fixed')
     page.epochClock.className = `fs13 mb-1 ${ep.clockOK ? 'grey' : 'text-danger demi'}`
+    const as = ep.activeSet
+    const winH = (p.activeWindowEpochs * p.epochMs / 3600000).toFixed(1)
+    page.epochActive.textContent = !as
+? ''
+: as.fallback
+      ? `Active set: all validators (only ${as.sample} finalized epochs in the window so far, ${p.activeMinEpochs} needed to judge).`
+      : `Active set: validators that signed at least ${p.activePct}% of the ${as.sample} finalized epochs in the last ${winH} h window (epochs ${as.windowFrom}-${as.windowTo}, ending ${p.activeLagEpochs} epochs back).`
     Doc.empty(page.epochVals)
     for (const v of ep.validators || []) {
       const tr = document.createElement('tr')
@@ -352,7 +363,8 @@ export default class MeshPage extends BasePage {
       idTd.title = v.peerID
       tr.appendChild(idTd)
       tr.appendChild(this.td(String(v.bond)))
-      tr.appendChild(this.td(v.active ? 'active' : 'silent'))
+      tr.appendChild(this.td(v.active ? 'active' : 'inactive'))
+      tr.appendChild(this.td(as && as.sample > 0 ? `${v.creditPct.toFixed(0)}%` : '-', v.creditPct < p.activePct && as && !as.fallback ? 'text-danger' : ''))
       tr.appendChild(this.td(String(v.omissions), v.omissions > 0 ? 'text-danger demi' : ''))
       page.epochVals.appendChild(tr)
     }

@@ -18,6 +18,8 @@ type epochRecordSummary struct {
 	StateHash   string        `json:"stateHash"`
 	Proposer    string        `json:"proposer"`
 	Active      int           `json:"active"`
+	ActiveSet   []string      `json:"activeSet"`
+	Credits     []string      `json:"credits"` // signers of the previous record (S3)
 	Signers     []string      `json:"signers"`
 	Orders      int           `json:"orders"`
 	Cancels     int           `json:"cancels"`
@@ -52,12 +54,15 @@ func (s *DebugServer) epochHandlers(ctx context.Context, mux *http.ServeMux) {
 		var out []*epochRecordSummary
 		for _, rec := range e.Records(from, limit) {
 			sum := &epochRecordSummary{Epoch: rec.Epoch, Prev: rec.Prev.String(), Fingerprint: rec.Fingerprint.String(),
-				StateHash: rec.StateHash.String(), Proposer: rec.Proposer, Active: len(rec.Active), Matches: rec.Matches}
+				StateHash: rec.StateHash.String(), Proposer: rec.Proposer, Active: len(rec.Active), ActiveSet: rec.Active, Matches: rec.Matches}
 			for _, a := range rec.Sigs {
 				sum.Signers = append(sum.Signers, a.Validator)
 			}
 			if rec.Proposal != nil {
 				sum.Orders, sum.Cancels = len(rec.Proposal.Orders), len(rec.Proposal.Cancels)
+				for _, c := range rec.Proposal.Credits {
+					sum.Credits = append(sum.Credits, c.Validator)
+				}
 				if full {
 					sum.Proposal = rec.Proposal
 				}
@@ -65,6 +70,31 @@ func (s *DebugServer) epochHandlers(ctx context.Context, mux *http.ServeMux) {
 			out = append(out, sum)
 		}
 		writeJSON(w, http.StatusOK, map[string]any{"records": out})
+	})
+	// S3: the active set of an epoch computed from our chain up to record
+	// asOf (all peers must agree), and a replay of every record's set.
+	mux.HandleFunc("GET /mesh/epochs/active", func(w http.ResponseWriter, r *http.Request) {
+		e := eng(w)
+		if e == nil {
+			return
+		}
+		n, _ := strconv.ParseUint(r.URL.Query().Get("epoch"), 10, 64)
+		asOf, _ := strconv.ParseUint(r.URL.Query().Get("asof"), 10, 64)
+		as, err := e.ActiveFor(n, asOf)
+		if err != nil {
+			writeErr(w, http.StatusBadRequest, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, as)
+	})
+	mux.HandleFunc("GET /mesh/epochs/activecheck", func(w http.ResponseWriter, r *http.Request) {
+		e := eng(w)
+		if e == nil {
+			return
+		}
+		from, _ := strconv.ParseUint(r.URL.Query().Get("from"), 10, 64)
+		checked, bad := e.ActiveCheck(from)
+		writeJSON(w, http.StatusOK, map[string]any{"checked": checked, "mismatches": bad})
 	})
 	mux.HandleFunc("GET /mesh/epochs/order", func(w http.ResponseWriter, r *http.Request) {
 		e := eng(w)
