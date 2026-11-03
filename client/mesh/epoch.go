@@ -97,6 +97,9 @@ type EpochConfig struct {
 	// SkipStartListen (in-memory tests only) signs right after start,
 	// without the S5 listen period for another instance of our key.
 	SkipStartListen bool
+	// NoRegossip turns off the S8 re-sends of own proposals and signatures
+	// (tests compare with and without).
+	NoRegossip bool
 }
 
 // EpochEngine runs epoch consensus for one node.
@@ -133,19 +136,24 @@ type EpochEngine struct {
 	// S8: own orders a proposal left out (lost on the way to the proposer)
 	// are re-sent as repairs, at most once per ownRepairEveryEpochs.
 	ownRepairAt map[OrderID]int64
-	ownRepairs  int
-	propBy      map[string]EpochHash // proposer|epoch -> proposal hash (equivocation)
-	finalized   int
-	skipped     uint64
-	started     uint64
-	lastFinAt   int64
-	clockBad    bool
-	syncAt      int64
-	recvAt      int64 // last epoch-topic message from another peer
-	resubAt     int64 // last epoch-topic resubscribe
-	served      map[string]int64
-	frags       map[string]*fragBuf // incomplete fragmented messages (epoch_frag.go)
-	store       *os.File
+	// S8 re-gossip of own proposals and signatures (epoch_regossip.go).
+	own        map[uint64]*ownEpochMsgs
+	resent     int
+	holdRetry  map[uint64]bool
+	skipSent   map[uint64]bool
+	ownRepairs int
+	propBy     map[string]EpochHash // proposer|epoch -> proposal hash (equivocation)
+	finalized  int
+	skipped    uint64
+	started    uint64
+	lastFinAt  int64
+	clockBad   bool
+	syncAt     int64
+	recvAt     int64 // last epoch-topic message from another peer
+	resubAt    int64 // last epoch-topic resubscribe
+	served     map[string]int64
+	frags      map[string]*fragBuf // incomplete fragmented messages (epoch_frag.go)
+	store      *os.File
 	// S3 active set (epoch_active.go)
 	chainStart    int                     // index in records of the current chain's first record
 	lastCredits   map[string]*EpochCredit // known signatures of the last record
@@ -242,6 +250,9 @@ func NewEpochEngine(rel *Release, cfg EpochConfig, ps pubSub, priv libp2pcrypto.
 		heard:        make(map[string]int64),
 		omissions:    make(map[string]int),
 		ownRepairAt:  make(map[OrderID]int64),
+		own:          make(map[uint64]*ownEpochMsgs),
+		holdRetry:    make(map[uint64]bool),
+		skipSent:     make(map[uint64]bool),
 		propBy:       make(map[string]EpochHash),
 		served:       make(map[string]int64),
 		frags:        make(map[string]*fragBuf),
@@ -602,7 +613,7 @@ func (e *EpochEngine) handleMsg(ctx context.Context, from string, b []byte) {
 		}
 	case epMsgAtt:
 		if m.Att != nil {
-			e.handleAttestation(ctx, m.Att)
+			e.handleAttestationFrom(ctx, m.Att, !m.Resent)
 		}
 	case epMsgRec:
 		if m.Rec != nil {
@@ -674,7 +685,7 @@ func (e *EpochEngine) tick(ctx context.Context) {
 		// S4: a proposal we could not sign yet (bond not verified) is
 		// retried within its window.
 		for _, c := range e.cands[cur-1] {
-			if c.res != nil && (len(c.prop.Bonds) > 0 || len(c.prop.UserBonds) > 0 || len(c.prop.Trades) > 0 || e.latched) && nowMs <= e.p.EpochEnd(cur-1)+e.p.SignWindowMs {
+			if c.res != nil && (len(c.prop.Bonds) > 0 || len(c.prop.UserBonds) > 0 || len(c.prop.Trades) > 0 || e.latched || e.holdRetry[cur-1]) && nowMs <= e.p.EpochEnd(cur-1)+e.p.SignWindowMs {
 				if _, did := e.signed[cur-1]; !did {
 					retry = append(retry, c)
 				}
@@ -706,6 +717,7 @@ func (e *EpochEngine) tick(ctx context.Context) {
 		if cur > 0 {
 			e.maybePropose(ctx, cur-1, nowMs)
 		}
+		e.regossip(ctx, cur, nowMs)
 	}
 	e.mtx.Lock()
 	var lastEpoch uint64
@@ -782,7 +794,9 @@ func (e *EpochEngine) maybePropose(ctx context.Context, n uint64, nowMs int64) {
 	// unless we found that proposal invalid (S5: e.g. a forged proof), so a
 	// bad proposal cannot cost the network its epoch.
 	for _, c := range e.cands[n] {
-		if c.prop.Rank < rank && c.bad == "" {
+		// (S8: nor if it builds on another tip than ours, e.g. a proposer
+		// that missed the previous record.)
+		if c.prop.Rank < rank && c.bad == "" && c.prop.Prev == e.lastFP {
 			e.mtx.Unlock()
 			return
 		}
@@ -852,6 +866,7 @@ func (e *EpochEngine) maybePropose(ctx context.Context, n uint64, nowMs int64) {
 		e.log.Infof("Proposing epoch %d with %d bond switch signal(s) and %d bond admission(s)", n, len(prop.Signals), len(prop.Bonds))
 	}
 	e.log.Debugf("Proposing epoch %d (rank %d): %d orders, %d cancels, %d active", n, rank, len(prop.Orders), len(prop.Cancels), len(prop.Active))
+	e.noteOwnProp(prop)
 	e.send(ctx, &epochMsg{Type: epMsgProp, Prop: prop})
 	e.handleProposal(ctx, prop)
 }
@@ -975,7 +990,11 @@ func (e *EpochEngine) handleProposal(ctx context.Context, p *EpochProposal) {
 	}
 	e.computeLocked(c)
 	behind := c.res == nil && c.bad == ""
+	skipAtt := e.skipResendLocked(p)
 	e.mtx.Unlock()
+	if skipAtt != nil {
+		e.send(ctx, &epochMsg{Type: epMsgAtt, Att: skipAtt, Resent: true})
+	}
 	for _, o := range ownResend {
 		e.send(ctx, &epochMsg{Type: epMsgOrderRepair, Order: o})
 	}
@@ -1000,7 +1019,10 @@ const (
 func (e *EpochEngine) checkOmissionsLocked(p *EpochProposal) (resend []*MeshOrder) {
 	// S7: clients check too (they compare what validators propose with the
 	// orders they hold); only the counts differ in meaning, not the rule.
-	if p.Proposer == e.self {
+	// Only a proposal on our chain tip can be judged: if we are behind (or
+	// it is), our pool and seen set are not its (S8: a node behind after
+	// message loss flagged every proposal and re-sent its orders).
+	if p.Proposer == e.self || p.Prev != e.lastFP {
 		return nil
 	}
 	nowMs := e.nowMs()
@@ -1070,6 +1092,17 @@ func (e *EpochEngine) considerSign(ctx context.Context, c *epochCandidate) {
 		e.mtx.Unlock()
 		return
 	}
+	// S8: a proposal that skips an epoch we signed (and have no record of)
+	// waits a little: our re-sent signature of that epoch (skipResendLocked)
+	// and the other signers' may still finalize it, and then this proposal
+	// is on a stale tip. Signing it at once could leave a quorum-signed
+	// record of the skipped epoch that some peer accepted off the chain.
+	if j, ok := e.skippedSignedLocked(n); ok && !e.cfg.NoRegossip && nowMs < earliest+e.p.MaxClockSkewMs+e.p.FallbackMs/2 {
+		e.holdRetry[n] = true
+		e.mtx.Unlock()
+		e.log.Debugf("Epoch %d proposal from %s skips epoch %d we signed: waiting for its signatures", n, e.rel.ValidatorName(c.prop.Proposer), j)
+		return
+	}
 	if !e.isMemberLocked(n) {
 		e.mtx.Unlock()
 		return
@@ -1118,6 +1151,7 @@ func (e *EpochEngine) considerSign(ctx context.Context, c *epochCandidate) {
 		e.log.Errorf("Error signing attestation: %v", err)
 		return
 	}
+	e.noteOwnAtt(a)
 	e.send(ctx, &epochMsg{Type: epMsgAtt, Att: a})
 	if alt != nil {
 		e.send(ctx, &epochMsg{Type: epMsgAtt, Att: alt})
@@ -1126,13 +1160,19 @@ func (e *EpochEngine) considerSign(ctx context.Context, c *epochCandidate) {
 }
 
 func (e *EpochEngine) handleAttestation(ctx context.Context, a *EpochAttestation) {
+	e.handleAttestationFrom(ctx, a, true)
+}
+
+// handleAttestationFrom handles a signature; clock: its stamp may be a clock
+// sample (not for S8 re-sends, whose stamp is older than the send).
+func (e *EpochEngine) handleAttestationFrom(ctx context.Context, a *EpochAttestation, clock bool) {
 	e.mtx.Lock()
 	member := e.valsLocked(a.Epoch).IsValidator(a.Validator) || (e.last != nil && a.Epoch == e.last.Epoch && e.valsLocked(e.last.Epoch).IsValidator(a.Validator))
 	e.mtx.Unlock()
 	if !member || a.verify() != nil {
 		return
 	}
-	if a.Validator != e.self {
+	if a.Validator != e.self && clock {
 		e.heardFrom(a.Validator, a.Stamp)
 	}
 	e.mtx.Lock()
@@ -1608,6 +1648,7 @@ type EpochStatus struct {
 	SignHold       string                  `json:"signHold,omitempty"` // S5 why we do not sign now
 	BookSuspects   []string                `json:"bookSuspects"`       // S7 book cross-check suspects
 	StaleStamps    int                     `json:"staleStamps"`        // S8 replayed/old heartbeat or attestation stamps ignored
+	Resent         int                     `json:"resent"`             // S8 own proposals/signatures re-sent (re-gossip)
 }
 
 // Status returns the engine status.
@@ -1683,6 +1724,7 @@ func (e *EpochEngine) Status() *EpochStatus {
 	st.CanFinalize = thresholdMet(&e.p, st.ActivePower, st.ActivePower, st.BondedPower)
 	st.Flags = append([]*EpochFlag(nil), e.flags...)
 	st.StaleStamps = e.replays
+	st.Resent = e.resent
 	st.BookSuspects = []string{}
 	for id, bp := range e.book.peers {
 		if bp.suspect {

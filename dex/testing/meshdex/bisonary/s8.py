@@ -49,7 +49,7 @@ Usage: ./s8.py [phase ...]
 import os, sys, time, json, signal, subprocess, threading, random
 HERE = os.path.dirname(os.path.abspath(__file__))
 os.environ.setdefault("EVID", "/workspace/tatanka-dev/evidence/s8-resilience")
-os.environ.setdefault("BISONW", "/workspace/tatanka-dev/bin/bisonw-bisonary-s8")
+os.environ.setdefault("BISONW", "/workspace/tatanka-dev/bin/bisonw-bisonary-s8c")
 os.environ.setdefault("RUN", "/workspace/tatanka-dev/run/s012")
 sys.path.insert(0, HERE)
 import harness as h
@@ -422,6 +422,7 @@ def phase_loss(net):
     res["loss10Unscaled"] = window(net, net["v1"], 60, "loss 10% unscaled delay")
     res["faultStats"] = {n.name: n.dbgapi("/mesh/faults") for n in peers(net)}
     res["suspectsDuringLoss"] = suspects(net)
+    res["resentPerValidator"] = {v.name: v.epochs().get("resent") for v in net.vals}
     clear_faults(net)
     res["secondsToRecover"] = wait_ok(peers(net), 120, "recovery after loss")
     th.join(900)

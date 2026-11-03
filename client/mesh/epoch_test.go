@@ -36,6 +36,10 @@ type epochNet struct {
 	queue []epochNetMsg
 	down  map[peer.ID]bool
 	sent  int
+	// S8: each delivery is dropped with probability dropPct % (lossRng).
+	dropPct int
+	lossRng *mrand.Rand
+	dropped int
 }
 
 type epochNetMsg struct {
@@ -126,6 +130,10 @@ func (n *epochNet) pump() {
 			// Like the mesh: nothing is delivered to the sender's peer ID,
 			// so a twin with the same key never hears the other directly.
 			if rid != from && !n.down[id] {
+				if n.dropPct > 0 && n.lossRng.Intn(100) < n.dropPct {
+					n.dropped++
+					continue
+				}
 				hs = append(hs, n.subs[m.topic][id])
 			}
 		}
@@ -1002,4 +1010,60 @@ func TestEpochOwnOrderRepair(t *testing.T) {
 		t.Fatal("no own-order repair counted")
 	}
 	t.Logf("own-order repairs sent: %d", n)
+}
+
+// TestEpochRegossipLoss (S8): with 10 % and 20 % of deliveries dropped,
+// validators that re-send their own proposal and signature (see
+// epoch_regossip.go) finalize far more epochs than without the re-sends
+// (10 %: >= 85 %, typically 95-99 %), and every node, observers included, ends on the same
+// chain.
+func TestEpochRegossipLoss(t *testing.T) {
+	run := func(drop int, regossip bool) (ratio float64, resent int) {
+		s := newEpochSim(t, 4, 2, DefaultEpochParams)
+		for _, n := range s.all() {
+			n.e.cfg.NoRegossip = !regossip
+		}
+		s.epochs(3)
+		s.net.mtx.Lock()
+		s.net.dropPct, s.net.lossRng = drop, mrand.New(mrand.NewSource(int64(drop)))
+		s.net.mtx.Unlock()
+		from := lastEpoch(s.vals[0].e)
+		const n = 150
+		for i := 0; i < n; i++ {
+			s.randomOrders(s.rng.Intn(3))
+			s.epochs(1)
+		}
+		s.net.mtx.Lock()
+		s.net.dropPct = 0
+		s.net.mtx.Unlock()
+		to := from + n
+		var fin int
+		for _, r := range s.vals[0].e.Records(from, 1e6) {
+			if r.Epoch <= to {
+				fin++
+			}
+		}
+		// Sync up without loss. (Without re-gossip an observer can be left
+		// on an orphaned record: a quorum it collected that no validator
+		// did; the re-sends prevent that, so agreement is checked with them.)
+		s.epochs(6)
+		if regossip {
+			s.checkAgreement(s.all())
+		}
+		for _, v := range s.vals {
+			resent += v.e.Status().Resent
+		}
+		return float64(fin) / n, resent
+	}
+	for _, drop := range []int{10, 20} {
+		off, _ := run(drop, false)
+		on, resent := run(drop, true)
+		t.Logf("%d %% loss: finalized %.2f without re-gossip, %.2f with (%d re-sends)", drop, off, on, resent)
+		if on < off || resent == 0 {
+			t.Fatalf("%d %% loss: re-gossip did not help (%.2f vs %.2f)", drop, on, off)
+		}
+		if drop == 10 && on < 0.85 {
+			t.Fatalf("10 %% loss: only %.2f finalized with re-gossip", on)
+		}
+	}
 }

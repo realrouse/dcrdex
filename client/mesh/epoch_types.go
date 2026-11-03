@@ -444,6 +444,9 @@ type epochMsg struct {
 	UBond    *UserBond          `json:"ubond,omitempty"` // S6
 	Trade    *TradeProof        `json:"trade,omitempty"` // S7
 	Book     *BookDigest        `json:"book,omitempty"`  // S7 book cross-check
+	// Resent marks a validator's re-send of its own proposal or signature
+	// (S8 re-gossip): not a clock sample.
+	Resent bool `json:"resent,omitempty"`
 }
 
 const (
