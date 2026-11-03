@@ -311,9 +311,11 @@ func TestThreshold(t *testing.T) {
 		ok                     bool
 	}{
 		{4, 4, 4, true}, {3, 4, 4, true}, {2, 4, 4, false}, // 2/3 of active
-		{3, 3, 4, true}, {2, 3, 4, false}, // signed must be > half bonded
-		{2, 2, 4, false}, // active not > half bonded
-		{7, 10, 10, true}, {6, 10, 10, false}, {6, 9, 10, true}, {5, 7, 10, false},
+		{3, 3, 4, true}, {2, 3, 4, true}, {1, 3, 4, false}, // S3: 2/3 of the active set
+		{2, 2, 4, true}, {1, 2, 4, false}, // active power = half of bonded: floor met
+		{1, 1, 4, false}, {0, 0, 4, false}, // active power below the floor
+		{7, 10, 10, true}, {6, 10, 10, false}, {6, 9, 10, true}, {5, 7, 10, true}, {4, 7, 10, false},
+		{3, 4, 10, false}, // below the floor even if all active sign
 	} {
 		if got := thresholdMet(&p, tc.signed, tc.active, tc.bonded); got != tc.ok {
 			t.Errorf("signed %d active %d bonded %d: got %v", tc.signed, tc.active, tc.bonded, got)
@@ -479,7 +481,7 @@ func TestEpochKillValidators(t *testing.T) {
 	s := newEpochSim(t, 4, 2, DefaultEpochParams)
 	s.epochs(3)
 	s.net.setDown(s.vals[3].id, true)
-	s.epochs(4) // the dead validator drops out of the active set
+	s.epochs(4) // S3: still in the active set (24 h window); fallback proposers cover its turns
 	before := lastEpoch(s.vals[0].e)
 	s.order(s.traders[0], true, 1, 100_000)
 	s.order(s.traders[1], false, 1, 100_000)
@@ -488,7 +490,7 @@ func TestEpochKillValidators(t *testing.T) {
 	if lastEpoch(s.vals[0].e) < before+7 {
 		t.Fatalf("1/4 down: only finalized to %d from %d (status %+v)", lastEpoch(s.vals[0].e), before, st)
 	}
-	if st.ActivePower != 3 {
+	if st.ActivePower != 4 {
 		t.Fatalf("active power %d", st.ActivePower)
 	}
 	matched := 0
@@ -717,6 +719,7 @@ type s2Node struct {
 // epoch; a forged single-validator record and a legacy proposal are rejected.
 func TestEpochS2Negotiation(t *testing.T) {
 	m := newFakeMesh()
+	m.asyncInbox = true
 	clock := &fakeClock{t: time.UnixMilli(1_800_000_000_000)}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -798,6 +801,9 @@ func TestEpochS2Negotiation(t *testing.T) {
 				agreed = r
 			}
 		}
+		// Keep the simulated clock moving: a maker that saw the record
+		// late catches up by sync, which is paced by the engine clock.
+		step(100 * time.Millisecond)
 		time.Sleep(10 * time.Millisecond)
 	}
 	if agreed == nil {

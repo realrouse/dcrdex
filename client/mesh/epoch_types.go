@@ -24,7 +24,7 @@ type EpochHash = OrderID
 const EpochTopic = "epochs.tatanka-dex"
 
 const (
-	epochPropDomain = "tatanka-epoch-prop-v1"
+	epochPropDomain = "tatanka-epoch-prop-v2" // v2 (S3): proposals carry Credits
 	epochFPDomain   = "tatanka-epoch-fp-v1"
 	epochAttDomain  = "tatanka-epoch-att-v1"
 	epochHBDomain   = "tatanka-epoch-hb-v1"
@@ -37,19 +37,40 @@ func GenesisHash(r *Release) EpochHash {
 }
 
 // EpochProposal is a proposer's list of orders and cancels for an epoch.
-// Active is the validators the proposer has heard from recently; the
-// finalization threshold is relative to their power.
+// Active is the epoch's active validator set (S3, epoch_active.go): every
+// peer computes it from the signer credits in the finalized chain and
+// rejects a proposal whose list differs. The finalization threshold is
+// relative to the active validators' power. Credits are the validator
+// signatures of the previous record (Prev) that the proposer has seen,
+// including late ones: once finalized they are the canonical signer list of
+// that record for the active-set computation.
 type EpochProposal struct {
-	Epoch    uint64        `json:"epoch"`
-	Prev     EpochHash     `json:"prev"`
-	Proposer string        `json:"proposer"`
-	Rank     int           `json:"rank"`
-	Active   []string      `json:"active"`
-	Orders   []*MeshOrder  `json:"orders"`
-	Cancels  []*MeshCancel `json:"cancels"`
-	Stamp    int64         `json:"stamp"`
-	PubKey   []byte        `json:"pubkey"`
-	Sig      []byte        `json:"sig"`
+	Epoch    uint64         `json:"epoch"`
+	Prev     EpochHash      `json:"prev"`
+	Proposer string         `json:"proposer"`
+	Rank     int            `json:"rank"`
+	Active   []string       `json:"active"`
+	Credits  []*EpochCredit `json:"credits,omitempty"`
+	Orders   []*MeshOrder   `json:"orders"`
+	Cancels  []*MeshCancel  `json:"cancels"`
+	Stamp    int64          `json:"stamp"`
+	PubKey   []byte         `json:"pubkey"`
+	Sig      []byte         `json:"sig"`
+}
+
+// EpochCredit is a validator's attestation of the previous record (the
+// epoch and fingerprint are the proposal's Prev record, so they are not
+// repeated). The public key comes from the validator's peer ID.
+type EpochCredit struct {
+	Validator string `json:"v"`
+	Stamp     int64  `json:"t"`
+	Sig       []byte `json:"s"`
+}
+
+// verify checks the credit as an attestation of (epoch, fp).
+func (c *EpochCredit) verify(epoch uint64, fp EpochHash) error {
+	a := &EpochAttestation{Epoch: epoch, Fingerprint: fp, Stamp: c.Stamp}
+	return verifyByID(c.Validator, a.msg(), c.Sig)
 }
 
 // Hash commits to everything but the signature.
@@ -63,6 +84,13 @@ func (p *EpochProposal) Hash() EpochHash {
 	_ = binary.Write(b, binary.BigEndian, uint16(len(p.Active)))
 	for _, a := range p.Active {
 		writeStr(b, a)
+	}
+	_ = binary.Write(b, binary.BigEndian, uint16(len(p.Credits)))
+	for _, c := range p.Credits {
+		writeStr(b, c.Validator)
+		_ = binary.Write(b, binary.BigEndian, c.Stamp)
+		_ = binary.Write(b, binary.BigEndian, uint16(len(c.Sig)))
+		b.Write(c.Sig)
 	}
 	_ = binary.Write(b, binary.BigEndian, uint32(len(p.Orders)))
 	for _, o := range p.Orders {
@@ -88,16 +116,27 @@ func (p *EpochProposal) sign(priv libp2pcrypto.PrivKey) error {
 	return err
 }
 
-// verify checks the signature, the proposer's rank and the active list.
+// verify checks the signature, the form of the active list and credits, and
+// the proposer's rank in the active list. Whether Active is the epoch's
+// active set and the credits are valid signatures of Prev needs the chain:
+// the engine checks that (checkActiveSetLocked).
 func (p *EpochProposal) verify(r *Release) error {
 	if !r.IsValidator(p.Proposer) {
 		return errors.New("proposer is not a validator")
 	}
-	if r.ProposerRank(p.Epoch, p.Proposer) != p.Rank {
-		return fmt.Errorf("wrong proposer rank %d", p.Rank)
-	}
 	if err := checkActive(r, p.Active, p.Proposer); err != nil {
 		return err
+	}
+	if rank := ProposerRankIn(p.Active, p.Epoch, p.Proposer); rank != p.Rank {
+		return fmt.Errorf("wrong proposer rank %d (want %d)", p.Rank, rank)
+	}
+	for i, c := range p.Credits {
+		if !r.IsValidator(c.Validator) {
+			return fmt.Errorf("credit for non-validator %s", c.Validator)
+		}
+		if i > 0 && p.Credits[i-1].Validator >= c.Validator {
+			return errors.New("credits not sorted or duplicated")
+		}
 	}
 	h := p.Hash()
 	return verifySig(p.Proposer, p.PubKey, h[:], p.Sig)
@@ -209,10 +248,14 @@ type EpochRecord struct {
 	Proposal     *EpochProposal      `json:"proposal,omitempty"`
 }
 
-// threshold reports whether signed power meets the quorum and floor rules.
+// thresholdMet reports whether signed power meets the quorum of the active
+// set's power and the active set meets the floor of all bonded power (PLAN
+// S1/S3: finalize once >= 2/3 of active power signs AND active power >= 1/2
+// of bonded power). The active set is deterministic (S3), so every peer
+// counts the quorum against the same set.
 func thresholdMet(p *EpochParams, signed, active, bonded uint64) bool {
 	s, a, b := int64(signed), int64(active), int64(bonded)
-	return s*p.QuorumDen >= p.QuorumNum*a && a*p.FloorDen > p.FloorNum*b && s*p.FloorDen > p.FloorNum*b
+	return a > 0 && s*p.QuorumDen >= p.QuorumNum*a && a*p.FloorDen >= p.FloorNum*b
 }
 
 // VerifyRecord checks a record's fingerprint and signatures against the

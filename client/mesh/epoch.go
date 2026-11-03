@@ -60,6 +60,7 @@ type epochCandidate struct {
 	hash EpochHash
 	recv int64
 	res  *epochResult // nil until Prev is our last finalized fingerprint
+	bad  string       // S3: wrong active set or bad credits (never signed)
 }
 
 // EpochFinal is passed to the finalization callback.
@@ -136,6 +137,11 @@ type EpochEngine struct {
 	served    map[string]int64
 	frags     map[string]*fragBuf // incomplete fragmented messages (epoch_frag.go)
 	store     *os.File
+	// S3 active set (epoch_active.go)
+	chainStart    int                     // index in records of the current chain's first record
+	lastCredits   map[string]*EpochCredit // known signatures of the last record
+	activeCache   *ActiveSet
+	activeCacheFP EpochHash
 	// debug (simnet adversary tests)
 	omitOwner string
 }
@@ -154,21 +160,22 @@ func NewEpochEngine(rel *Release, cfg EpochConfig, ps pubSub, priv libp2pcrypto.
 	}
 	e := &EpochEngine{
 		rel: rel, p: rel.Params, cfg: cfg, ps: ps, priv: priv, self: pid.String(), log: log, now: now,
-		genesis:   GenesisHash(rel),
-		clock:     newClockEstimator(),
-		state:     newEpochState(),
-		byEpoch:   make(map[uint64]*EpochRecord),
-		pool:      make(map[OrderID]*poolOrder),
-		cpool:     make(map[OrderID]*poolCancel),
-		cands:     make(map[uint64]map[EpochHash]*epochCandidate),
-		atts:      make(map[uint64]map[EpochHash]map[string]*EpochAttestation),
-		signed:    make(map[uint64]EpochHash),
-		proposed:  make(map[uint64]bool),
-		heard:     make(map[string]int64),
-		omissions: make(map[string]int),
-		propBy:    make(map[string]EpochHash),
-		served:    make(map[string]int64),
-		frags:     make(map[string]*fragBuf),
+		genesis:     GenesisHash(rel),
+		clock:       newClockEstimator(),
+		state:       newEpochState(),
+		byEpoch:     make(map[uint64]*EpochRecord),
+		pool:        make(map[OrderID]*poolOrder),
+		cpool:       make(map[OrderID]*poolCancel),
+		cands:       make(map[uint64]map[EpochHash]*epochCandidate),
+		atts:        make(map[uint64]map[EpochHash]map[string]*EpochAttestation),
+		signed:      make(map[uint64]EpochHash),
+		proposed:    make(map[uint64]bool),
+		heard:       make(map[string]int64),
+		omissions:   make(map[string]int),
+		propBy:      make(map[string]EpochHash),
+		served:      make(map[string]int64),
+		frags:       make(map[string]*fragBuf),
+		lastCredits: make(map[string]*EpochCredit),
 	}
 	e.lastFP = e.genesis
 	e.signer = cfg.Validator && rel.IsValidator(e.self)
@@ -480,18 +487,6 @@ func (e *EpochEngine) tick(ctx context.Context) {
 	}
 }
 
-// activeLocked is the validators heard from recently plus ourselves.
-func (e *EpochEngine) activeLocked(nowMs int64) []string {
-	var out []string
-	for _, v := range e.rel.ValidatorIDs() {
-		if v == e.self || nowMs-e.heard[v] <= e.p.ActiveEpochs*e.p.EpochMs && e.heard[v] > 0 {
-			out = append(out, v)
-		}
-	}
-	sort.Strings(out)
-	return out
-}
-
 func (e *EpochEngine) lastEpochLocked() (uint64, bool) {
 	if e.last == nil {
 		return 0, false
@@ -500,13 +495,18 @@ func (e *EpochEngine) lastEpochLocked() (uint64, bool) {
 }
 
 func (e *EpochEngine) maybePropose(ctx context.Context, n uint64, nowMs int64) {
-	rank := e.rel.ProposerRank(n, e.self)
 	end := e.p.EpochEnd(n)
-	start := end + e.p.ProposeDelayMs + int64(rank)*e.p.FallbackMs
-	if nowMs < start || nowMs > end+e.p.SignWindowMs-e.p.EpochMs/50 {
+	if nowMs < end+e.p.ProposeDelayMs || nowMs > end+e.p.SignWindowMs-e.p.EpochMs/50 {
 		return
 	}
 	e.mtx.Lock()
+	// S3: the proposer rotates over the epoch's active set.
+	active := e.activeForLocked(n)
+	rank := ProposerRankIn(active.Active, n, e.self)
+	if rank < 0 || nowMs < end+e.p.ProposeDelayMs+int64(rank)*e.p.FallbackMs {
+		e.mtx.Unlock()
+		return
+	}
 	if le, ok := e.lastEpochLocked(); e.proposed[n] || (ok && n <= le) {
 		e.mtx.Unlock()
 		return
@@ -528,7 +528,12 @@ func (e *EpochEngine) maybePropose(ctx context.Context, n uint64, nowMs int64) {
 		return
 	}
 	e.mtx.Lock()
-	prop := &EpochProposal{Epoch: n, Prev: e.lastFP, Rank: rank, Active: e.activeLocked(nowMs), Stamp: nowMs}
+	active = e.activeForLocked(n) // our chain may have moved while unlocked
+	if rank = ProposerRankIn(active.Active, n, e.self); rank < 0 {
+		e.mtx.Unlock()
+		return
+	}
+	prop := &EpochProposal{Epoch: n, Prev: e.lastFP, Rank: rank, Active: active.Active, Credits: e.creditsLocked(), Stamp: nowMs}
 	var ords []*poolOrder
 	for _, po := range e.pool {
 		if _, seen := e.state.seen[po.id]; seen || po.ord.Stamp >= end || po.ord.Expiry <= end {
@@ -585,7 +590,12 @@ func (e *EpochEngine) addFlagLocked(f *EpochFlag) {
 
 // computeLocked applies a candidate to a copy of the finalized state.
 func (e *EpochEngine) computeLocked(c *epochCandidate) {
-	if c.res != nil || c.prop.Prev != e.lastFP {
+	if c.res != nil || c.bad != "" || c.prop.Prev != e.lastFP {
+		return
+	}
+	if err := e.checkActiveSetLocked(c.prop); err != nil {
+		c.bad = err.Error()
+		e.addFlagLocked(&EpochFlag{Epoch: c.prop.Epoch, Kind: "active-set", Peer: c.prop.Proposer, Detail: c.bad})
 		return
 	}
 	st := e.state.clone()
@@ -635,9 +645,10 @@ func (e *EpochEngine) handleProposal(ctx context.Context, p *EpochProposal) {
 			e.heard[p.Proposer] = nowMs
 		}
 		e.checkOmissionsLocked(p)
+		e.checkCreditsLocked(p)
 	}
 	e.computeLocked(c)
-	behind := c.res == nil
+	behind := c.res == nil && c.bad == ""
 	e.mtx.Unlock()
 	if behind {
 		go e.requestSync(ctx, false)
@@ -696,14 +707,9 @@ func (e *EpochEngine) considerSign(ctx context.Context, c *epochCandidate) {
 		e.mtx.Unlock()
 		return
 	}
-	inActive := false
-	for _, a := range c.prop.Active {
-		inActive = inActive || a == e.self
-	}
-	if !inActive {
-		e.mtx.Unlock()
-		return
-	}
+	// S3: we sign even if we are not in the active set: the signature does
+	// not count for the quorum, but it is credited, so we rejoin the active
+	// set after signing again for long enough.
 	e.mtx.Unlock()
 	if !e.clockOK() {
 		return
@@ -733,6 +739,7 @@ func (e *EpochEngine) handleAttestation(ctx context.Context, a *EpochAttestation
 	}
 	e.mtx.Lock()
 	if le, ok := e.lastEpochLocked(); ok && a.Epoch <= le {
+		e.addCreditLocked(a) // a late signature of our last record
 		e.mtx.Unlock()
 		return
 	}
@@ -807,8 +814,12 @@ func (e *EpochEngine) commitLocked(rec *EpochRecord, res *epochResult, synced bo
 		old := e.records[0]
 		delete(e.byEpoch, old.Epoch)
 		e.records = e.records[1:]
+		if e.chainStart > 0 {
+			e.chainStart--
+		}
 	}
 	e.byEpoch[rec.Epoch] = rec
+	e.resetCreditsLocked(rec)
 	for _, o := range rec.Proposal.Orders {
 		delete(e.pool, o.ID())
 	}
@@ -904,6 +915,7 @@ func (e *EpochEngine) handleRecord(ctx context.Context, rec *EpochRecord, synced
 		if rec.Prev == e.genesis && ok {
 			e.log.Warnf("Validators restarted the epoch chain at epoch %d (was at %d); resetting the epoch state", rec.Epoch, le)
 			e.state, e.last, e.lastFP = newEpochState(), nil, e.genesis
+			e.chainStart = len(e.records)
 		} else {
 			e.mtx.Unlock()
 			go e.requestSync(ctx, false)
@@ -912,6 +924,10 @@ func (e *EpochEngine) handleRecord(ctx context.Context, rec *EpochRecord, synced
 	}
 	c := &epochCandidate{prop: rec.Proposal, hash: rec.ProposalHash, recv: e.nowMs()}
 	e.computeLocked(c)
+	if c.res == nil {
+		e.mtx.Unlock()
+		return // flagged by computeLocked (S3 active set or credits)
+	}
 	if c.res.fp != rec.Fingerprint {
 		e.addFlagLocked(&EpochFlag{Epoch: rec.Epoch, Kind: "divergence", Peer: rec.Proposer, Detail: "our matching result differs from the signed record"})
 		e.mtx.Unlock()
@@ -980,6 +996,7 @@ func (e *EpochEngine) loadStore() error {
 				continue
 			}
 			e.state, e.last, e.lastFP = newEpochState(), nil, e.genesis // chain restart
+			e.chainStart = len(e.records)
 		}
 		c := &epochCandidate{prop: rec.Proposal, hash: rec.ProposalHash}
 		e.computeLocked(c)
@@ -990,6 +1007,7 @@ func (e *EpochEngine) loadStore() error {
 		e.state, e.last, e.lastFP = c.res.state, &r, r.Fingerprint
 		e.records = append(e.records, &r)
 		e.byEpoch[r.Epoch] = &r
+		e.resetCreditsLocked(&r)
 		n++
 	}
 	e.store = f
@@ -1076,6 +1094,19 @@ type EpochValidatorStatus struct {
 	Self      bool   `json:"self"`
 	LastSeen  int64  `json:"lastSeen,omitempty"`
 	Omissions int    `json:"omissions"`
+	// S3: signatures credited in the active-set window and their share.
+	Credits   int     `json:"credits"`
+	CreditPct float64 `json:"creditPct"`
+}
+
+// ActiveSetInfo is how the current active set was derived (S3).
+type ActiveSetInfo struct {
+	Epoch      uint64 `json:"epoch"`
+	AsOf       uint64 `json:"asOf"`
+	WindowFrom uint64 `json:"windowFrom"`
+	WindowTo   uint64 `json:"windowTo"`
+	Sample     int    `json:"sample"`
+	Fallback   bool   `json:"fallback"`
 }
 
 // EpochStatus is the engine status (debug API and Mesh page).
@@ -1105,6 +1136,7 @@ type EpochStatus struct {
 	ActivePower    uint64                  `json:"activePower"`
 	BondedPower    uint64                  `json:"bondedPower"`
 	CanFinalize    bool                    `json:"canFinalize"`
+	ActiveSet      *ActiveSetInfo          `json:"activeSet"`
 	Validators     []*EpochValidatorStatus `json:"validators"`
 	Flags          []*EpochFlag            `json:"flags"`
 	ProtocolVer    uint32                  `json:"protocol"`
@@ -1135,16 +1167,19 @@ func (e *EpochEngine) Status() *EpochStatus {
 			st.Unfinalized = cur - e.last.Epoch - 1
 		}
 	}
+	as := e.activeForLocked(st.CurrentEpoch)
+	st.ActiveSet = &ActiveSetInfo{Epoch: as.Epoch, AsOf: as.AsOf, WindowFrom: as.WindowFrom, WindowTo: as.WindowTo, Sample: as.Sample, Fallback: as.Fallback}
 	active := make(map[string]bool)
-	for _, a := range e.activeLocked(nowMs) {
+	for _, a := range as.Active {
 		active[a] = true
-	}
-	if !e.signer {
-		delete(active, e.self)
 	}
 	for _, v := range e.rel.Validators {
 		vs := &EpochValidatorStatus{PeerID: v.PeerID, Name: e.rel.ValidatorName(v.PeerID), Bond: v.Bond,
-			Active: active[v.PeerID], Self: v.PeerID == e.self, LastSeen: e.heard[v.PeerID], Omissions: e.omissions[v.PeerID]}
+			Active: active[v.PeerID], Self: v.PeerID == e.self, LastSeen: e.heard[v.PeerID], Omissions: e.omissions[v.PeerID],
+			Credits: as.Credits[v.PeerID]}
+		if as.Sample > 0 {
+			vs.CreditPct = float64(as.Credits[v.PeerID]) * 100 / float64(as.Sample)
+		}
 		if vs.Active {
 			st.ActivePower += v.Bond
 		}
@@ -1165,4 +1200,31 @@ func equalStrings(a, b []string) bool {
 		}
 	}
 	return true
+}
+
+// resetCreditsLocked starts the credit list of a new last record with its
+// valid signatures.
+func (e *EpochEngine) resetCreditsLocked(rec *EpochRecord) {
+	e.lastCredits = make(map[string]*EpochCredit, len(rec.Sigs))
+	for _, a := range rec.Sigs {
+		e.addCreditLocked(a)
+	}
+}
+
+// checkCreditsLocked flags a proposal that leaves out our own signature of
+// its previous record (S3: credits decide the active set).
+func (e *EpochEngine) checkCreditsLocked(p *EpochProposal) {
+	if !e.signer || p.Proposer == e.self || e.last == nil || p.Prev != e.lastFP {
+		return
+	}
+	if fp, did := e.signed[e.last.Epoch]; !did || fp != e.lastFP {
+		return
+	}
+	for _, c := range p.Credits {
+		if c.Validator == e.self {
+			return
+		}
+	}
+	e.addFlagLocked(&EpochFlag{Epoch: p.Epoch, Kind: "credit-omission", Peer: p.Proposer,
+		Detail: fmt.Sprintf("proposal leaves out our signature of epoch %d", e.last.Epoch)})
 }

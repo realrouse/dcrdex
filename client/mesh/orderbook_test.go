@@ -262,6 +262,10 @@ type fakeMesh struct {
 	drop bool
 	// dropFn, if set, drops matching broadcasts.
 	dropFn func(topic string, from peer.ID) bool
+	// asyncInbox delivers inbox messages on their own goroutine, like the
+	// real mesh: a handler that waits (S2 AwaitRecord) must not block the
+	// sender's stack, which may be delivering the record it waits for.
+	asyncInbox bool
 }
 
 func newFakeMesh() *fakeMesh {
@@ -294,8 +298,13 @@ func (c *fakeClient) Broadcast(_ context.Context, topic string, data []byte) err
 	for _, h := range c.m.subs[topic] {
 		hs = append(hs, h)
 	}
+	async := c.m.asyncInbox && strings.HasPrefix(topic, InboxTopicPrefix)
 	c.m.mtx.Unlock()
 	for _, h := range hs {
+		if async {
+			go h(mc.TopicEvent{Type: mc.TopicEventData, Data: data, Peer: c.id})
+			continue
+		}
 		h(mc.TopicEvent{Type: mc.TopicEventData, Data: data, Peer: c.id})
 	}
 	return nil

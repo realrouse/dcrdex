@@ -49,17 +49,26 @@ type EpochParams struct {
 	// hold at least QuorumNum/QuorumDen of the active validators' power.
 	QuorumNum int64 `json:"quorumNum"`
 	QuorumDen int64 `json:"quorumDen"`
-	// FloorNum/FloorDen: both the active power and the signed power must be
-	// strictly greater than FloorNum/FloorDen of the total bonded power.
+	// FloorNum/FloorDen: no finalization unless the active set's power is at
+	// least FloorNum/FloorDen of the total bonded power.
 	FloorNum int64 `json:"floorNum"`
 	FloorDen int64 `json:"floorDen"`
 	// MaxClockSkewMs: a node whose clock differs from the mesh by more than
 	// this warns and stops signing (orders, proposals and attestations).
 	// Order stamps must also be within this of the receiver's clock.
 	MaxClockSkewMs int64 `json:"maxClockSkewMs"`
-	// ActiveEpochs: a validator is active if heard from within this many
-	// epochs.
+	// ActiveEpochs: a validator's messages within this many epochs count
+	// for the clock-skew estimate and the "last seen" status.
 	ActiveEpochs int64 `json:"activeEpochs"`
+	// S3 active set: a validator is active for epoch N if it signed (is
+	// credited in) at least ActivePct % of the finalized epochs in the
+	// window of ActiveWindowEpochs epochs ending ActiveLagEpochs before N.
+	// With fewer than ActiveMinEpochs finalized epochs in the window (new
+	// chain, or a long halt) every release validator is active.
+	ActiveWindowEpochs int64 `json:"activeWindowEpochs"`
+	ActiveLagEpochs    int64 `json:"activeLagEpochs"`
+	ActivePct          int64 `json:"activePct"`
+	ActiveMinEpochs    int64 `json:"activeMinEpochs"`
 	// OmissionGraceMs: an order received this long before the epoch end
 	// that the proposal leaves out is flagged as a proposer omission.
 	OmissionGraceMs int64 `json:"omissionGraceMs"`
@@ -82,6 +91,11 @@ var DefaultEpochParams = EpochParams{
 	ActiveEpochs:      3,
 	OmissionGraceMs:   1_500,
 	MaxOrdersPerEpoch: 500,
+	// 24 h of 10 s epochs, ending 100 epochs back; 80 %.
+	ActiveWindowEpochs: 8_640,
+	ActiveLagEpochs:    100,
+	ActivePct:          80,
+	ActiveMinEpochs:    864,
 }
 
 // Validate checks the parameters for consistency.
@@ -107,6 +121,14 @@ func (p *EpochParams) Validate() error {
 		return errors.New("omissionGraceMs must not be negative")
 	case p.MaxOrdersPerEpoch <= 0:
 		return errors.New("maxOrdersPerEpoch must be positive")
+	case p.ActiveWindowEpochs <= 0 || p.ActiveWindowEpochs > 100_000:
+		return errors.New("activeWindowEpochs must be in (0, 100000]")
+	case p.ActiveLagEpochs < 1:
+		return errors.New("activeLagEpochs must be at least 1")
+	case p.ActivePct <= 0 || p.ActivePct > 100:
+		return errors.New("activePct must be in (0, 100]")
+	case p.ActiveMinEpochs <= 0 || p.ActiveMinEpochs > p.ActiveWindowEpochs:
+		return errors.New("activeMinEpochs must be in (0, activeWindowEpochs]")
 	}
 	return nil
 }
@@ -291,6 +313,19 @@ func (r *Release) Proposer(n uint64, rank int) string {
 func (r *Release) ProposerRank(n uint64, id string) int {
 	k := len(r.ids)
 	for i, v := range r.ids {
+		if v == id {
+			return ((i-int(n%uint64(k)))%k + k) % k
+		}
+	}
+	return -1
+}
+
+// ProposerRankIn is id's proposer rank for epoch n in the sorted active
+// set (0: scheduled, 1..: fallbacks), or -1 if id is not in it. PLAN S1:
+// proposer = active set[N mod n].
+func ProposerRankIn(active []string, n uint64, id string) int {
+	k := len(active)
+	for i, v := range active {
 		if v == id {
 			return ((i-int(n%uint64(k)))%k + k) % k
 		}

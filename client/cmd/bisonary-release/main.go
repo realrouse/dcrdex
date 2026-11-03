@@ -80,10 +80,14 @@ func main() {
 		proposeMs := fs.Int64("proposems", d.ProposeDelayMs, "proposal delay ms")
 		fallbackMs := fs.Int64("fallbackms", d.FallbackMs, "fallback proposer delay ms")
 		quorum := fs.String("quorum", fmt.Sprintf("%d/%d", d.QuorumNum, d.QuorumDen), "quorum of active power")
-		floor := fs.String("floor", fmt.Sprintf("%d/%d", d.FloorNum, d.FloorDen), "floor of bonded power (strictly greater)")
+		floor := fs.String("floor", fmt.Sprintf("%d/%d", d.FloorNum, d.FloorDen), "floor: active power must be at least this share of bonded power")
 		clockMs := fs.Int64("clockms", d.MaxClockSkewMs, "max clock skew ms")
 		activeEpochs := fs.Int64("activeepochs", d.ActiveEpochs, "epochs a validator stays active without messages")
 		omissionMs := fs.Int64("omissionms", d.OmissionGraceMs, "omission grace ms")
+		activeWindow := fs.Int64("activewindow", d.ActiveWindowEpochs, "S3 active-set window in epochs")
+		activeLag := fs.Int64("activelag", d.ActiveLagEpochs, "S3 active-set window ends this many epochs back")
+		activePct := fs.Int64("activepct", d.ActivePct, "S3 percent of window epochs a validator must have signed")
+		activeMin := fs.Int64("activemin", -1, "S3 fewer counted epochs than this in the window: all validators active (default window/10)")
 		out := fs.String("out", "release.json", "output file")
 		_ = fs.Parse(os.Args[2:])
 		r := &mesh.Release{Version: mesh.ReleaseVersion, Name: *name, Network: *network, Issued: time.Now().Unix(),
@@ -92,6 +96,11 @@ func main() {
 		r.Params.QuorumNum, r.Params.QuorumDen = frac(*quorum)
 		r.Params.FloorNum, r.Params.FloorDen = frac(*floor)
 		r.Params.MaxClockSkewMs, r.Params.ActiveEpochs, r.Params.OmissionGraceMs = *clockMs, *activeEpochs, *omissionMs
+		r.Params.ActiveWindowEpochs, r.Params.ActiveLagEpochs, r.Params.ActivePct = *activeWindow, *activeLag, *activePct
+		r.Params.ActiveMinEpochs = *activeMin
+		if *activeMin < 0 {
+			r.Params.ActiveMinEpochs = max(1, *activeWindow/10)
+		}
 		ids := strings.Split(*vals, ",")
 		nm := strings.Split(*names, ",")
 		bs := strings.Split(*bonds, ",")
