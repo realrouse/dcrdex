@@ -18,6 +18,8 @@ import (
 	"time"
 
 	"decred.org/dcrdex/client/asset"
+	dexbtc "decred.org/dcrdex/dex/networks/btc"
+	dexdcr "decred.org/dcrdex/dex/networks/dcr"
 	"github.com/decred/dcrd/dcrec/secp256k1/v4"
 )
 
@@ -75,6 +77,25 @@ func (m *meshBonds) RefundUserBond(ctx context.Context, assetID uint32, coinID, 
 	}
 	if len(bondKey) != 32 {
 		return "", errors.New("bad bond key")
+	}
+	// As for DEX server bonds (refundExpiredBonds): only once the chain's
+	// median time passed the lock. An SPV wallet "sends" a non-final refund
+	// without error while every node rejects it.
+	extract := dexbtc.ExtractBondDetailsV0 // BTC, LBC (btc clone scripts)
+	if assetID == 42 {
+		extract = dexdcr.ExtractBondDetailsV0
+	}
+	lt, _, err := extract(0, script)
+	if err != nil {
+		return "", fmt.Errorf("bond script: %w", err)
+	}
+	lockTime := time.Unix(int64(lt), 0)
+	expired, err := w.LockTimeExpired(ctx, lockTime)
+	if err != nil {
+		return "", fmt.Errorf("checking bond lock time: %w", err)
+	}
+	if !expired {
+		return "", fmt.Errorf("bond still locked: lock time %s not yet passed by the %s chain", lockTime.Format(time.RFC3339), unbip(assetID))
 	}
 	coin, err := bonder.RefundBond(ctx, 0, coinID, script, amt, secp256k1.PrivKeyFromBytes(bondKey))
 	if err != nil {

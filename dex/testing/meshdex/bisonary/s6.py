@@ -70,10 +70,13 @@ EXTRA = [("dave", 1, 1_000_000), ("erin", 2, 2_000_000)]
 BONDS = {"alice": [(0, 50_000, LONG_LOCK, False)],                         # 0.0005 BTC: 5 tiers
          "bob": [(140, 50_000 * 10**8, LONG_LOCK, False)],                 # 50,000 LBC: 5 tiers
          "carol": [(42, 250_000_000, LONG_LOCK, False)],                   # 2.5 DCR: 5 tiers
-         "mm": [(0, 50_000, LONG_LOCK, False), (140, 50_000 * 10**8, LONG_LOCK, False)],  # 10 tiers
+         "mm": [(0, 50_000, SHORT_LOCK, False), (140, 50_000 * 10**8, LONG_LOCK, False)],  # 10 tiers, 5 after the BTC bond expires
          "dave": [(42, 50_000_000, SHORT_LOCK, False)],                    # 0.5 DCR: 1 tier
-         "erin": [(140, 5_000 * 10**8, SHORT_LOCK, False), (0, 5_000, SHORT_LOCK, False),  # below one tier
+         "erin": [(140, 5_000 * 10**8, SHORT_LOCK, False),                 # below one tier
                   (42, 50_000_000, LONG_LOCK, True)]}                      # never broadcast
+# erin also tries 5,000 sats of BTC (half a tier): the BTC wallet refuses it as
+# dust at the simnet fee rate (100 sat/vB), so a sub-tier BTC bond can't exist.
+ERIN_DUST = (0, 5_000, SHORT_LOCK)
 WANT_TIERS = {"alice": 5, "bob": 5, "carol": 5, "mm": 10, "dave": 1, "erin": 0}
 TL = []
 
@@ -260,6 +263,13 @@ def phase_bonds(net):
             k = post_bond(net[name], a, amt, lock, fake)
             net.bond_keys.setdefault(name, []).append((k, a, amt, lock, fake))
             net.bond_posted[k] = time.time()
+    a, amt, lock = ERIN_DUST
+    r = net["erin"].dbgapi("/mesh/epochs/userbond", {"assetID": a, "amount": amt, "lockSecs": lock, "fake": False})
+    net.erin_dust = r.get("error") or r
+    log("erin %d sats BTC bond: %s" % (amt, net.erin_dust))
+    if "key" in r:
+        net.bond_keys["erin"].append((r["key"], a, amt, lock, False))
+        net.bond_posted[r["key"]] = time.time()
     real = {k for bl in net.bond_keys.values() for (k, a, amt, lock, fake) in bl if not fake and amt >= TIER[a]}
     bad_keys = {k for bl in net.bond_keys.values() for (k, a, amt, lock, fake) in bl if fake or amt < TIER[a]}
     def admitted():
@@ -308,7 +318,8 @@ def phase_bonds(net):
             "ageS": (x["matureEpoch"] - x["admittedEpoch"]) * EPOCH_MS / 1000, "lockTime": x["lockTime"], "counts": x["counts"]}
     res = {"secondsToAdmission": round(t_adm), "bonds": per, "seenImmature": len(seen_imm), "seenMature": len(seen_mat),
            "orderWhileImmature": immature_order, "tiersEveryPeer": {k: v["tiers"] for k, v in row.items() if isinstance(v, dict)},
-           "agreedAsOf": asof, "peersDisagree": diff, "erinPendingOnV1": pend}
+           "agreedAsOf": asof, "peersDisagree": diff, "erinPendingOnV1": pend,
+           "erinBtcHalfTier": net.erin_dust}
     b.result("bonds", res)
     b.shot(net["alice"], "/mesh", "s6-bonded")
     want = {k: v for k, v in WANT_TIERS.items() if k != "erin"}
@@ -414,20 +425,38 @@ def phase_expiry(net):
     onbook = {n.name: sum(1 for o in n.book("dcr_btc") if o["id"] == oid) for n in (net["alice"], net["bob"], net["mm"])}
     r = order(dv, "dcr_btc", True, 1, h.rate_for(net.prices, "dcr_btc"))
     res = {"expiryEpoch": exp, "orderStatusEveryPeer": stat, "onBooks": onbook, "daveTierEveryPeer": {k: v["tiers"].get("dave", 0) for k, v in row.items() if isinstance(v, dict)},
-           "newOrderAfterExpiry": r.get("error") or r}
+           "newOrderAfterExpiry": r.get("error") or r,
+           "mmTierEveryPeer": {k: v["tiers"].get("mm", 0) for k, v in row.items() if isinstance(v, dict)}}
     b.result("expiry", res)
-    if any(s == "resting" for s in stat.values()) or any(onbook.values()) or any(res["daveTierEveryPeer"].values()) or "id" in r:
+    if any(s == "resting" for s in stat.values()) or any(onbook.values()) or any(res["daveTierEveryPeer"].values()) or "id" in r \
+            or any(t != 5 for t in res["mmTierEveryPeer"].values()):
         raise Fail("expiry: %s" % res)
+
+def bond_unspent(key):
+    """True if the bond output is unspent on the chain node (mempool included)."""
+    import subprocess
+    a, c = key.split(":")
+    txid, vout = bytes.fromhex(c[:64])[::-1].hex(), int.from_bytes(bytes.fromhex(c[64:72]), "big")
+    if a == "0":
+        cmd = [os.path.join(h.BIN, "bitcoin-cli"), "-rpcport=20556", "-regtest=1", "-rpcuser=user", "-rpcpassword=pass", "gettxout", txid, str(vout), "true"]
+    elif a == "42":
+        cmd = [os.path.join(h.BIN, "dcrctl"), "-C", os.path.expanduser("~/dextest/dcr/alpha/alpha-ctl.conf"), "gettxout", txid, str(vout), "0", "true"]
+    else:
+        cmd = [os.path.expanduser("~/dextest/lbc/harness-ctl/alpha"), "gettxout", json.dumps([txid, vout, True])]
+    out = subprocess.run(cmd, capture_output=True, text=True, timeout=30).stdout
+    return '"value"' in out
 
 def phase_refund(net):
     out = {}
     dv, er = net["dave"], net["erin"]
     targets = [(dv, k, a) for (k, a, amt, lock, fake) in net.bond_keys["dave"]] + \
-              [(er, k, a) for (k, a, amt, lock, fake) in net.bond_keys["erin"] if not fake]
+              [(er, k, a) for (k, a, amt, lock, fake) in net.bond_keys["erin"] if not fake] + \
+              [(net["mm"], k, a) for (k, a, amt, lock, fake) in net.bond_keys["mm"] if lock == SHORT_LOCK]
     # Before the lock: the chain refuses the refund.
     early = dv.dbgapi("/mesh/epochs/userbond/refund", {"key": targets[0][1]})
     out["beforeLock"] = early.get("error") or early
-    if "refund" in early:
+    out["beforeLockBondUnspent"] = bond_unspent(targets[0][1])
+    if "refund" in early or not out["beforeLockBondUnspent"]:
         raise Fail("refund before lock accepted: %s" % early)
     lock = max(net.bond_posted[k] for _, k, _ in targets) + SHORT_LOCK
     log("waiting %.0f s for the short locks" % max(0, lock - time.time()))
@@ -447,13 +476,15 @@ def phase_refund(net):
             else:
                 out.setdefault("retries", {}).setdefault(k, (r.get("error") or str(r))[:160])
         time.sleep(8)
-    time.sleep(20)
+    h.wait_until(lambda: not any(bond_unspent(k) for k in done), 180, "refunds spend the bonds on chain", 5)
+    time.sleep(10)
     for k, d in done.items():
+        d["bondSpentOnChain"] = not bond_unspent(k)
         n = net[d["who"]]
         d["balAfter"] = n.coins({0: "btc", 140: "lbc", 42: "dcr"}[d["asset"]], "total")
     out["refunds"] = done
     b.result("refund", out)
-    if len(done) != len(targets):
+    if len(done) != len(targets) or not all(d["bondSpentOnChain"] for d in done.values()):
         raise Fail("refunds: %d of %d" % (len(done), len(targets)))
 
 def phase_restart(net):
