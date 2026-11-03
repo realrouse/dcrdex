@@ -50,12 +50,23 @@ type ActiveSet struct {
 	// Credits is each validator's credited signatures in the window.
 	Credits map[string]int `json:"credits"`
 	Power   uint64         `json:"power"`
+	// S4: Samples is the counted records of bonded members that joined
+	// inside the window (since they joined); Bonded is the epoch's bonded
+	// power (seeded + bonded members).
+	Samples map[string]int `json:"samples,omitempty"`
+	Bonded  uint64         `json:"bonded"`
 }
 
 // computeActiveSet derives the active set for epoch n from chain, the
 // finalized records of the current chain in epoch order (last = newest).
-func computeActiveSet(rel *Release, chain []*EpochRecord, n uint64) *ActiveSet {
-	p := &rel.Params
+//
+// S4: the candidates are the epoch's validator set vs (seeded + bonded
+// members). A bonded member is judged only on the records since it became a
+// member: it is active once it has at least ActiveMinEpochs of them in the
+// window and signed ActivePct % of those. Seeded validators are members from
+// the start, so for them this is the S3 rule unchanged.
+func computeActiveSet(vs *valSet, chain []*EpochRecord, n uint64) *ActiveSet {
+	p := &vs.rel.Params
 	as := &ActiveSet{Epoch: n, Credits: make(map[string]int)}
 	if len(chain) > 0 {
 		as.AsOf = chain[len(chain)-1].Epoch
@@ -70,8 +81,20 @@ func computeActiveSet(rel *Release, chain []*EpochRecord, n uint64) *ActiveSet {
 		// The last record's credits are in a future proposal: not counted.
 		counted := len(chain) - 1
 		i := sort.Search(counted, func(i int) bool { return int64(chain[i].Epoch) >= lo })
+		var newer []string // bonded members that joined inside the window
+		for _, v := range vs.ids {
+			if vs.since(v) > uint64(lo) {
+				newer = append(newer, v)
+			}
+		}
+		as.Samples = make(map[string]int, len(newer))
 		for ; i < counted && int64(chain[i].Epoch) <= hi; i++ {
 			as.Sample++
+			for _, v := range newer {
+				if chain[i].Epoch >= vs.since(v) {
+					as.Samples[v]++
+				}
+			}
 			for _, c := range chain[i+1].Proposal.Credits {
 				as.Credits[c.Validator]++
 			}
@@ -79,18 +102,25 @@ func computeActiveSet(rel *Release, chain []*EpochRecord, n uint64) *ActiveSet {
 	}
 	if int64(as.Sample) < p.ActiveMinEpochs {
 		as.Fallback = true
-		as.Active = rel.ValidatorIDs()
+		as.Active = vs.IDs()
 	} else {
-		for _, v := range rel.ValidatorIDs() {
-			if int64(as.Credits[v])*100 >= p.ActivePct*int64(as.Sample) {
+		for _, v := range vs.ids {
+			sample, isNew := as.Samples[v]
+			if !isNew {
+				sample = as.Sample
+			} else if int64(sample) < p.ActiveMinEpochs {
+				continue // a new bonded member is judged once it has enough records
+			}
+			if credits := min(as.Credits[v], sample); int64(credits)*100 >= p.ActivePct*int64(sample) {
 				as.Active = append(as.Active, v)
 			}
 		}
 	}
 	sort.Strings(as.Active)
 	for _, v := range as.Active {
-		as.Power += rel.Power(v)
+		as.Power += vs.Power(v)
 	}
+	as.Bonded = vs.BondedPower()
 	return as
 }
 
@@ -107,7 +137,7 @@ func (e *EpochEngine) activeForLocked(n uint64) *ActiveSet {
 	if c := e.activeCache; c != nil && c.Epoch == n && e.activeCacheFP == e.lastFP {
 		return c
 	}
-	as := computeActiveSet(e.rel, e.chainLocked(), n)
+	as := computeActiveSet(e.valsLocked(n), e.chainLocked(), n)
 	e.activeCache, e.activeCacheFP = as, e.lastFP
 	return as
 }
@@ -125,7 +155,11 @@ func (e *EpochEngine) ActiveFor(n, asOf uint64) (*ActiveSet, error) {
 		}
 		chain = chain[:i]
 	}
-	return computeActiveSet(e.rel, chain, n), nil
+	asof := uint64(0)
+	if len(chain) > 0 {
+		asof = chain[len(chain)-1].Epoch
+	}
+	return computeActiveSet(e.ledger.members(n, asof), chain, n), nil
 }
 
 // ActiveCheck recomputes the active set of every record of our chain with
@@ -140,7 +174,11 @@ func (e *EpochEngine) ActiveCheck(from uint64) (checked int, mismatches []uint64
 			continue
 		}
 		checked++
-		if as := computeActiveSet(e.rel, chain[:i], r.Epoch); !equalStrings(as.Active, r.Active) {
+		asof := uint64(0)
+		if i > 0 {
+			asof = chain[i-1].Epoch
+		}
+		if as := computeActiveSet(e.ledger.members(r.Epoch, asof), chain[:i], r.Epoch); !equalStrings(as.Active, r.Active) {
 			mismatches = append(mismatches, r.Epoch)
 		}
 	}
@@ -156,7 +194,11 @@ func (e *EpochEngine) checkActiveSetLocked(p *EpochProposal) error {
 			return errors.New("credits on the first record of a chain")
 		}
 	} else {
+		prevSet := e.valsLocked(e.last.Epoch)
 		for _, c := range p.Credits {
+			if !prevSet.IsValidator(c.Validator) {
+				return fmt.Errorf("credit for %s, not a validator in epoch %d", e.rel.ValidatorName(c.Validator), e.last.Epoch)
+			}
 			if err := c.verify(e.last.Epoch, e.lastFP); err != nil {
 				return fmt.Errorf("bad credit from %s: %v", e.rel.ValidatorName(c.Validator), err)
 			}
@@ -192,7 +234,7 @@ func (e *EpochEngine) creditsLocked() []*EpochCredit {
 
 // addCreditLocked records a valid attestation of our last record.
 func (e *EpochEngine) addCreditLocked(a *EpochAttestation) {
-	if e.last == nil || a.Epoch != e.last.Epoch || a.Fingerprint != e.lastFP || !e.rel.IsValidator(a.Validator) {
+	if e.last == nil || a.Epoch != e.last.Epoch || a.Fingerprint != e.lastFP || !e.valsLocked(e.last.Epoch).IsValidator(a.Validator) {
 		return
 	}
 	if _, have := e.lastCredits[a.Validator]; have {

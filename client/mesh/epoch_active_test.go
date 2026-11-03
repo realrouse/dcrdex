@@ -47,7 +47,7 @@ func TestActiveSetCompute(t *testing.T) {
 	}
 	// Epoch 112: window 101..110, all ten counted; v[3] 9/10, v[2] 8/10
 	// (exactly 80 % is enough).
-	as := computeActiveSet(rel, chain, 112)
+	as := computeActiveSet(seededSet(rel), chain, 112)
 	if as.WindowFrom != 101 || as.WindowTo != 110 || as.Sample != 10 || as.Fallback {
 		t.Fatalf("window %+v", as)
 	}
@@ -55,19 +55,19 @@ func TestActiveSetCompute(t *testing.T) {
 		t.Fatalf("epoch 112: credits %v active %v", as.Credits, as.Active)
 	}
 	// Epoch 115: window 104..113, v[3] 6/10 and v[2] 7/10 -> out.
-	as = computeActiveSet(rel, chain, 115)
+	as = computeActiveSet(seededSet(rel), chain, 115)
 	if !equalStrings(as.Active, []string{v[0], v[1]}) {
 		t.Fatalf("epoch 115: credits %v active %v", as.Credits, as.Active)
 	}
 	// The last record (129) has no credits yet: for epoch 131 the window is
 	// 120..129 but only 120..128 count.
-	as = computeActiveSet(rel, chain, 131)
+	as = computeActiveSet(seededSet(rel), chain, 131)
 	if as.Sample != 9 {
 		t.Fatalf("sample %d", as.Sample)
 	}
 	// Too few records in the window (new chain or halt): everyone.
 	for _, n := range []uint64{103, 145} {
-		as = computeActiveSet(rel, chain, n)
+		as = computeActiveSet(seededSet(rel), chain, n)
 		if !as.Fallback || len(as.Active) != 4 {
 			t.Fatalf("epoch %d: no fallback: %+v", n, as)
 		}
@@ -76,7 +76,7 @@ func TestActiveSetCompute(t *testing.T) {
 	p2 := p
 	p2.ActivePct = 70
 	rel2 := makeTestRelease(t, ids, p2)
-	if as := computeActiveSet(rel2, chain, 115); !equalStrings(as.Active, []string{v[0], v[1], v[2]}) {
+	if as := computeActiveSet(seededSet(rel2), chain, 115); !equalStrings(as.Active, []string{v[0], v[1], v[2]}) {
 		t.Fatalf("70%%: %v", as.Credits)
 	}
 }

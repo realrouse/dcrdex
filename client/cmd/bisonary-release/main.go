@@ -5,6 +5,8 @@
 //
 //	bisonary-release sign -key dev.key -name NAME -validators id1,id2,... [-names v1,v2,...] [-bonds 1,1,...]
 //	    [-epochms 10000 -windowms 5000 -proposems 300 -fallbackms 1500 -quorum 2/3 -floor 1/2 -clockms 2000] -out release.json
+//	    [-s4 -bondbtc 0:10000 -bondlbc 0:100000000000000 -bonddcr 0:1000000000 -bondage 2419200 -bondminlock 15724800
+//	     -bondlockleft 604800 -bondconfs 2 -bondswitch 3/4 -bonddeadline 0 -bondpower 1 -bondmaxclaims 8]
 //	bisonary-release verify [-pubkey HEX] release.json
 //	bisonary-release pubkey -key dev.key
 //
@@ -88,6 +90,27 @@ func main() {
 		activeLag := fs.Int64("activelag", d.ActiveLagEpochs, "S3 active-set window ends this many epochs back")
 		activePct := fs.Int64("activepct", d.ActivePct, "S3 percent of window epochs a validator must have signed")
 		activeMin := fs.Int64("activemin", -1, "S3 fewer counted epochs than this in the window: all validators active (default window/10)")
+		// S4 bond rules (defaults: mesh.DefaultBondRules, proposed).
+		db := mesh.DefaultBondRules
+		s4 := fs.Bool("s4", false, "include S4 validator bond rules")
+		ladder := func(a mesh.BondAsset) string {
+			var p []string
+			for _, st := range a.Steps {
+				p = append(p, fmt.Sprintf("%d:%d", st.AfterSecs, st.Amount))
+			}
+			return strings.Join(p, ",")
+		}
+		bondBTC := fs.String("bondbtc", ladder(db.Assets[0]), "BTC bond ladder afterSecs:atoms,... ('' or 'off': no BTC bonds)")
+		bondLBC := fs.String("bondlbc", ladder(db.Assets[1]), "LBC bond ladder")
+		bondDCR := fs.String("bonddcr", ladder(db.Assets[2]), "DCR bond ladder")
+		bondAge := fs.Int64("bondage", db.MinAgeSecs, "bond age (s) before it counts")
+		bondMinLock := fs.Int64("bondminlock", db.MinLockSecs, "lock (s) a bond must have left at admission")
+		bondLockLeft := fs.Int64("bondlockleft", db.MinLockLeftSecs, "a bond stops counting with less lock (s) left")
+		bondConfs := fs.Uint("bondconfs", uint(db.MinConfs), "confirmations before a validator signs an admission")
+		bondSwitch := fs.String("bondswitch", fmt.Sprintf("%d/%d", db.SwitchNum, db.SwitchDen), "share of seeded validators that turns the bond switch on")
+		bondDeadline := fs.Int64("bonddeadline", 0, "unix s: bond switch on at this time without signals (0: none)")
+		bondPower := fs.Uint64("bondpower", db.BondPower, "power of a bonded validator")
+		bondMax := fs.Int("bondmaxclaims", db.MaxClaimsPerEpoch, "bond admissions per proposal")
 		out := fs.String("out", "release.json", "output file")
 		_ = fs.Parse(os.Args[2:])
 		r := &mesh.Release{Version: mesh.ReleaseVersion, Name: *name, Network: *network, Issued: time.Now().Unix(),
@@ -100,6 +123,35 @@ func main() {
 		r.Params.ActiveMinEpochs = *activeMin
 		if *activeMin < 0 {
 			r.Params.ActiveMinEpochs = max(1, *activeWindow/10)
+		}
+		if *s4 {
+			br := &mesh.BondRules{MinAgeSecs: *bondAge, MinLockSecs: *bondMinLock, MinLockLeftSecs: *bondLockLeft,
+				MinConfs: uint32(*bondConfs), BondPower: *bondPower, MaxClaimsPerEpoch: *bondMax, SwitchDeadline: *bondDeadline}
+			br.SwitchNum, br.SwitchDen = frac(*bondSwitch)
+			for _, a := range []struct {
+				id  uint32
+				sym string
+				l   string
+			}{{mesh.BondAssetBTC, "btc", *bondBTC}, {mesh.BondAssetLBC, "lbc", *bondLBC}, {mesh.BondAssetDCR, "dcr", *bondDCR}} {
+				if a.l == "" || a.l == "off" {
+					continue
+				}
+				ba := mesh.BondAsset{AssetID: a.id, Symbol: a.sym}
+				for _, st := range strings.Split(a.l, ",") {
+					kv := strings.Split(st, ":")
+					if len(kv) != 2 {
+						fatal("bad ladder step %q", st)
+					}
+					after, err1 := strconv.ParseInt(kv[0], 10, 64)
+					amt, err2 := strconv.ParseUint(kv[1], 10, 64)
+					if err1 != nil || err2 != nil {
+						fatal("bad ladder step %q", st)
+					}
+					ba.Steps = append(ba.Steps, mesh.BondStep{AfterSecs: after, Amount: amt})
+				}
+				br.Assets = append(br.Assets, ba)
+			}
+			r.Bonds = br
 		}
 		ids := strings.Split(*vals, ",")
 		nm := strings.Split(*names, ",")

@@ -105,11 +105,15 @@ func (c *Core) connectMesh(ctx context.Context, crypter encrypt.Crypter) {
 		rh := rel.Hash()
 		store := filepath.Join(filepath.Dir(c.cfg.DBPath), "mesh", fmt.Sprintf("epochs-%x.jsonl", rh[:4]))
 		_ = os.MkdirAll(filepath.Dir(store), 0o700)
-		if _, err = mesh.OrderBooks.EnableEpochs(ctx, rel, meshpkg.EpochConfig{
+		var eng *meshpkg.EpochEngine
+		if eng, err = mesh.OrderBooks.EnableEpochs(ctx, rel, meshpkg.EpochConfig{
 			Validator: c.cfg.MeshValidator, StorePath: store, NTPServer: c.cfg.MeshNTP,
 		}); err != nil {
 			return
 		}
+		// S4: validator bonds are checked and made with the asset wallets.
+		mb := &meshBonds{c: c, dir: filepath.Dir(store)}
+		eng.SetBondHooks(mb, mb)
 	}
 
 	// Mesh activity goes to the UI as data notifications. The sink must not

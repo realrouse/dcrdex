@@ -163,6 +163,9 @@ type Release struct {
 	MinProtocol uint32             `json:"minProtocol"`
 	Validators  []ReleaseValidator `json:"validators"`
 	Params      EpochParams        `json:"params"`
+	// Bonds (S4) are the validator bond rules. nil: no bond code (S0-S3
+	// releases); the bonds stay off.
+	Bonds *BondRules `json:"bonds,omitempty"`
 
 	hash [32]byte
 	vals map[string]*ReleaseValidator
@@ -257,6 +260,11 @@ func (r *Release) check() error {
 	}
 	if err := r.Params.Validate(); err != nil {
 		return fmt.Errorf("release params: %w", err)
+	}
+	if r.Bonds != nil {
+		if err := r.Bonds.Validate(); err != nil {
+			return fmt.Errorf("release bond rules: %w", err)
+		}
 	}
 	r.vals = make(map[string]*ReleaseValidator, len(r.Validators))
 	r.ids = make([]string, 0, len(r.Validators))

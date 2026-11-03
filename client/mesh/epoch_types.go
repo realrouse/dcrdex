@@ -53,9 +53,12 @@ type EpochProposal struct {
 	Credits  []*EpochCredit `json:"credits,omitempty"`
 	Orders   []*MeshOrder   `json:"orders"`
 	Cancels  []*MeshCancel  `json:"cancels"`
-	Stamp    int64          `json:"stamp"`
-	PubKey   []byte         `json:"pubkey"`
-	Sig      []byte         `json:"sig"`
+	// S4 (bonds.go): bond switch signals and bond admissions.
+	Signals []*SwitchSignal `json:"signals,omitempty"`
+	Bonds   []*BondClaim    `json:"bonds,omitempty"`
+	Stamp   int64           `json:"stamp"`
+	PubKey  []byte          `json:"pubkey"`
+	Sig     []byte          `json:"sig"`
 }
 
 // EpochCredit is a validator's attestation of the previous record (the
@@ -102,6 +105,24 @@ func (p *EpochProposal) Hash() EpochHash {
 		b.Write(c.serialize())
 	}
 	_ = binary.Write(b, binary.BigEndian, p.Stamp)
+	// S4: only proposals with signals or bonds commit to them, so S3
+	// proposals hash as before.
+	if len(p.Signals) > 0 || len(p.Bonds) > 0 {
+		b.WriteString("s4")
+		_ = binary.Write(b, binary.BigEndian, uint16(len(p.Signals)))
+		for _, s := range p.Signals {
+			writeStr(b, s.Validator)
+			_ = binary.Write(b, binary.BigEndian, s.Stamp)
+			_ = binary.Write(b, binary.BigEndian, uint16(len(s.Sig)))
+			b.Write(s.Sig)
+		}
+		_ = binary.Write(b, binary.BigEndian, uint16(len(p.Bonds)))
+		for _, c := range p.Bonds {
+			b.Write(c.msg())
+			_ = binary.Write(b, binary.BigEndian, uint16(len(c.Sig)))
+			b.Write(c.Sig)
+		}
+	}
 	return sha256.Sum256(b.Bytes())
 }
 
@@ -120,7 +141,7 @@ func (p *EpochProposal) sign(priv libp2pcrypto.PrivKey) error {
 // the proposer's rank in the active list. Whether Active is the epoch's
 // active set and the credits are valid signatures of Prev needs the chain:
 // the engine checks that (checkActiveSetLocked).
-func (p *EpochProposal) verify(r *Release) error {
+func (p *EpochProposal) verify(r *valSet) error {
 	if !r.IsValidator(p.Proposer) {
 		return errors.New("proposer is not a validator")
 	}
@@ -130,19 +151,36 @@ func (p *EpochProposal) verify(r *Release) error {
 	if rank := ProposerRankIn(p.Active, p.Epoch, p.Proposer); rank != p.Rank {
 		return fmt.Errorf("wrong proposer rank %d (want %d)", p.Rank, rank)
 	}
+	// Credit membership is checked against the credited record's set
+	// (checkActiveSetLocked).
 	for i, c := range p.Credits {
-		if !r.IsValidator(c.Validator) {
-			return fmt.Errorf("credit for non-validator %s", c.Validator)
-		}
 		if i > 0 && p.Credits[i-1].Validator >= c.Validator {
 			return errors.New("credits not sorted or duplicated")
+		}
+	}
+	for i, s := range p.Signals {
+		if i > 0 && p.Signals[i-1].Validator >= s.Validator {
+			return errors.New("switch signals not sorted or duplicated")
+		}
+	}
+	if len(p.Bonds) > 0 {
+		if r.rel.Bonds == nil {
+			return errors.New("bond admissions in a release without bonds")
+		}
+		if len(p.Bonds) > r.rel.Bonds.MaxClaimsPerEpoch {
+			return errors.New("too many bond admissions")
+		}
+	}
+	for i, c := range p.Bonds {
+		if i > 0 && p.Bonds[i-1].Key() >= c.Key() {
+			return errors.New("bond admissions not sorted or duplicated")
 		}
 	}
 	h := p.Hash()
 	return verifySig(p.Proposer, p.PubKey, h[:], p.Sig)
 }
 
-func checkActive(r *Release, active []string, proposer string) error {
+func checkActive(r *valSet, active []string, proposer string) error {
 	if !sort.StringsAreSorted(active) {
 		return errors.New("active list not sorted")
 	}
@@ -259,8 +297,12 @@ func thresholdMet(p *EpochParams, signed, active, bonded uint64) bool {
 }
 
 // VerifyRecord checks a record's fingerprint and signatures against the
-// release's validator set and thresholds. It does not need the epoch state.
-func VerifyRecord(r *Release, rec *EpochRecord) error {
+// release's seeded validator set and thresholds (no bonded validators).
+func VerifyRecord(r *Release, rec *EpochRecord) error { return verifyRecord(seededSet(r), rec) }
+
+// verifyRecord checks a record against the epoch's validator set (S4: the
+// seeded validators plus the bonded members, from the chain before it).
+func verifyRecord(r *valSet, rec *EpochRecord) error {
 	if !r.IsValidator(rec.Proposer) {
 		return errors.New("proposer is not a validator")
 	}
@@ -292,7 +334,7 @@ func VerifyRecord(r *Release, rec *EpochRecord) error {
 		seen[a.Validator] = true
 		signed += r.Power(a.Validator)
 	}
-	if !thresholdMet(&r.Params, signed, activePower, r.BondedPower()) {
+	if !thresholdMet(&r.rel.Params, signed, activePower, r.BondedPower()) {
 		return fmt.Errorf("not finalized: %d valid signatures, signed power %d of active %d (bonded %d)",
 			len(seen), signed, activePower, r.BondedPower())
 	}
@@ -326,6 +368,8 @@ type epochMsg struct {
 	SyncFrom uint64            `json:"syncFrom,omitempty"`
 	To       string            `json:"to,omitempty"`
 	Frag     *epochFrag        `json:"frag,omitempty"`
+	Signal   *SwitchSignal     `json:"bsig,omitempty"`
+	Bond     *BondClaim        `json:"bond,omitempty"`
 }
 
 const (
@@ -337,4 +381,6 @@ const (
 	epMsgRec     = "rec"
 	epMsgSyncReq = "syncreq"
 	epMsgRecs    = "recs"
+	epMsgSignal  = "bsig" // S4 bond switch signal
+	epMsgBond    = "bond" // S4 validator bond claim
 )

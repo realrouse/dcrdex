@@ -144,6 +144,21 @@ type EpochEngine struct {
 	lastCredits   map[string]*EpochCredit // known signatures of the last record
 	activeCache   *ActiveSet
 	activeCacheFP EpochHash
+	// S4 bonds (bonds.go, epoch_bonds.go)
+	ledger      *bondLedger
+	valsCache   *valSet
+	valsCacheFP EpochHash
+	sigPool     map[string]*SwitchSignal
+	bondPool    map[string]*bondPoolEntry
+	ownClaims   map[string]*BondClaim
+	ownSignal   *SwitchSignal
+	latched     bool
+	latchSigs   []*SwitchSignal
+	bondChain   BondChain
+	bondMaker   BondMaker
+	bondIndex   uint32
+	s4SentAt    uint64
+	peerNames   map[string]string
 	// debug (simnet adversary tests)
 	omitOwner string
 }
@@ -178,17 +193,27 @@ func NewEpochEngine(rel *Release, cfg EpochConfig, ps pubSub, priv libp2pcrypto.
 		served:      make(map[string]int64),
 		frags:       make(map[string]*fragBuf),
 		lastCredits: make(map[string]*EpochCredit),
+		ledger:      newBondLedger(rel),
+		sigPool:     make(map[string]*SwitchSignal),
+		bondPool:    make(map[string]*bondPoolEntry),
+		ownClaims:   make(map[string]*BondClaim),
+		peerNames:   make(map[string]string),
 	}
 	e.lastFP = e.genesis
-	e.signer = cfg.Validator && rel.IsValidator(e.self)
+	// S4: with bond rules a node that is not seeded can become a validator
+	// by bonding; it signs only while it is in an epoch's validator set.
+	e.signer = cfg.Validator && (rel.IsValidator(e.self) || rel.Bonds != nil)
 	if cfg.Validator && !e.signer {
 		log.Warnf("Validator mode requested but our peer ID %s is not in release %q; running as a client", e.self, rel.Name)
+	} else if e.signer && !rel.IsValidator(e.self) {
+		log.Infof("Validator mode: not seeded in release %q; we sign once a bond of ours counts (S4)", rel.Name)
 	}
 	if cfg.StorePath != "" {
 		if err := e.loadStore(); err != nil {
 			return nil, err
 		}
 	}
+	e.loadBondFiles()
 	return e, nil
 }
 
@@ -446,8 +471,18 @@ func (e *EpochEngine) handleMsg(ctx context.Context, from string, b []byte) {
 			e.mtx.Unlock()
 		}
 	case epMsgHB:
-		if h := m.HB; h != nil && e.rel.IsValidator(h.Validator) && verifySig(h.Validator, h.PubKey, h.msg(), h.Sig) == nil {
+		if h := m.HB; h != nil && e.isValidatorNow(h.Validator) && verifySig(h.Validator, h.PubKey, h.msg(), h.Sig) == nil {
 			e.heardFrom(h.Validator, h.Stamp)
+		}
+	case epMsgSignal:
+		if m.Signal != nil {
+			e.handleSignal(m.Signal)
+		}
+	case epMsgBond:
+		if m.Bond != nil {
+			e.mtx.Lock()
+			e.addClaimLocked(m.Bond)
+			e.mtx.Unlock()
 		}
 	case epMsgProp:
 		if m.Prop != nil {
@@ -476,6 +511,13 @@ func (e *EpochEngine) handleMsg(ctx context.Context, from string, b []byte) {
 	}
 }
 
+// isValidatorNow: id is in the validator set of the current epoch.
+func (e *EpochEngine) isValidatorNow(id string) bool {
+	e.mtx.Lock()
+	defer e.mtx.Unlock()
+	return e.valsLocked(e.p.EpochOf(e.nowMs())).IsValidator(id)
+}
+
 func (e *EpochEngine) heardFrom(v string, stamp int64) {
 	nowMs := e.nowMs()
 	e.clock.add(v, stamp, nowMs)
@@ -488,7 +530,28 @@ func (e *EpochEngine) heardFrom(v string, stamp int64) {
 func (e *EpochEngine) tick(ctx context.Context) {
 	nowMs := e.nowMs()
 	cur := e.p.EpochOf(nowMs)
-	if e.signer {
+	e.s4Gossip(ctx, cur)
+	e.bondChecks(ctx, nowMs)
+	e.mtx.Lock()
+	member := e.isMemberLocked(cur)
+	var retry []*epochCandidate
+	if member && cur > 0 {
+		// S4: a proposal we could not sign yet (bond not verified) is
+		// retried within its window.
+		for _, c := range e.cands[cur-1] {
+			if c.res != nil && (len(c.prop.Bonds) > 0 || e.latched) && nowMs <= e.p.EpochEnd(cur-1)+e.p.SignWindowMs {
+				if _, did := e.signed[cur-1]; !did {
+					retry = append(retry, c)
+				}
+			}
+		}
+	}
+	e.mtx.Unlock()
+	for _, c := range retry {
+		e.considerSign(ctx, c)
+		e.tryFinalize(ctx, c.prop.Epoch)
+	}
+	if member {
 		e.mtx.Lock()
 		sendHB := e.hbSent != cur
 		e.hbSent = cur
@@ -627,10 +690,14 @@ func (e *EpochEngine) maybePropose(ctx context.Context, n uint64, nowMs int64) {
 		}
 		prop.Cancels = append(prop.Cancels, e.cpool[id].c)
 	}
+	e.s4ProposalLocked(prop)
 	e.mtx.Unlock()
 	if err := prop.sign(e.priv); err != nil {
 		e.log.Errorf("Error signing epoch proposal: %v", err)
 		return
+	}
+	if len(prop.Signals) > 0 || len(prop.Bonds) > 0 {
+		e.log.Infof("Proposing epoch %d with %d bond switch signal(s) and %d bond admission(s)", n, len(prop.Signals), len(prop.Bonds))
 	}
 	e.log.Debugf("Proposing epoch %d (rank %d): %d orders, %d cancels, %d active", n, rank, len(prop.Orders), len(prop.Cancels), len(prop.Active))
 	e.send(ctx, &epochMsg{Type: epMsgProp, Prop: prop})
@@ -651,9 +718,19 @@ func (e *EpochEngine) computeLocked(c *epochCandidate) {
 	if c.res != nil || c.bad != "" || c.prop.Prev != e.lastFP {
 		return
 	}
+	if err := c.prop.verify(e.valsLocked(c.prop.Epoch)); err != nil {
+		c.bad = err.Error()
+		e.addFlagLocked(&EpochFlag{Epoch: c.prop.Epoch, Kind: "proposal", Peer: c.prop.Proposer, Detail: c.bad})
+		return
+	}
 	if err := e.checkActiveSetLocked(c.prop); err != nil {
 		c.bad = err.Error()
 		e.addFlagLocked(&EpochFlag{Epoch: c.prop.Epoch, Kind: "active-set", Peer: c.prop.Proposer, Detail: c.bad})
+		return
+	}
+	if err := e.checkS4Locked(c.prop); err != nil {
+		c.bad = err.Error()
+		e.addFlagLocked(&EpochFlag{Epoch: c.prop.Epoch, Kind: "bonds", Peer: c.prop.Proposer, Detail: c.bad})
 		return
 	}
 	st := e.state.clone()
@@ -676,8 +753,18 @@ func (e *EpochEngine) computeLocked(c *epochCandidate) {
 }
 
 func (e *EpochEngine) handleProposal(ctx context.Context, p *EpochProposal) {
-	if err := p.verify(e.rel); err != nil {
-		e.log.Debugf("Bad epoch %d proposal from %s: %v", p.Epoch, p.Proposer, err)
+	// Membership is checked against our chain in computeLocked; here only
+	// the signature and that the proposer is a validator of the epoch on
+	// our chain (or seeded, if we are behind).
+	e.mtx.Lock()
+	vs := e.valsLocked(p.Epoch)
+	e.mtx.Unlock()
+	if !vs.IsValidator(p.Proposer) && !e.rel.IsValidator(p.Proposer) {
+		e.log.Debugf("Epoch %d proposal from non-validator %s", p.Epoch, p.Proposer)
+		return
+	}
+	if h := p.Hash(); verifySig(p.Proposer, p.PubKey, h[:], p.Sig) != nil {
+		e.log.Debugf("Bad epoch %d proposal signature from %s", p.Epoch, p.Proposer)
 		return
 	}
 	nowMs := e.nowMs()
@@ -765,6 +852,16 @@ func (e *EpochEngine) considerSign(ctx context.Context, c *epochCandidate) {
 		e.mtx.Unlock()
 		return
 	}
+	if !e.isMemberLocked(n) {
+		e.mtx.Unlock()
+		return
+	}
+	// S4: sign bond admissions only after our own chain check, and keep a
+	// latched switch on.
+	if !e.bondsVerifiedLocked(c.prop) || !e.latchOKLocked(c.prop) {
+		e.mtx.Unlock()
+		return
+	}
 	// S3: we sign even if we are not in the active set: the signature does
 	// not count for the quorum, but it is credited, so we rejoin the active
 	// set after signing again for long enough.
@@ -789,7 +886,10 @@ func (e *EpochEngine) considerSign(ctx context.Context, c *epochCandidate) {
 }
 
 func (e *EpochEngine) handleAttestation(ctx context.Context, a *EpochAttestation) {
-	if !e.rel.IsValidator(a.Validator) || a.verify() != nil {
+	e.mtx.Lock()
+	member := e.valsLocked(a.Epoch).IsValidator(a.Validator) || (e.last != nil && a.Epoch == e.last.Epoch && e.valsLocked(e.last.Epoch).IsValidator(a.Validator))
+	e.mtx.Unlock()
+	if !member || a.verify() != nil {
 		return
 	}
 	if a.Validator != e.self {
@@ -837,7 +937,7 @@ func (e *EpochEngine) tryFinalize(ctx context.Context, n uint64) {
 			for _, v := range ids {
 				r.Sigs = append(r.Sigs, sigs[v])
 			}
-			if VerifyRecord(e.rel, r) != nil {
+			if verifyRecord(e.valsLocked(n), r) != nil {
 				continue
 			}
 			rec = r
@@ -877,6 +977,9 @@ func (e *EpochEngine) commitLocked(rec *EpochRecord, res *epochResult, synced bo
 		}
 	}
 	e.byEpoch[rec.Epoch] = rec
+	wasOn := e.ledger.switchSet
+	e.ledger.apply(rec)
+	e.afterLedgerLocked(rec, wasOn)
 	e.resetCreditsLocked(rec)
 	for _, o := range rec.Proposal.Orders {
 		delete(e.pool, o.ID())
@@ -951,16 +1054,39 @@ func (e *EpochEngine) handleRecord(ctx context.Context, rec *EpochRecord, synced
 		r.Proposal = c.prop
 		rec = &r
 	}
-	if err := VerifyRecord(e.rel, rec); err != nil {
-		e.log.Debugf("Bad epoch %d record: %v", rec.Epoch, err)
-		return
-	}
-	if err := rec.Proposal.verify(e.rel); err != nil || rec.Proposal.Epoch != rec.Epoch || rec.Proposal.Prev != rec.Prev ||
+	if rec.Proposal.Epoch != rec.Epoch || rec.Proposal.Prev != rec.Prev ||
 		rec.Proposal.Proposer != rec.Proposer || !equalStrings(rec.Proposal.Active, rec.Active) {
 		e.log.Debugf("Bad epoch %d record proposal", rec.Epoch)
 		return
 	}
 	e.mtx.Lock()
+	// S4: the record is checked against the validator set its chain
+	// implies: ours if it builds on our last record, the seeded set (fresh
+	// ledger) if it starts a new chain.
+	var vs *valSet
+	switch rec.Prev {
+	case e.lastFP:
+		vs = e.valsLocked(rec.Epoch)
+	case e.genesis:
+		vs = newBondLedger(e.rel).members(rec.Epoch, 0)
+	}
+	if vs != nil {
+		if err := verifyRecord(vs, rec); err != nil {
+			e.mtx.Unlock()
+			e.log.Debugf("Bad epoch %d record: %v", rec.Epoch, err)
+			return
+		}
+	} else if have := e.byEpoch[rec.Epoch]; have == nil || have.Fingerprint == rec.Fingerprint {
+		// Not on our chain tip: we may be behind. Sync rather than judge it.
+		e.mtx.Unlock()
+		if have == nil {
+			go e.requestSync(ctx, false)
+		}
+		return
+	} else if verifyRecord(e.valsLocked(rec.Epoch), rec) != nil {
+		e.mtx.Unlock()
+		return
+	}
 	le, ok := e.lastEpochLocked()
 	if ok && rec.Epoch <= le {
 		if have := e.byEpoch[rec.Epoch]; have != nil && have.Fingerprint != rec.Fingerprint {
@@ -974,6 +1100,7 @@ func (e *EpochEngine) handleRecord(ctx context.Context, rec *EpochRecord, synced
 			e.log.Warnf("Validators restarted the epoch chain at epoch %d (was at %d); resetting the epoch state", rec.Epoch, le)
 			e.state, e.last, e.lastFP = newEpochState(), nil, e.genesis
 			e.chainStart = len(e.records)
+			e.resetLedgerLocked()
 		} else {
 			e.mtx.Unlock()
 			go e.requestSync(ctx, false)
@@ -1046,15 +1173,18 @@ func (e *EpochEngine) loadStore() error {
 	n := 0
 	for sc.Scan() {
 		var rec EpochRecord
-		if json.Unmarshal(sc.Bytes(), &rec) != nil || rec.Proposal == nil || VerifyRecord(e.rel, &rec) != nil {
+		if json.Unmarshal(sc.Bytes(), &rec) != nil || rec.Proposal == nil {
 			continue
 		}
 		if rec.Prev != e.lastFP {
-			if rec.Prev != e.genesis {
+			if rec.Prev != e.genesis || verifyRecord(newBondLedger(e.rel).members(rec.Epoch, 0), &rec) != nil {
 				continue
 			}
 			e.state, e.last, e.lastFP = newEpochState(), nil, e.genesis // chain restart
 			e.chainStart = len(e.records)
+			e.resetLedgerLocked()
+		} else if verifyRecord(e.valsLocked(rec.Epoch), &rec) != nil {
+			continue
 		}
 		c := &epochCandidate{prop: rec.Proposal, hash: rec.ProposalHash}
 		e.computeLocked(c)
@@ -1065,6 +1195,10 @@ func (e *EpochEngine) loadStore() error {
 		e.state, e.last, e.lastFP = c.res.state, &r, r.Fingerprint
 		e.records = append(e.records, &r)
 		e.byEpoch[r.Epoch] = &r
+		wasOn := e.ledger.switchSet
+		e.ledger.apply(&r)
+		e.afterLedgerLocked(&r, wasOn)
+		e.valsCache = nil
 		e.resetCreditsLocked(&r)
 		n++
 	}
@@ -1155,6 +1289,10 @@ type EpochValidatorStatus struct {
 	// S3: signatures credited in the active-set window and their share.
 	Credits   int     `json:"credits"`
 	CreditPct float64 `json:"creditPct"`
+	// S4: seeded in the release, or a bonded member since epoch Since.
+	Seeded    bool   `json:"seeded"`
+	Since     uint64 `json:"since,omitempty"`
+	BondAsset uint32 `json:"bondAsset,omitempty"`
 }
 
 // ActiveSetInfo is how the current active set was derived (S3).
@@ -1199,6 +1337,7 @@ type EpochStatus struct {
 	Flags          []*EpochFlag            `json:"flags"`
 	ProtocolVer    uint32                  `json:"protocol"`
 	OmitOwnerDebug string                  `json:"omitOwnerDebug,omitempty"`
+	BondSwitch     bool                    `json:"bondSwitch"`
 }
 
 // Status returns the engine status.
@@ -1212,13 +1351,20 @@ func (e *EpochEngine) Status() *EpochStatus {
 		Release: e.rel.Name, ReleaseHash: EpochHash(rh).String(), Self: e.self, Params: e.p, Now: nowMs,
 		CurrentEpoch: e.p.EpochOf(nowMs), Finalized: e.finalized, Skipped: e.skipped, Pool: len(e.pool),
 		Resting: len(e.state.resting), StateHash: EpochHash(e.state.hash()).String(), ClockSkewMs: skew,
-		ClockPeers: peers, ClockOK: ok, Signing: e.signer && ok, BondedPower: e.rel.BondedPower(),
+		ClockPeers: peers, ClockOK: ok, Signing: e.signer && ok,
 		LastFP: e.lastFP.String(), LastFinalAt: e.lastFinAt, ProtocolVer: ProtocolVersion, OmitOwnerDebug: e.omitOwner,
 	}
 	st.Role = "client"
 	if e.signer {
 		st.Role = "validator"
 	}
+	vs := e.valsLocked(st.CurrentEpoch)
+	st.BondedPower = vs.BondedPower()
+	st.Signing = st.Signing && vs.IsValidator(e.self)
+	if e.signer && !vs.IsValidator(e.self) {
+		st.Role = "candidate" // S4: validator mode, no counting bond yet
+	}
+	st.BondSwitch = e.rel.Bonds != nil && e.ledger.switchOn(st.CurrentEpoch, st.LastFinalized)
 	if e.last != nil {
 		st.LastFinalized, st.HaveFinalized, st.LastSigners = e.last.Epoch, true, len(e.last.Sigs)
 		if cur := st.CurrentEpoch; cur > e.last.Epoch+1 {
@@ -1231,17 +1377,25 @@ func (e *EpochEngine) Status() *EpochStatus {
 	for _, a := range as.Active {
 		active[a] = true
 	}
-	for _, v := range e.rel.Validators {
-		vs := &EpochValidatorStatus{PeerID: v.PeerID, Name: e.rel.ValidatorName(v.PeerID), Bond: v.Bond,
-			Active: active[v.PeerID], Self: v.PeerID == e.self, LastSeen: e.heard[v.PeerID], Omissions: e.omissions[v.PeerID],
-			Credits: as.Credits[v.PeerID]}
-		if as.Sample > 0 {
-			vs.CreditPct = float64(as.Credits[v.PeerID]) * 100 / float64(as.Sample)
+	for _, id := range vs.ids {
+		m := vs.members[id]
+		v := &EpochValidatorStatus{PeerID: id, Name: e.nameOf(id), Bond: m.Power, Seeded: m.Seeded, Since: m.Since,
+			Active: active[id], Self: id == e.self, LastSeen: e.heard[id], Omissions: e.omissions[id],
+			Credits: as.Credits[id]}
+		sample := as.Sample
+		if n, isNew := as.Samples[id]; isNew {
+			sample = n
 		}
-		if vs.Active {
-			st.ActivePower += v.Bond
+		if sample > 0 {
+			v.CreditPct = float64(min(as.Credits[id], sample)) * 100 / float64(sample)
 		}
-		st.Validators = append(st.Validators, vs)
+		if m.Bond != nil {
+			v.BondAsset = m.Bond.claim.AssetID
+		}
+		if v.Active {
+			st.ActivePower += m.Power
+		}
+		st.Validators = append(st.Validators, v)
 	}
 	st.CanFinalize = thresholdMet(&e.p, st.ActivePower, st.ActivePower, st.BondedPower)
 	st.Flags = append([]*EpochFlag(nil), e.flags...)
