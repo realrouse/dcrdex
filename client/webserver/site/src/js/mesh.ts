@@ -83,7 +83,8 @@ export interface EpochStatus {
   activePower: number
   bondedPower: number
   canFinalize: boolean
-  validators: { peerID: string, name: string, bond: number, active: boolean, self: boolean, omissions: number, credits: number, creditPct: number }[] | null
+  validators: { peerID: string, name: string, bond: number, active: boolean, self: boolean, omissions: number, credits: number, creditPct: number, seeded: boolean, since?: number, bondAsset?: number }[] | null
+  bonds?: { enabled: boolean, on: boolean, onEpoch?: number, signals: string[] | null, need: number, seeded: number, pending: string[] | null, deadline?: number, latched: boolean, selfSignalled: boolean }
   activeSet?: { epoch: number, asOf: number, windowFrom: number, windowTo: number, sample: number, fallback: boolean }
   flags: { epoch: number, kind: string, peer: string, detail: string }[] | null
 }
@@ -337,7 +338,7 @@ export default class MeshPage extends BasePage {
     const ok = ep.haveFinalized && behind <= 1
     page.epochPill.className = `mesh-pill ${ok ? 'good' : ep.canFinalize ? 'degraded' : 'offline'}`
     page.epochPill.textContent = ok ? 'finalizing' : ep.canFinalize ? 'catching up' : 'not finalizing'
-    page.epochRole.textContent = ep.role === 'validator' ? (ep.signing ? 'validator node (signing)' : 'validator node (NOT signing)') : 'trader'
+    page.epochRole.textContent = ep.role === 'validator' ? (ep.signing ? 'validator node (signing)' : 'validator node (NOT signing)') : ep.role === 'candidate' ? 'validator node (waiting for a bond to count)' : 'trader'
     page.epochRelease.textContent = `release ${ep.release} ${ep.releaseHash.substring(0, 8)}`
     page.epochSummary.textContent = `Epoch ${ep.currentEpoch} (${p.epochMs / 1000} s epochs, ${p.signWindowMs / 1000} s signing window). ` +
       (ep.haveFinalized ? `Last finalized ${ep.lastFinalized} with ${ep.lastSigners} signatures; ` : 'Nothing finalized yet; ') +
@@ -354,7 +355,15 @@ export default class MeshPage extends BasePage {
 : as.fallback
       ? `Active set: all validators (only ${as.sample} finalized epochs in the window so far, ${p.activeMinEpochs} needed to judge).`
       : `Active set: validators that signed at least ${p.activePct}% of the ${as.sample} finalized epochs in the last ${winH} h window (epochs ${as.windowFrom}-${as.windowTo}, ending ${p.activeLagEpochs} epochs back).`
+    const b = ep.bonds
+    page.epochBonds.textContent = !b
+? ''
+: b.on
+      ? `Validator bonds: ON since epoch ${b.onEpoch} (${(b.signals || []).length} of ${b.seeded} seeded validators signalled; it stays on). Anyone with a counting BTC, LBC or DCR bond is a validator.`
+      : `Validator bonds: dormant. ${(b.signals || []).length} of ${b.need} needed signals from the ${b.seeded} seeded validators` +
+        ((b.pending || []).length ? `, ${(b.pending || []).length} more on the way` : '') + (b.deadline ? `; turns on by itself at ${new Date(b.deadline * 1000).toLocaleString()}` : '') + '.'
     Doc.empty(page.epochVals)
+    const bondSym: Record<number, string> = { 0: 'BTC', 42: 'DCR', 140: 'LBC' }
     for (const v of ep.validators || []) {
       const tr = document.createElement('tr')
       if (!v.active) tr.classList.add('offline')
@@ -362,7 +371,7 @@ export default class MeshPage extends BasePage {
       const idTd = this.td(shortID(v.peerID), 'mono')
       idTd.title = v.peerID
       tr.appendChild(idTd)
-      tr.appendChild(this.td(String(v.bond)))
+      tr.appendChild(this.td(v.seeded ? `${v.bond} (seeded)` : `${v.bond} (${bondSym[v.bondAsset || 0] || 'bond'} bond)`))
       tr.appendChild(this.td(v.active ? 'active' : 'inactive'))
       tr.appendChild(this.td(as && as.sample > 0 ? `${v.creditPct.toFixed(0)}%` : '-', v.creditPct < p.activePct && as && !as.fallback ? 'text-danger' : ''))
       tr.appendChild(this.td(String(v.omissions), v.omissions > 0 ? 'text-danger demi' : ''))

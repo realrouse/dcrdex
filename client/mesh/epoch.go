@@ -1337,7 +1337,7 @@ type EpochStatus struct {
 	Flags          []*EpochFlag            `json:"flags"`
 	ProtocolVer    uint32                  `json:"protocol"`
 	OmitOwnerDebug string                  `json:"omitOwnerDebug,omitempty"`
-	BondSwitch     bool                    `json:"bondSwitch"`
+	Bonds          *BondSwitchStatus       `json:"bonds,omitempty"` // S4 bond switch (nil: release without bonds)
 }
 
 // Status returns the engine status.
@@ -1364,7 +1364,9 @@ func (e *EpochEngine) Status() *EpochStatus {
 	if e.signer && !vs.IsValidator(e.self) {
 		st.Role = "candidate" // S4: validator mode, no counting bond yet
 	}
-	st.BondSwitch = e.rel.Bonds != nil && e.ledger.switchOn(st.CurrentEpoch, st.LastFinalized)
+	if e.rel.Bonds != nil {
+		st.Bonds = e.switchStatusLocked(st.CurrentEpoch, st.LastFinalized)
+	}
 	if e.last != nil {
 		st.LastFinalized, st.HaveFinalized, st.LastSigners = e.last.Epoch, true, len(e.last.Sigs)
 		if cur := st.CurrentEpoch; cur > e.last.Epoch+1 {

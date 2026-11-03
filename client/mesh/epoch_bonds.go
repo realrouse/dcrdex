@@ -527,32 +527,7 @@ func (e *EpochEngine) BondsStatus(n, asOf uint64) *BondsStatus {
 	if le, _ := e.lastEpochLocked(); asOf == 0 || asOf > le {
 		asOf = le
 	}
-	out := &BondsStatus{Epoch: n}
-	sw := &out.Switch
-	sw.Enabled = e.rel.Bonds != nil
-	sw.Seeded = len(e.rel.Validators)
-	sw.Latched = e.latched
-	sw.Self = e.ownSignal != nil
-	if r := e.rel.Bonds; r != nil {
-		sw.Need = r.switchNeed(len(e.rel.Validators))
-		sw.Deadline = r.SwitchDeadline
-		sw.On = e.ledger.switchOn(n, asOf)
-		if st, on := e.ledger.switchStart(asOf); on {
-			sw.OnEpoch = st
-		}
-	}
-	for v, ep := range e.ledger.signals {
-		if ep <= asOf {
-			sw.Signals = append(sw.Signals, e.rel.ValidatorName(v))
-		}
-	}
-	sort.Strings(sw.Signals)
-	for v := range e.sigPool {
-		if _, have := e.ledger.signals[v]; !have {
-			sw.Pending = append(sw.Pending, e.rel.ValidatorName(v))
-		}
-	}
-	sort.Strings(sw.Pending)
+	out := &BondsStatus{Epoch: n, Switch: *e.switchStatusLocked(n, asOf)}
 	vs := e.ledger.members(n, asOf)
 	for _, b := range e.ledger.bonds {
 		if b.epoch > asOf {
@@ -578,6 +553,31 @@ func (e *EpochEngine) BondsStatus(n, asOf uint64) *BondsStatus {
 	}
 	out.Bonded = vs.BondedPower()
 	return out
+}
+
+func (e *EpochEngine) switchStatusLocked(n, asOf uint64) *BondSwitchStatus {
+	sw := &BondSwitchStatus{Enabled: e.rel.Bonds != nil, Seeded: len(e.rel.Validators), Latched: e.latched, Self: e.ownSignal != nil}
+	if r := e.rel.Bonds; r != nil {
+		sw.Need = r.switchNeed(len(e.rel.Validators))
+		sw.Deadline = r.SwitchDeadline
+		sw.On = e.ledger.switchOn(n, asOf)
+		if st, on := e.ledger.switchStart(asOf); on {
+			sw.OnEpoch = st
+		}
+	}
+	for v, ep := range e.ledger.signals {
+		if ep <= asOf {
+			sw.Signals = append(sw.Signals, e.rel.ValidatorName(v))
+		}
+	}
+	sort.Strings(sw.Signals)
+	for v := range e.sigPool {
+		if _, have := e.ledger.signals[v]; !have {
+			sw.Pending = append(sw.Pending, e.rel.ValidatorName(v))
+		}
+	}
+	sort.Strings(sw.Pending)
+	return sw
 }
 
 // nameOf is a validator's release name, our mesh name hint or a short ID.
