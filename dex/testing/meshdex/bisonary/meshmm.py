@@ -44,8 +44,8 @@ def seed_book(traders, mkt, prices, per_wallet=(2, 3), max_lots=5, lifetime=1800
         for sell in (False, True):
             n = rng.randint(*per_wallet)
             rates = sorted({max(1, int(round(mid * (1 + (1 if sell else -1) * rng.uniform(0.005, 0.04))))) for _ in range(n)})
-            if mid < 50:   # below rate resolution: bids at the floor, asks above
-                rates = [max(1, mid)] if not sell else [mid + 2 + i for i in range(n)]
+            if mid < 50:   # below rate resolution: n bids at the floor (sizes vary), asks above
+                rates = [max(1, mid)] * n if not sell else [mid + 2 + i for i in range(n)]
             cap = budget(t, mkt, sell) if budget else max_lots * n
             for r in rates:
                 lots = min(rng.randint(1, max_lots), cap)
@@ -71,7 +71,7 @@ class MeshMM(threading.Thread):
         bids = ladder(mid, False, self.levels, self.gap, self.step)
         asks = ladder(mid, True, self.levels, self.gap, self.step)
         if mid < 50:
-            bids, asks = [max(1, mid)], [mid + 2 + i for i in range(self.levels)]
+            bids, asks = [max(1, mid)] * self.levels, [mid + 2 + i for i in range(self.levels)]
         bids, asks = fix_tiny(bids, asks)
         return mid, bids, asks
 
