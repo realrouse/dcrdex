@@ -300,8 +300,21 @@ def phase_meshnode(net):
     if w["ratio"] < 0.7 or back is None or res["bansOrEquivocation"]:
         raise Fail("meshnode: %s" % res)
 
+def all_active(net, timeout, what):
+    """Wait until every validator is in the active set on alice again. (S3
+    on simnet: a validator down 20 s misses 10 of the 30-epoch window, drops
+    out and rejoins only after it is credited again. Killing the next one
+    before that leaves 2 active, and losing one of those 2 stalls by design;
+    run4 measured that, not churn. On the 24 h mainnet window a 20 s outage
+    does not drop a validator at all.)"""
+    t0 = time.time()
+    names = [v.name for v in net.vals]
+    h.wait_until(lambda: all(x in s3.active_names(s3.st(net["alice"])) for x in names), timeout, what, 2)
+    return round(time.time() - t0, 1)
+
 def phase_churn(net):
     res = {"single": {}, "double": {}, "rapid": {}}
+    res["secondsAllActiveAtStart"] = all_active(net, 240, "churn: all validators active")
     for v in net.vals:
         f0, c0 = fin(net["alice"]), cur_epoch(net["alice"])
         v.stop(kill=True)
@@ -311,7 +324,9 @@ def phase_churn(net):
         again = signs_again(net, v)
         c1 = cur_epoch(net["alice"])
         res["single"][v.name] = {"finalizedWhileDown": nrec(net["alice"], c0, c1), "epochs": c1 - c0, "lastFinalizedAdvance": fin(net["alice"]) - f0,
-                                 "secondsToSync": back, "secondsToSignAgain": again}
+                                 "secondsToSync": back, "secondsToSignAgain": again,
+                                 "activeAfterRestart": s3.active_names(s3.st(net["alice"]))}
+        res["single"][v.name]["secondsToRejoinActive"] = all_active(net, 240, "%s rejoins the active set" % v.name)
     a, c = net["v1"], net["v3"]
     a.stop(kill=True)
     c.stop(kill=True)
