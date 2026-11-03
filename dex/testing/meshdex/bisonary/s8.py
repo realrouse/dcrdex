@@ -180,7 +180,8 @@ def order_everywhere(net, oids, statuses=("resting", "done")):
     return True
 
 def mesh_pids(i=None):
-    pat = "p4mesh/tatanka-%s/tatanka.conf" % (i if i else "")
+    # pgrep -f takes a regex; no index = every mesh node of this run.
+    pat = "p4mesh/tatanka-%s/tatanka.conf" % (i if i else "[0-9]+")
     r = subprocess.run(["pgrep", "-f", pat], capture_output=True, text=True)
     return [int(x) for x in r.stdout.split()]
 
@@ -348,13 +349,13 @@ def phase_freeze(net):
     frozen = round(time.time() - t_freeze, 1)
     t0 = time.time()
     resumed = wait_ok(peers(net), 240, "resume after box freeze")
-    res["box"] = {"frozenProcesses": len(allp), "frozenSeconds": frozen, "secondsToResume": resumed, "finalizedBefore": fb,
+    res["box"] = {"frozenProcesses": len(allp), "frozenMeshNodes": len(allp) - len(peers(net)), "frozenSeconds": frozen, "secondsToResume": resumed, "finalizedBefore": fb,
                   "status": status_row(net, "freeze box: after")}
     res["box"]["window"] = window(net, net["v1"], 30, "freeze box: after")
     res["chains"] = chains(net, 300)
     res["bansOrEquivocation"] = bans_and_eqv(net)
     b.result("freeze", res)
-    if w["ratio"] < 0.7 or res["bansOrEquivocation"] or res["box"]["window"]["ratio"] < 0.8:
+    if w["ratio"] < 0.7 or res["bansOrEquivocation"] or res["box"]["window"]["ratio"] < 0.8 or res["box"]["frozenMeshNodes"] < 3:
         raise Fail("freeze: %s" % res)
 
 def phase_loss(net):
@@ -449,50 +450,55 @@ def swap_status(n, mid):
     return s and s["status"]
 
 def phase_swaprestart(net):
+    """One swap at a time (run1 ran both at once and polled every 3 s; the
+    swaps finished while the harness slept after the first kill)."""
     res = {}
     plan = [("dcr_btc", net["dave"], net["alice"]), ("lbc_dcr", net["bob"], net["carol"])]
-    ms = []
+    events, out = [], []
+    killed_v = False
+    n_mk = n_tk = 0
     for mkt, mk, tk in plan:
         m, oid, rate, took = s6.epoch_trade(net, mkt, mk, tk)
-        ms.append((mkt, mk, tk, m["match"]["id"]))
-    events = []
-    killed_mk, killed_tk, killed_v = set(), set(), False
-    deadline = time.time() + 1500
-    while time.time() < deadline:
-        done = True
-        for mkt, mk, tk, mid in ms:
+        mid = m["match"]["id"]
+        killed_mk = killed_tk = False
+        deadline = time.time() + 900
+        while time.time() < deadline:
             smk, stk = swap_status(mk, mid), swap_status(tk, mid)
-            if smk != "complete" or stk != "complete":
-                done = False
-            if mid not in killed_mk and smk in ("init_sent", "part_audited"):
-                events.append({"t": time.strftime("%T"), "market": mkt, "kill": mk.name, "makerStatus": smk, "takerStatus": stk})
+            if smk == "complete" and stk == "complete":
+                break
+            if not killed_mk and smk in ("init_sent", "part_audited"):
+                events.append({"t": time.strftime("%T"), "market": mkt, "kill": mk.name, "role": "maker", "makerStatus": smk, "takerStatus": stk})
                 mk.stop(kill=True)
+                if not killed_v:  # a validator restarted mid-swap too
+                    events.append({"t": time.strftime("%T"), "restart": "v1"})
+                    restart(net, net["v1"], kill=True)
+                    killed_v = True
                 time.sleep(10)
                 start(net, mk)
-                killed_mk.add(mid)
-            if mid not in killed_tk and stk == "part_sent":
-                events.append({"t": time.strftime("%T"), "market": mkt, "kill": tk.name, "makerStatus": smk, "takerStatus": stk})
+                killed_mk = True
+                n_mk += 1
+                continue
+            if killed_mk and not killed_tk and (stk == "part_sent" or (smk == "redeemed" and stk != "complete")):
+                events.append({"t": time.strftime("%T"), "market": mkt, "kill": tk.name, "role": "taker", "makerStatus": smk, "takerStatus": stk})
                 tk.stop(kill=True)
                 time.sleep(10)
                 start(net, tk)
-                killed_tk.add(mid)
-            if not killed_v and killed_mk:
-                events.append({"t": time.strftime("%T"), "restart": "v1"})
-                restart(net, net["v1"], kill=True)
-                killed_v = True
-        if done:
-            break
-        time.sleep(3)
-    out = []
-    for mkt, mk, tk, mid in ms:
+                killed_tk = True
+                n_tk += 1
+                continue
+            time.sleep(0.5)
         sw = mk.swap(mid)
-        out.append({"market": mkt, "match": mid, "maker": mk.name, "taker": tk.name, "makerStatus": swap_status(mk, mid),
-                    "takerStatus": swap_status(tk, mid), "txs": {k: (sw.get(k) or {}).get("txid") for k in ("makerSwap", "takerSwap", "makerRedeem", "takerRedeem")} if sw else None})
+        out.append({"market": mkt, "match": mid, "maker": mk.name, "taker": tk.name, "makerKilled": killed_mk, "takerKilled": killed_tk,
+                    "makerStatus": swap_status(mk, mid), "takerStatus": swap_status(tk, mid),
+                    "txs": {k: (sw.get(k) or {}).get("txid") for k in ("makerSwap", "takerSwap", "makerRedeem", "takerRedeem")} if sw else None})
+        log("swaprestart %s: maker %s, taker %s (killed maker %s, taker %s)" % (mkt, out[-1]["makerStatus"], out[-1]["takerStatus"], killed_mk, killed_tk))
     res["events"] = events
     res["swaps"] = out
+    res["validatorRestarted"] = killed_v
     res["chains"] = chains(net, 300)
+    res["bansOrEquivocation"] = bans_and_eqv(net)
     b.result("swaprestart", res)
-    if not all(x["makerStatus"] == "complete" and x["takerStatus"] == "complete" for x in out) or len(killed_mk) < 2 or len(killed_tk) < 1:
+    if not all(x["makerStatus"] == "complete" and x["takerStatus"] == "complete" for x in out) or n_mk < 2 or n_tk < 1 or not killed_v:
         raise Fail("swaprestart: %s" % res)
 
 class Bot(threading.Thread):
