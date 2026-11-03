@@ -26,9 +26,11 @@ Phases (default all, in order):
                no equivocation, every validator signs again, same chains
   freeze       one validator SIGSTOPped 45 s; then every bisonw and mesh node
                frozen 60 s (box pause): resume, no bans, same chains
-  loss         all peers drop 10 % of messages with 200-800 ms delay for
-               120 s while a swap runs, then 30 % with 0-1500 ms for 60 s;
-               cleared: recovery, same chains, no suspects
+  loss         all peers drop 10 % of messages with 200-800 ms delay
+               (scaled to the 2 s epoch: 40-160 ms) for 120 s while a swap
+               is matched and runs, then 30 % with 0-1500 ms (0-300 ms) for
+               60 s and 10 % with unscaled 200-800 ms for 60 s (both
+               reported only); cleared: recovery, same chains, no suspects
   flood        erin floods the epoch topic (junk, bad JSON, bad-signature
                orders) and v1's inbox: finalization continues, nothing admitted
   fakerelay    erin replays captured epoch messages unchanged and tampered
@@ -76,6 +78,22 @@ def fin(n):
 def cur_epoch(n):
     return n.epochs()["currentEpoch"]
 
+def nrec(n, c0, c1):
+    """Epochs in [c0, c1) with a finalized record on n's chain. (The
+    lastFinalized delta overstates finalization: an epoch that did not
+    finalize rolls its orders into the next one and lastFinalized jumps over
+    it, so run1 counted rolled epochs as finalized.)"""
+    out, frm = 0, max(0, c0 - 1)  # the API returns epochs > from
+    while frm + 1 < c1:
+        rs = b.records(n, frm)
+        if not rs:
+            break
+        out += len([e for e in rs if c0 <= e < c1])
+        if len(rs) < 1000:
+            break
+        frm = max(rs)
+    return out
+
 def status_row(net, tag, nodes=None):
     row = {"t": time.strftime("%T"), "tag": tag}
     for n in nodes or peers(net):
@@ -109,8 +127,9 @@ def window(net, n, secs, tag, skip=()):
         prev = time.time()
     f1, c1 = fin(n), cur_epoch(n)
     pe = int(paused * 1000 / EPOCH_MS)
-    return {"node": n.name, "finalized": f1 - f0, "epochs": c1 - c0, "boxPauseEpochs": pe,
-            "ratio": round((f1 - f0) / max(1, c1 - c0 - pe), 3)}
+    k = nrec(n, c0, c1)
+    return {"node": n.name, "finalized": k, "epochs": c1 - c0, "boxPauseEpochs": pe, "lastFinalizedAdvance": f1 - f0,
+            "ratio": round(k / max(1, c1 - c0 - pe), 3)}
 
 def bans_and_eqv(net):
     out = {}
@@ -290,7 +309,8 @@ def phase_churn(net):
         start(net, v)
         back = wait_ok([v], 120, "%s back" % v.name)
         again = signs_again(net, v)
-        res["single"][v.name] = {"finalizedWhileDown": fin(net["alice"]) - f0, "epochs": cur_epoch(net["alice"]) - c0,
+        c1 = cur_epoch(net["alice"])
+        res["single"][v.name] = {"finalizedWhileDown": nrec(net["alice"], c0, c1), "epochs": c1 - c0, "lastFinalizedAdvance": fin(net["alice"]) - f0,
                                  "secondsToSync": back, "secondsToSignAgain": again}
     a, c = net["v1"], net["v3"]
     a.stop(kill=True)
@@ -358,12 +378,26 @@ def phase_freeze(net):
     if w["ratio"] < 0.7 or res["bansOrEquivocation"] or res["box"]["window"]["ratio"] < 0.8 or res["box"]["frozenMeshNodes"] < 3:
         raise Fail("freeze: %s" % res)
 
+def scaled(ms):
+    """Delays relative to the epoch: the campaign runs the 2 s simnet release
+    (1 s signing window), the design is 10 s epochs with a 5 s window, so
+    200-800 ms on the design release is 40-160 ms here."""
+    return int(ms * EPOCH_MS / 10000)
+
 def phase_loss(net):
+    """Message loss. PLAN.md S8 asks for kill/flood/partition/fake-relay
+    tests; loss is an extra. Pass: 10 % loss with the design's delays (scaled
+    to the epoch) keeps finalizing (>= 50 % of epochs, unfinalized ones roll
+    over) and a swap matches and completes under it; afterwards full
+    finalization, no bans, no suspects. Reported only: 30 % loss, and 10 %
+    loss with unscaled 200-800 ms delays (beyond the 1 s window of this
+    release)."""
     _NET["net"] = net
-    res = {}
+    res = {"epochMs": EPOCH_MS}
     al, dv = net["alice"], net["dave"]
-    set_faults(peers(net), {"dropInPct": 10, "delayMs": 200, "jitterMs": 600})
-    t0 = time.time()
+    f10 = {"dropInPct": 10, "delayMs": scaled(200), "jitterMs": scaled(600)}
+    set_faults(peers(net), f10)
+    res["faults10"] = f10
     trade = {}
     def do_trade():
         try:
@@ -374,9 +408,18 @@ def phase_loss(net):
     th.start()
     res["loss10"] = window(net, net["v1"], 120, "loss 10%")
     res["loss10"]["chains"] = chains(net, 100)
-    set_faults(peers(net), {"dropInPct": 30, "delayMs": 0, "jitterMs": 1500})
+    res["faultStats10"] = {n.name: n.dbgapi("/mesh/faults") for n in peers(net)}
+    # (The take waits at most 90 s for its match, so it is matched under the
+    # 10 % loss above; the swap goes on under the heavier loss below.)
+    f30 = {"dropInPct": 30, "delayMs": 0, "jitterMs": scaled(1500)}
+    set_faults(peers(net), f30)
+    res["faults30"] = f30
     res["loss30"] = window(net, net["v1"], 60, "loss 30%")
     res["loss30"]["chains"] = chains(net, 100)
+    fraw = {"dropInPct": 10, "delayMs": 200, "jitterMs": 600}
+    set_faults(peers(net), fraw)
+    res["faults10Unscaled"] = fraw
+    res["loss10Unscaled"] = window(net, net["v1"], 60, "loss 10% unscaled delay")
     res["faultStats"] = {n.name: n.dbgapi("/mesh/faults") for n in peers(net)}
     res["suspectsDuringLoss"] = suspects(net)
     clear_faults(net)
@@ -413,7 +456,8 @@ def phase_flood(net):
     res["floodSeconds"] = round(time.time() - t0, 1)
     res["sent"] = out
     w = window(net, v1, 30, "flood: after")
-    res["duringAndAfter"] = {"finalized": fin(v1) - f0, "epochs": cur_epoch(v1) - c0}
+    c1 = cur_epoch(v1)
+    res["duringAndAfter"] = {"finalized": nrec(v1, c0, c1), "epochs": c1 - c0, "lastFinalizedAdvance": fin(v1) - f0}
     res["after"] = w
     res["alive"] = {n.name: n.alive() for n in peers(net)}
     n_erin, total = s6.owner_orders_in_records(net, v1, f0 - 1, er.peer_id)
@@ -569,7 +613,8 @@ def phase_soak(net):
             chain_ok = True
         except Fail as e:
             rep, chain_ok = str(e), False
-        smp = {"t": time.strftime("%T"), "finalized": fin(net["v1"]) - fa, "epochs": cur_epoch(net["v1"]) - ca, "chainsAgree": chain_ok,
+        cb = cur_epoch(net["v1"])
+        smp = {"t": time.strftime("%T"), "finalized": nrec(net["v1"], ca, cb), "epochs": cb - ca, "chainsAgree": chain_ok,
                "rssMB": {n.name: rss_mb(n) for n in peers(net)}, "trades": sum(len(x.done) for x in bots), "mmTakes": len(taker.takes),
                "boxPauseS": round(gap) if gap > 20 else 0,
                "suspects": suspects(net), "bans": bans_and_eqv(net), "pool": {k: v.get("pool") for k, v in row.items() if isinstance(v, dict)}}
@@ -584,8 +629,9 @@ def phase_soak(net):
     f1, c1 = fin(net["v1"]), cur_epoch(net["v1"])
     rss0, rss1 = samples[0]["rssMB"], samples[-1]["rssMB"]
     pe = int(sum(x["boxPauseS"] for x in samples) * 1000 / EPOCH_MS)
-    res = {"minutes": SOAK_MIN, "finalized": f1 - f0, "epochs": c1 - c0, "boxPauseEpochs": pe,
-           "ratio": round((f1 - f0) / max(1, c1 - c0 - pe), 3),
+    k = nrec(net["v1"], c0, c1)
+    res = {"minutes": SOAK_MIN, "finalized": k, "epochs": c1 - c0, "boxPauseEpochs": pe, "lastFinalizedAdvance": f1 - f0,
+           "ratio": round(k / max(1, c1 - c0 - pe), 3),
            "trades": [{k: r[k] for k in ("market", "maker", "taker", "match", "ok", "secondsCompleteToVerifiedEveryPeer")} for x in bots for r in x.done],
            "tradeErrors": [e for x in bots for e in x.errors], "mmTakes": len(taker.takes), "mmTakeErrors": taker.errors[:20],
            "minuteRatioMin": min([s["finalized"] / max(1, s["epochs"]) for s in samples if not s["boxPauseS"]] or [0]), "chainsAgreeEveryMinute": all(s["chainsAgree"] for s in samples),
