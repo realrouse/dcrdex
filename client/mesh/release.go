@@ -169,6 +169,9 @@ type Release struct {
 	// UserBonds (S6) are the trading bond rules. nil: trading needs no bond
 	// (S0-S5 releases).
 	UserBonds *UserBondRules `json:"userBonds,omitempty"`
+	// PriceHistory (S7): price history only from trades verified on chain.
+	// nil: the old signed trade summaries (S0-S6 releases).
+	PriceHistory *PriceRules `json:"priceHistory,omitempty"`
 
 	hash [32]byte
 	vals map[string]*ReleaseValidator
@@ -272,6 +275,11 @@ func (r *Release) check() error {
 	if r.UserBonds != nil {
 		if err := r.UserBonds.Validate(); err != nil {
 			return fmt.Errorf("release trading bond rules: %w", err)
+		}
+	}
+	if r.PriceHistory != nil {
+		if err := r.PriceHistory.Validate(); err != nil {
+			return fmt.Errorf("release price history rules: %w", err)
 		}
 	}
 	r.vals = make(map[string]*ReleaseValidator, len(r.Validators))

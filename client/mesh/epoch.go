@@ -187,6 +187,14 @@ type EpochEngine struct {
 	gateEpoch  uint64
 	gateFP     EpochHash
 	s6SentAt   uint64
+	// S7 verified price history (pricehist.go, epoch_pricehist.go)
+	tradePool    map[string]*tradeEntry
+	tradeRefused map[string]string
+	ownTrades    map[string]*TradeProof
+	tradeChain   TradeChain
+	swapSource   func() []*SwapRecord
+	s7SentAt     uint64
+	s7ScanAt     uint64
 	// debug (simnet adversary tests)
 	omitOwner    string
 	equivocate   int
@@ -209,33 +217,36 @@ func NewEpochEngine(rel *Release, cfg EpochConfig, ps pubSub, priv libp2pcrypto.
 	}
 	e := &EpochEngine{
 		rel: rel, p: rel.Params, cfg: cfg, ps: ps, priv: priv, self: pid.String(), log: log, now: now,
-		genesis:     GenesisHash(rel),
-		clock:       newClockEstimator(),
-		state:       newEpochState(),
-		byEpoch:     make(map[uint64]*EpochRecord),
-		pool:        make(map[OrderID]*poolOrder),
-		cpool:       make(map[OrderID]*poolCancel),
-		cands:       make(map[uint64]map[EpochHash]*epochCandidate),
-		atts:        make(map[uint64]map[EpochHash]map[string]*EpochAttestation),
-		signed:      make(map[uint64]EpochHash),
-		proposed:    make(map[uint64]bool),
-		heard:       make(map[string]int64),
-		omissions:   make(map[string]int),
-		propBy:      make(map[string]EpochHash),
-		served:      make(map[string]int64),
-		frags:       make(map[string]*fragBuf),
-		lastCredits: make(map[string]*EpochCredit),
-		ledger:      newBondLedger(rel),
-		sigPool:     make(map[string]*SwitchSignal),
-		bondPool:    make(map[string]*bondPoolEntry),
-		ownClaims:   make(map[string]*BondClaim),
-		peerNames:   make(map[string]string),
-		proofs:      make(map[string]*proofEntry),
-		firstSigs:   make(map[string]*firstSig),
-		sentMsgs:    make(map[string]int64),
-		ubondPool:   make(map[string]*ubondEntry),
-		ownUBonds:   make(map[string]*ownUserBond),
-		ignored:     make(map[string]int),
+		genesis:      GenesisHash(rel),
+		clock:        newClockEstimator(),
+		state:        newEpochState(),
+		byEpoch:      make(map[uint64]*EpochRecord),
+		pool:         make(map[OrderID]*poolOrder),
+		cpool:        make(map[OrderID]*poolCancel),
+		cands:        make(map[uint64]map[EpochHash]*epochCandidate),
+		atts:         make(map[uint64]map[EpochHash]map[string]*EpochAttestation),
+		signed:       make(map[uint64]EpochHash),
+		proposed:     make(map[uint64]bool),
+		heard:        make(map[string]int64),
+		omissions:    make(map[string]int),
+		propBy:       make(map[string]EpochHash),
+		served:       make(map[string]int64),
+		frags:        make(map[string]*fragBuf),
+		lastCredits:  make(map[string]*EpochCredit),
+		ledger:       newBondLedger(rel),
+		sigPool:      make(map[string]*SwitchSignal),
+		bondPool:     make(map[string]*bondPoolEntry),
+		ownClaims:    make(map[string]*BondClaim),
+		peerNames:    make(map[string]string),
+		proofs:       make(map[string]*proofEntry),
+		firstSigs:    make(map[string]*firstSig),
+		sentMsgs:     make(map[string]int64),
+		ubondPool:    make(map[string]*ubondEntry),
+		ownUBonds:    make(map[string]*ownUserBond),
+		ignored:      make(map[string]int),
+		tradePool:    make(map[string]*tradeEntry),
+		tradeRefused: make(map[string]string),
+		ownTrades:    make(map[string]*TradeProof),
 	}
 	e.lastFP = e.genesis
 	// S4: with bond rules a node that is not seeded can become a validator
@@ -542,6 +553,12 @@ func (e *EpochEngine) handleMsg(ctx context.Context, from string, b []byte) {
 			e.addUBondLocked(m.UBond)
 			e.mtx.Unlock()
 		}
+	case epMsgTrade:
+		if m.Trade != nil {
+			e.mtx.Lock()
+			e.addTradeLocked(m.Trade)
+			e.mtx.Unlock()
+		}
 	case epMsgProof:
 		if m.Proof != nil {
 			e.handleProof(from, m.Proof)
@@ -597,6 +614,9 @@ func (e *EpochEngine) tick(ctx context.Context) {
 	e.bondChecks(ctx, nowMs)
 	e.s6Gossip(ctx, cur)
 	e.ubondChecks(ctx, nowMs)
+	e.s7Gossip(ctx, cur)
+	e.s7Scan(ctx, cur)
+	e.tradeChecks(ctx, nowMs)
 	e.mtx.Lock()
 	member := e.isMemberLocked(cur)
 	var retry []*epochCandidate
@@ -604,7 +624,7 @@ func (e *EpochEngine) tick(ctx context.Context) {
 		// S4: a proposal we could not sign yet (bond not verified) is
 		// retried within its window.
 		for _, c := range e.cands[cur-1] {
-			if c.res != nil && (len(c.prop.Bonds) > 0 || len(c.prop.UserBonds) > 0 || e.latched) && nowMs <= e.p.EpochEnd(cur-1)+e.p.SignWindowMs {
+			if c.res != nil && (len(c.prop.Bonds) > 0 || len(c.prop.UserBonds) > 0 || len(c.prop.Trades) > 0 || e.latched) && nowMs <= e.p.EpochEnd(cur-1)+e.p.SignWindowMs {
 				if _, did := e.signed[cur-1]; !did {
 					retry = append(retry, c)
 				}
@@ -771,6 +791,7 @@ func (e *EpochEngine) maybePropose(ctx context.Context, n uint64, nowMs int64) {
 	e.s4ProposalLocked(prop)
 	e.s5ProposalLocked(prop)
 	e.s6ProposalLocked(prop)
+	e.s7ProposalLocked(prop)
 	e.noteSentLocked(propKey(prop.Epoch, prop.Stamp), prop.Stamp)
 	e.mtx.Unlock()
 	if err := prop.sign(e.priv); err != nil {
@@ -822,6 +843,11 @@ func (e *EpochEngine) computeLocked(c *epochCandidate) {
 	if err := e.checkS6Locked(c.prop); err != nil {
 		c.bad = err.Error()
 		e.addFlagLocked(&EpochFlag{Epoch: c.prop.Epoch, Kind: "trading-bonds", Peer: c.prop.Proposer, Detail: c.bad})
+		return
+	}
+	if err := e.checkS7Locked(c.prop); err != nil {
+		c.bad = err.Error()
+		e.addFlagLocked(&EpochFlag{Epoch: c.prop.Epoch, Kind: "trades", Peer: c.prop.Proposer, Detail: c.bad})
 		return
 	}
 	st := e.state.clone()
@@ -965,7 +991,7 @@ func (e *EpochEngine) considerSign(ctx context.Context, c *epochCandidate) {
 	}
 	// S4: sign bond admissions only after our own chain check, and keep a
 	// latched switch on.
-	if !e.bondsVerifiedLocked(c.prop) || !e.latchOKLocked(c.prop) || !e.ubondsVerifiedLocked(c.prop) {
+	if !e.bondsVerifiedLocked(c.prop) || !e.latchOKLocked(c.prop) || !e.ubondsVerifiedLocked(c.prop) || !e.tradesVerifiedLocked(c.prop) {
 		e.mtx.Unlock()
 		return
 	}
@@ -1118,6 +1144,7 @@ func (e *EpochEngine) commitLocked(rec *EpochRecord, res *epochResult, synced bo
 	e.afterBansLocked(e.ledger.applyBans(rec), synced)
 	e.afterLedgerLocked(rec, wasOn)
 	e.afterUserBondsLocked(rec)
+	e.afterTradesLocked(rec)
 	e.resetCreditsLocked(rec)
 	for _, o := range rec.Proposal.Orders {
 		delete(e.pool, o.ID())
@@ -1347,6 +1374,7 @@ func (e *EpochEngine) loadStore() error {
 		e.afterBansLocked(e.ledger.applyBans(&r), true)
 		e.afterLedgerLocked(&r, wasOn)
 		e.afterUserBondsLocked(&r)
+		e.afterTradesLocked(&r)
 		e.valsCache = nil
 		e.resetCreditsLocked(&r)
 		n++

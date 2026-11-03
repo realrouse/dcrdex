@@ -115,6 +115,7 @@ func (c *Core) connectMesh(ctx context.Context, crypter encrypt.Crypter) {
 		mb := &meshBonds{c: c, dir: filepath.Dir(store)}
 		eng.SetBondHooks(mb, mb)
 		eng.SetUserBondMaker(mb)
+		eng.SetTradeChain(mb) // S7: validators check swap contracts on chain
 	}
 
 	// Mesh activity goes to the UI as data notifications. The sink must not

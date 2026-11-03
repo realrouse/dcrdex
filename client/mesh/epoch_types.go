@@ -61,9 +61,11 @@ type EpochProposal struct {
 	Proofs []*EquivocationProof `json:"proofs,omitempty"`
 	// S6 (userbonds.go): trading bond admissions.
 	UserBonds []*UserBond `json:"ubonds,omitempty"`
-	Stamp     int64       `json:"stamp"`
-	PubKey    []byte      `json:"pubkey"`
-	Sig       []byte      `json:"sig"`
+	// S7 (pricehist.go): trade admissions for the verified price history.
+	Trades []*TradeProof `json:"trades,omitempty"`
+	Stamp  int64         `json:"stamp"`
+	PubKey []byte        `json:"pubkey"`
+	Sig    []byte        `json:"sig"`
 }
 
 // EpochCredit is a validator's attestation of the previous record (the
@@ -146,6 +148,14 @@ func (p *EpochProposal) Hash() EpochHash {
 			b.Write(c.Sig)
 		}
 	}
+	// S7: only proposals with trade admissions commit to them.
+	if len(p.Trades) > 0 {
+		b.WriteString(tradeProofDomain)
+		_ = binary.Write(b, binary.BigEndian, uint16(len(p.Trades)))
+		for _, t := range p.Trades {
+			t.write(b)
+		}
+	}
 	return sha256.Sum256(b.Bytes())
 }
 
@@ -221,6 +231,19 @@ func (p *EpochProposal) verify(r *valSet) error {
 	for i, c := range p.UserBonds {
 		if c == nil || (i > 0 && p.UserBonds[i-1].Key() >= c.Key()) {
 			return errors.New("trading bond admissions not sorted or duplicated")
+		}
+	}
+	if len(p.Trades) > 0 {
+		if r.rel.PriceHistory == nil {
+			return errors.New("trade admissions in a release without price history rules")
+		}
+		if len(p.Trades) > r.rel.PriceHistory.MaxProofsPerEpoch {
+			return errors.New("too many trade admissions")
+		}
+	}
+	for i, t := range p.Trades {
+		if t == nil || (i > 0 && p.Trades[i-1].Key() >= t.Key()) {
+			return errors.New("trade admissions not sorted or duplicated")
 		}
 	}
 	h := p.Hash()
@@ -419,6 +442,7 @@ type epochMsg struct {
 	Bond     *BondClaim         `json:"bond,omitempty"`
 	Proof    *EquivocationProof `json:"eqv,omitempty"`   // S5
 	UBond    *UserBond          `json:"ubond,omitempty"` // S6
+	Trade    *TradeProof        `json:"trade,omitempty"` // S7
 }
 
 const (
@@ -430,7 +454,8 @@ const (
 	epMsgRec     = "rec"
 	epMsgSyncReq = "syncreq"
 	epMsgRecs    = "recs"
-	epMsgSignal  = "bsig"  // S4 bond switch signal
-	epMsgBond    = "bond"  // S4 validator bond claim
-	epMsgUBond   = "ubond" // S6 trading bond claim
+	epMsgSignal  = "bsig"   // S4 bond switch signal
+	epMsgBond    = "bond"   // S4 validator bond claim
+	epMsgUBond   = "ubond"  // S6 trading bond claim
+	epMsgTrade   = "vtrade" // S7 trade proof
 )

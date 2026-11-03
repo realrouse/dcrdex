@@ -39,6 +39,26 @@ func (m *meshBonds) BondConfs(ctx context.Context, assetID uint32, coinID, bondS
 	return w.Wallet.SwapConfirmations(ctx, coinID, bondScript, since)
 }
 
+// SwapConfs looks a swap contract output up with the asset's wallet (S7
+// trade proofs; an SPV wallet scans block filters from since).
+func (m *meshBonds) SwapConfs(ctx context.Context, assetID uint32, coinID, contract []byte, since time.Time) (uint32, bool, error) {
+	w, err := m.c.connectedWallet(assetID)
+	if err != nil {
+		return 0, false, fmt.Errorf("no %s wallet to check swaps: %w", unbip(assetID), err)
+	}
+	return w.Wallet.SwapConfirmations(ctx, coinID, contract, since)
+}
+
+// SwapLockExpired: the asset's chain passed lockTime (median time past for
+// UTXO chains), after which a swap contract can be refunded.
+func (m *meshBonds) SwapLockExpired(ctx context.Context, assetID uint32, lockTime int64) (bool, error) {
+	w, err := m.c.connectedWallet(assetID)
+	if err != nil {
+		return false, fmt.Errorf("no %s wallet to check swaps: %w", unbip(assetID), err)
+	}
+	return w.LockTimeExpired(ctx, time.Unix(lockTime, 0))
+}
+
 // validatorBondRecord is kept in <appdata>/<net>/mesh/validator-bonds.jsonl
 // so the bond can be refunded after its lock (RefundTx is the wallet's
 // pre-signed refund transaction).

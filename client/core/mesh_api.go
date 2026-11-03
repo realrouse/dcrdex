@@ -384,7 +384,7 @@ func (c *Core) MeshCandles(market, dur string) (*MeshCandles, error) {
 	if !ok || err != nil {
 		return nil, fmt.Errorf("unsupported candle duration %q", dur)
 	}
-	cs := meshpkg.BuildCandles(m.Trades(mkt, 0), binSize).CandlesCopy()
+	cs := meshpkg.BuildCandles(meshTrades(m.OrderBooks, mkt, 0), binSize).CandlesCopy()
 	if cs == nil {
 		cs = []msgjson.Candle{}
 	}
@@ -404,9 +404,25 @@ func (c *Core) MeshSpots() (map[string]*msgjson.Spot, error) {
 		if err != nil {
 			continue
 		}
-		if s := meshpkg.MarketSpot(mkt, m.Trades(mkt, now.Add(-meshpkg.TradeRetention).UnixMilli()), now); s != nil {
+		if s := meshpkg.MarketSpot(mkt, meshTrades(m.OrderBooks, mkt, now.Add(-meshpkg.TradeRetention).UnixMilli()), now); s != nil {
 			spots[d.Name] = s
 		}
 	}
 	return spots, nil
+}
+
+// meshTrades is a market's price history: with S7 rules in the release only
+// trades verified on chain and admitted in finalized epochs, otherwise the
+// signed trade summaries peers publish.
+func meshTrades(ob *meshpkg.OrderBooks, mkt meshpkg.Market, sinceMs int64) []*meshpkg.TradeSummary {
+	if e := ob.Epochs(); e != nil && e.PriceHistoryOn() {
+		var out []*meshpkg.TradeSummary
+		for _, t := range meshpkg.TradeSummaries(e.VerifiedTrades(mkt)) {
+			if t.Stamp >= sinceMs {
+				out = append(out, t)
+			}
+		}
+		return out
+	}
+	return ob.Trades(mkt, sinceMs)
 }

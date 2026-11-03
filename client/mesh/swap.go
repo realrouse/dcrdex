@@ -659,6 +659,16 @@ func (ob *OrderBooks) setSwapStatus(sw *swapper, s *swapState, status, format st
 	m := &s.rec.Match
 	if status == SwapComplete {
 		ob.publishTrade(m)
+		if e := ob.epochs; e != nil && e.PriceHistoryOn() {
+			r := *s.rec
+			go func() { // S7: our half of the trade proof
+				ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+				defer cancel()
+				if _, err := e.SubmitTradeProof(ctx, &r, false, false); err != nil {
+					ob.log.Warnf("Trade proof for swap %s: %v", m.ID, err)
+				}
+			}()
+		}
 	}
 	ob.emit(&Event{Kind: EventSwap, Market: marketName(m.Market), MatchID: m.ID.String(), OrderID: m.MakerOrderID.String(),
 		Status: status, Side: s.rec.Side, Sell: m.MakerSell, Qty: m.Qty, Rate: m.Rate, Maker: m.Maker, Taker: m.Taker})

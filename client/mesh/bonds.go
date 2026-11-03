@@ -384,11 +384,18 @@ type bondLedger struct {
 	ubonds   []*ledgerUserBond
 	ubondsBy map[string][]*ledgerUserBond
 	ucoins   map[string]bool
+	// S7 verified price history (pricehist.go)
+	matches map[string]*ledgerMatch // recent epoch matches by tradeKey
+	tcoins  map[string]bool         // contract coins counted
+	tkeys   map[string]bool         // admitted epoch matches
+	vtrades map[Market][]*VerifiedTrade
+	vcount  int
 }
 
 func newBondLedger(rel *Release) *bondLedger {
 	return &bondLedger{rel: rel, signals: make(map[string]uint64), sigs: make(map[string]*SwitchSignal), coins: make(map[string]bool),
-		bans: make(map[string]*ledgerBan), ubondsBy: make(map[string][]*ledgerUserBond), ucoins: make(map[string]bool)}
+		bans: make(map[string]*ledgerBan), ubondsBy: make(map[string][]*ledgerUserBond), ucoins: make(map[string]bool),
+		matches: make(map[string]*ledgerMatch), tcoins: make(map[string]bool), tkeys: make(map[string]bool), vtrades: make(map[Market][]*VerifiedTrade)}
 }
 
 func (l *bondLedger) rules() *BondRules { return l.rel.Bonds }
@@ -396,6 +403,7 @@ func (l *bondLedger) rules() *BondRules { return l.rel.Bonds }
 // apply adds a finalized record's signals and admissions.
 func (l *bondLedger) apply(rec *EpochRecord) {
 	l.applyUserBonds(rec) // S6
+	l.applyTrades(rec)    // S7
 	if l.rules() == nil || rec.Proposal == nil {
 		return
 	}

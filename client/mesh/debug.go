@@ -344,6 +344,7 @@ func (s *DebugServer) Handler(ctx context.Context) http.Handler {
 		writeJSON(w, http.StatusOK, map[string]any{"peers": s.ob.Peers()})
 	})
 	s.epochHandlers(ctx, mux)
+	s.priceHandlers(ctx, mux)
 	mux.HandleFunc("GET /mesh/matches", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]any{"matches": s.ob.Matches()})
 	})

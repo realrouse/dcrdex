@@ -39,6 +39,7 @@ func (ob *OrderBooks) attachEpochs(ctx context.Context, e *EpochEngine) {
 	ob.mtx.Lock()
 	ob.epochs = e
 	ob.mtx.Unlock()
+	e.SetSwapSource(ob.Swaps) // S7 trade proofs
 }
 
 // Epochs is the epoch engine, nil in legacy mode.

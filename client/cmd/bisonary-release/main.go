@@ -9,6 +9,7 @@
 //	     -bondlockleft 604800 -bondconfs 2 -bondswitch 3/4 -bonddeadline 0 -bondpower 1 -bondmaxclaims 8]
 //	    [-s6 -ubondbtc 10000 -ubondlbc 1000000000000 -ubonddcr 50000000 -ubondage 3600 -ubondminlock 2592000
 //	     -ubondlockleft 172800 -ubondconfs 2 -ubondlots 5 -ubondorders 10 -ubondmaxtier 100 -ubondmaxclaims 8]
+//	    [-s7 -tradeconfs 1 -trademaxproofs 16 -tradeage 86400 -tradelockleft 120]
 //	bisonary-release verify [-pubkey HEX] release.json
 //	bisonary-release pubkey -key dev.key
 //
@@ -127,6 +128,13 @@ func main() {
 		ubondOrders := fs.Uint64("ubondorders", du.OrdersPerTier, "max resting orders per tier")
 		ubondMaxTier := fs.Uint64("ubondmaxtier", du.MaxTier, "tier cap")
 		ubondMax := fs.Int("ubondmaxclaims", du.MaxClaimsPerEpoch, "trading bond admissions per proposal")
+		// S7 verified price history (defaults: mesh.DefaultPriceRules, proposed).
+		dp := mesh.DefaultPriceRules
+		s7 := fs.Bool("s7", false, "include S7 price history rules (price history only from trades verified on chain)")
+		tradeConfs := fs.Uint("tradeconfs", uint(dp.MinConfs), "confirmations a validator needs on each swap contract")
+		tradeMax := fs.Int("trademaxproofs", dp.MaxProofsPerEpoch, "trade admissions per proposal")
+		tradeAge := fs.Int64("tradeage", dp.MaxAgeSecs, "s after the match within which a trade can be admitted")
+		tradeLockLeft := fs.Int64("tradelockleft", dp.MinLockLeftSecs, "s of swap lock a proposer needs left to include a trade")
 		out := fs.String("out", "release.json", "output file")
 		_ = fs.Parse(os.Args[2:])
 		r := &mesh.Release{Version: mesh.ReleaseVersion, Name: *name, Network: *network, Issued: time.Now().Unix(),
@@ -188,6 +196,9 @@ func main() {
 				ur.Assets = append(ur.Assets, mesh.UserBondAsset{AssetID: a.id, Symbol: a.sym, TierAmount: amt})
 			}
 			r.UserBonds = ur
+		}
+		if *s7 {
+			r.PriceHistory = &mesh.PriceRules{MinConfs: uint32(*tradeConfs), MaxProofsPerEpoch: *tradeMax, MaxAgeSecs: *tradeAge, MinLockLeftSecs: *tradeLockLeft}
 		}
 		ids := strings.Split(*vals, ",")
 		nm := strings.Split(*names, ",")
