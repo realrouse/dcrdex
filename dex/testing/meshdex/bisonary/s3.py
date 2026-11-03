@@ -169,7 +169,9 @@ def phase_book(net):
         mid, placed = meshmm.seed_book(sd, m, prices, per_wallet=(4, 5) if poly else (3, 4), budget=budget, max_lots=3)
         books[m] = {"midRate": mid, "seeded": len(placed)}
     for m in b.MARKETS:
-        mm = meshmm.MeshMM(net["mm"], m, lambda: net.prices, levels=4, lots=1)
+        # Sub-resolution books (lbc_btc) are short of seeded asks (100k-LBC lots on
+        # small wallets), so the mm quotes more levels there.
+        mm = meshmm.MeshMM(net["mm"], m, lambda: net.prices, levels=6 if h.rate_for(net.prices, m) < 50 else 4, lots=1)
         mm.start()
         net.mms.append(mm)
     time.sleep(40)

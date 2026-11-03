@@ -47,9 +47,10 @@ def seed_book(traders, mkt, prices, per_wallet=(2, 3), max_lots=5, lifetime=1800
             if mid < 50:   # below rate resolution: n bids at the floor (sizes vary), asks above
                 rates = [max(1, mid)] * n if not sell else [mid + 2 + i for i in range(n)]
             cap = budget(t, mkt, sell) if budget else max_lots * n
-            for r in rates:
-                lots = min(rng.randint(1, max_lots), cap)
-                if lots <= 0:
+            for i, r in enumerate(rates):
+                # A tight budget is spread as 1-lot orders so the level count holds.
+                lots = max(1, min(rng.randint(1, max_lots), cap - (len(rates) - i - 1)))
+                if cap <= 0:
                     break
                 cap -= lots
                 oid = t.order(mkt, sell, lots, r, lifetime)
