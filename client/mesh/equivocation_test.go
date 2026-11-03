@@ -10,6 +10,8 @@ import (
 	"strings"
 	"sync"
 	"testing"
+
+	"github.com/libp2p/go-libp2p/core/peer"
 )
 
 func signedAtt(t *testing.T, n *simNode, epoch uint64, fp EpochHash, stamp int64) *EpochAttestation {
@@ -207,7 +209,8 @@ func TestEpochForgedProof(t *testing.T) {
 	s.epochs(12)
 	_ = forger.e.SetForgeProof("", "off")
 	got := lastEpoch(honest.e)
-	if got < last+9 {
+	t.Logf("forging proposer: finalized %d of 12 epochs", got-last)
+	if got < last+11 {
 		t.Fatalf("finalization with a forging proposer: %d -> %d", last, got)
 	}
 	var byForger int
@@ -387,5 +390,51 @@ func TestLedgerBans(t *testing.T) {
 	}
 	if vs := l.members(11, 10); vs.BondedPower() != 2 || len(vs.IDs()) != 2 {
 		t.Fatalf("power %d ids %d", vs.BondedPower(), len(vs.IDs()))
+	}
+}
+
+// TestDuplicateKeyTwin: the same validator key started a second time (the
+// mesh never delivers a peer's own messages to it) sees its key's
+// signatures in peers' records and never signs; the original keeps signing
+// and nobody gets an equivocation proof. Once the original stops, the twin
+// signs after the quiet period.
+func TestDuplicateKeyTwin(t *testing.T) {
+	s := newEpochSim(t, 4, 0, s3Params())
+	s.epochs(15)
+	v := s.vals[1]
+	twin := &simNode{name: "twin", priv: v.priv, id: v.id, key: peer.ID("twin-of-" + string(v.id))}
+	s.net.mtx.Lock()
+	s.net.real[twin.key] = v.id
+	s.net.mtx.Unlock()
+	s.startNode(twin, true, "")
+	s.traders = append(s.traders, twin)
+	g0 := v.e.BansStatus().GuardEpoch
+	s.epochs(12)
+	tb, vb := twin.e.BansStatus(), v.e.BansStatus()
+	t.Logf("twin: hold %q msgs %d guard %d; original guard %d -> %d", tb.SignHold, tb.DupCount, tb.GuardEpoch, g0, vb.GuardEpoch)
+	if tb.GuardEpoch != 0 || tb.DupCount == 0 || !strings.Contains(tb.SignHold, "another instance") {
+		t.Fatalf("twin: %+v", tb)
+	}
+	if vb.GuardEpoch < g0+10 {
+		t.Fatalf("original stopped signing: %d -> %d", g0, vb.GuardEpoch)
+	}
+	for _, n := range s.all() {
+		if bs := n.e.BansStatus(); len(bs.Banned)+len(bs.Held) != 0 {
+			t.Fatalf("%s: banned %v held %v", n.name, bs.Banned, bs.Held)
+		}
+	}
+	// The original goes away: the twin takes over after the quiet period.
+	s.net.setDown(v.id, true)
+	s.epochs(DupQuietEpochs + 4)
+	if g := twin.e.BansStatus().GuardEpoch; g == 0 {
+		t.Fatal("twin never signed after the original stopped")
+	}
+	for _, n := range s.all() {
+		if n == v {
+			continue
+		}
+		if bs := n.e.BansStatus(); len(bs.Banned)+len(bs.Held) != 0 {
+			t.Fatalf("%s after takeover: banned %v held %v", n.name, bs.Banned, bs.Held)
+		}
 	}
 }

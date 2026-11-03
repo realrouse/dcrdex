@@ -667,13 +667,19 @@ func (e *EpochEngine) maybePropose(ctx context.Context, n uint64, nowMs int64) {
 		e.mtx.Unlock()
 		return
 	}
+	if e.signHoldLocked(nowMs) != "" { // S5: not while our key may run twice
+		e.mtx.Unlock()
+		return
+	}
 	if _, did := e.signed[n]; did {
 		e.mtx.Unlock()
 		return
 	}
-	// A backup proposer stays quiet if a lower-ranked proposal arrived.
+	// A backup proposer stays quiet if a lower-ranked proposal arrived,
+	// unless we found that proposal invalid (S5: e.g. a forged proof), so a
+	// bad proposal cannot cost the network its epoch.
 	for _, c := range e.cands[n] {
-		if c.prop.Rank < rank {
+		if c.prop.Rank < rank && c.bad == "" {
 			e.mtx.Unlock()
 			return
 		}
@@ -833,6 +839,13 @@ func (e *EpochEngine) handleProposal(ctx context.Context, p *EpochProposal) {
 		}
 		e.checkOmissionsLocked(p)
 		e.checkCreditsLocked(p)
+		if e.signer && e.last != nil && p.Prev == e.lastFP {
+			for _, cr := range p.Credits {
+				if cr.Validator == e.self {
+					e.ownSigsLocked([]*EpochAttestation{{Epoch: e.last.Epoch, Fingerprint: e.lastFP, Validator: cr.Validator, Stamp: cr.Stamp, Sig: cr.Sig}})
+				}
+			}
+		}
 	}
 	e.computeLocked(c)
 	behind := c.res == nil && c.bad == ""
@@ -1130,6 +1143,15 @@ func (e *EpochEngine) handleRecord(ctx context.Context, rec *EpochRecord, synced
 		rec.Proposal.Proposer != rec.Proposer || !equalStrings(rec.Proposal.Active, rec.Active) {
 		e.log.Debugf("Bad epoch %d record proposal", rec.Epoch)
 		return
+	}
+	if e.signer {
+		// S5: our key's signatures we did not make (another instance).
+		e.mtx.Lock()
+		e.ownSigsLocked(rec.Sigs)
+		if rec.Proposer == e.self && !e.proposed[rec.Epoch] && rec.Proposal.Stamp >= e.startedAt && !e.sentStamps[rec.Proposal.Stamp] {
+			e.dupSeenLocked(rec.Proposal.Stamp, fmt.Sprintf("proposal for epoch %d in a peer's record", rec.Epoch))
+		}
+		e.mtx.Unlock()
 	}
 	e.mtx.Lock()
 	// S4: the record is checked against the validator set its chain

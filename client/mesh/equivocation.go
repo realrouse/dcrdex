@@ -506,6 +506,26 @@ func (e *EpochEngine) ownKeyMsg(b []byte) {
 	}
 	e.mtx.Lock()
 	defer e.mtx.Unlock()
+	e.dupSeenLocked(stamp, what)
+}
+
+// ownSigsLocked checks signatures of our key that peers relay to us inside
+// records (sigs) and proposals (credits): the mesh does not deliver
+// messages from our own peer ID to us, so another instance of our key is
+// seen this way (signer = true, valid signatures only).
+func (e *EpochEngine) ownSigsLocked(atts []*EpochAttestation) {
+	for _, a := range atts {
+		if a == nil || a.Validator != e.self || e.sentStamps[a.Stamp] || a.Stamp < e.startedAt {
+			continue
+		}
+		if a.verify() == nil {
+			e.dupSeenLocked(a.Stamp, fmt.Sprintf("signature of epoch %d in a peer's record", a.Epoch))
+		}
+	}
+}
+
+// dupSeenLocked notes a message signed with our key at stamp.
+func (e *EpochEngine) dupSeenLocked(stamp int64, what string) {
 	if e.sentStamps[stamp] || stamp < e.startedAt {
 		return // ours (echo), or from before we started (a previous run)
 	}

@@ -32,6 +32,7 @@ import (
 type epochNet struct {
 	mtx   sync.Mutex
 	subs  map[string]map[peer.ID]mc.TopicHandler
+	real  map[peer.ID]peer.ID // routing key -> peer ID (S5 twins share one)
 	queue []epochNetMsg
 	down  map[peer.ID]bool
 	sent  int
@@ -39,17 +40,17 @@ type epochNet struct {
 
 type epochNetMsg struct {
 	topic string
-	from  peer.ID
+	from  peer.ID // routing key
 	data  []byte
 }
 
 func newEpochNet() *epochNet {
-	return &epochNet{subs: make(map[string]map[peer.ID]mc.TopicHandler), down: make(map[peer.ID]bool)}
+	return &epochNet{subs: make(map[string]map[peer.ID]mc.TopicHandler), down: make(map[peer.ID]bool), real: make(map[peer.ID]peer.ID)}
 }
 
 type epochNetClient struct {
 	n  *epochNet
-	id peer.ID
+	id peer.ID // routing key (the peer ID, or a twin's own key)
 }
 
 func (c *epochNetClient) Broadcast(_ context.Context, topic string, data []byte) error {
@@ -113,14 +114,24 @@ func (n *epochNet) pump() {
 		}
 		sort.Slice(ids, func(i, j int) bool { return ids[i] < ids[j] })
 		var hs []mc.TopicHandler
+		from := m.from
+		if r, ok := n.real[from]; ok {
+			from = r
+		}
 		for _, id := range ids {
-			if id != m.from && !n.down[id] {
+			rid := id
+			if r, ok := n.real[id]; ok {
+				rid = r
+			}
+			// Like the mesh: nothing is delivered to the sender's peer ID,
+			// so a twin with the same key never hears the other directly.
+			if rid != from && !n.down[id] {
 				hs = append(hs, n.subs[m.topic][id])
 			}
 		}
 		n.mtx.Unlock()
 		for _, h := range hs {
-			h(mc.TopicEvent{Type: mc.TopicEventData, Data: m.data, Peer: m.from})
+			h(mc.TopicEvent{Type: mc.TopicEventData, Data: m.data, Peer: from})
 		}
 	}
 }
@@ -148,6 +159,7 @@ type simNode struct {
 	name   string
 	priv   libp2pcrypto.PrivKey
 	id     peer.ID
+	key    peer.ID // sim routing key ("" = id); a twin shares id, not key
 	e      *EpochEngine
 	offset time.Duration
 	finals []*EpochFinal
@@ -218,7 +230,7 @@ func newEpochSim(t *testing.T, nVals, nTraders int, params EpochParams) *epochSi
 
 func (s *epochSim) startNode(n *simNode, validator bool, store string) {
 	nn := n
-	e, err := NewEpochEngine(s.rel, EpochConfig{Validator: validator, StorePath: store}, &epochNetClient{s.net, n.id}, n.priv,
+	e, err := NewEpochEngine(s.rel, EpochConfig{Validator: validator, StorePath: store}, &epochNetClient{s.net, n.netKey()}, n.priv,
 		func() time.Time { return s.clock.now().Add(nn.offset) }, s.quiet)
 	if err != nil {
 		s.t.Fatal(err)
@@ -236,7 +248,7 @@ func (s *epochSim) step(d time.Duration) {
 	for el := time.Duration(0); el < d; el += 50 * time.Millisecond {
 		s.clock.add(50 * time.Millisecond)
 		for _, n := range s.all() {
-			if !s.net.down[n.id] {
+			if !s.net.down[n.netKey()] {
 				n.e.tick(s.ctx)
 			}
 		}
@@ -945,4 +957,11 @@ func TestEpochFragments(t *testing.T) {
 		t.Fatalf("stale fragments kept")
 	}
 	t.Logf("50000-byte message sent as %d fragments of <= %d bytes", len(parts), meshMaxPublish-meshPublishOverhead)
+}
+
+func (n *simNode) netKey() peer.ID {
+	if n.key != "" {
+		return n.key
+	}
+	return n.id
 }
