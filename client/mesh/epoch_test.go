@@ -966,3 +966,40 @@ func (n *simNode) netKey() peer.ID {
 	}
 	return n.id
 }
+
+// TestEpochOwnOrderRepair (S8 message loss): an own order that never reached
+// any validator (its message lost) is re-sent once a proposal leaves it out,
+// and then rests on every validator.
+func TestEpochOwnOrderRepair(t *testing.T) {
+	s := newEpochSim(t, 4, 2, DefaultEpochParams)
+	s.epochs(3)
+	tr := s.traders[0]
+	now := tr.e.now()
+	o := &MeshOrder{Market: dcrBTC, Sell: true, Qty: 1e8, LotSize: 1e8, Rate: 100_000, Stamp: now.UnixMilli(),
+		Expiry: now.Add(10 * time.Minute).UnixMilli(), Nonce: s.rng.Uint64(), EncPubKey: tEncPub}
+	if err := o.Sign(tr.priv); err != nil {
+		t.Fatal(err)
+	}
+	// Into the owner's pool only: the broadcast is "lost".
+	if err := tr.e.admitOrder(o); err != nil {
+		t.Fatal(err)
+	}
+	for _, v := range s.vals {
+		if st := v.e.OrderStatus(o.ID()); st != "unknown" {
+			t.Fatalf("%s already has the order: %s", v.name, st)
+		}
+	}
+	s.epochs(4)
+	for _, v := range s.vals {
+		if st := v.e.OrderStatus(o.ID()); st != "resting" {
+			t.Fatalf("%s: lost own order not repaired: %s", v.name, st)
+		}
+	}
+	tr.e.mtx.Lock()
+	n := tr.e.ownRepairs
+	tr.e.mtx.Unlock()
+	if n == 0 {
+		t.Fatal("no own-order repair counted")
+	}
+	t.Logf("own-order repairs sent: %d", n)
+}

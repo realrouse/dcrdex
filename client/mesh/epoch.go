@@ -130,18 +130,22 @@ type EpochEngine struct {
 	hbSent    uint64
 	flags     []*EpochFlag
 	omissions map[string]int
-	propBy    map[string]EpochHash // proposer|epoch -> proposal hash (equivocation)
-	finalized int
-	skipped   uint64
-	started   uint64
-	lastFinAt int64
-	clockBad  bool
-	syncAt    int64
-	recvAt    int64 // last epoch-topic message from another peer
-	resubAt   int64 // last epoch-topic resubscribe
-	served    map[string]int64
-	frags     map[string]*fragBuf // incomplete fragmented messages (epoch_frag.go)
-	store     *os.File
+	// S8: own orders a proposal left out (lost on the way to the proposer)
+	// are re-sent as repairs, at most once per ownRepairEveryEpochs.
+	ownRepairAt map[OrderID]int64
+	ownRepairs  int
+	propBy      map[string]EpochHash // proposer|epoch -> proposal hash (equivocation)
+	finalized   int
+	skipped     uint64
+	started     uint64
+	lastFinAt   int64
+	clockBad    bool
+	syncAt      int64
+	recvAt      int64 // last epoch-topic message from another peer
+	resubAt     int64 // last epoch-topic resubscribe
+	served      map[string]int64
+	frags       map[string]*fragBuf // incomplete fragmented messages (epoch_frag.go)
+	store       *os.File
 	// S3 active set (epoch_active.go)
 	chainStart    int                     // index in records of the current chain's first record
 	lastCredits   map[string]*EpochCredit // known signatures of the last record
@@ -237,6 +241,7 @@ func NewEpochEngine(rel *Release, cfg EpochConfig, ps pubSub, priv libp2pcrypto.
 		proposed:     make(map[uint64]bool),
 		heard:        make(map[string]int64),
 		omissions:    make(map[string]int),
+		ownRepairAt:  make(map[OrderID]int64),
 		propBy:       make(map[string]EpochHash),
 		served:       make(map[string]int64),
 		frags:        make(map[string]*fragBuf),
@@ -931,6 +936,7 @@ func (e *EpochEngine) handleProposal(ctx context.Context, p *EpochProposal) {
 	}
 	nowMs := e.nowMs()
 	h := p.Hash()
+	var ownResend []*MeshOrder
 	e.mtx.Lock()
 	if le, ok := e.lastEpochLocked(); ok && p.Epoch <= le {
 		e.mtx.Unlock()
@@ -951,7 +957,7 @@ func (e *EpochEngine) handleProposal(ctx context.Context, p *EpochProposal) {
 		if p.Proposer != e.self {
 			e.heard[p.Proposer] = nowMs
 		}
-		e.checkOmissionsLocked(p)
+		ownResend = e.checkOmissionsLocked(p)
 		e.checkCreditsLocked(p)
 		if e.signer && p.Prev == e.lastFP && p.Proposer != e.self {
 			if p.Epoch > e.p.EpochOf(e.startedAt) && p.Epoch != e.credCheckAt {
@@ -970,6 +976,9 @@ func (e *EpochEngine) handleProposal(ctx context.Context, p *EpochProposal) {
 	e.computeLocked(c)
 	behind := c.res == nil && c.bad == ""
 	e.mtx.Unlock()
+	for _, o := range ownResend {
+		e.send(ctx, &epochMsg{Type: epMsgOrderRepair, Order: o})
+	}
 	if behind {
 		go e.requestSync(ctx, false)
 	}
@@ -977,14 +986,24 @@ func (e *EpochEngine) handleProposal(ctx context.Context, p *EpochProposal) {
 	e.tryFinalize(ctx, p.Epoch)
 }
 
+// ownRepairEveryEpochs spaces re-sends of one own order; ownRepairMax
+// bounds the re-sends one proposal can trigger.
+const (
+	ownRepairEveryEpochs = 2
+	ownRepairMax         = 64
+)
+
 // checkOmissionsLocked flags a proposal that leaves out orders we had well
-// before the epoch end.
-func (e *EpochEngine) checkOmissionsLocked(p *EpochProposal) {
+// before the epoch end. Own orders it left out are returned for a re-send
+// (S8: an order message lost on the way to the proposer, e.g. one of its
+// fragments dropped, would otherwise never reach the epoch state).
+func (e *EpochEngine) checkOmissionsLocked(p *EpochProposal) (resend []*MeshOrder) {
 	// S7: clients check too (they compare what validators propose with the
 	// orders they hold); only the counts differ in meaning, not the rule.
 	if p.Proposer == e.self {
-		return
+		return nil
 	}
+	nowMs := e.nowMs()
 	end := e.p.EpochEnd(p.Epoch)
 	in := make(map[OrderID]bool, len(p.Orders))
 	for _, o := range p.Orders {
@@ -1007,6 +1026,20 @@ func (e *EpochEngine) checkOmissionsLocked(p *EpochProposal) {
 		}
 		missing++
 		example = id
+		if po.ord.Owner == e.self && nowMs-e.ownRepairAt[id] >= ownRepairEveryEpochs*e.p.EpochMs {
+			if len(e.ownRepairAt) > 4*e.p.MaxOrdersPerEpoch+256 {
+				for k, t := range e.ownRepairAt {
+					if nowMs-t > 600_000 {
+						delete(e.ownRepairAt, k)
+					}
+				}
+			}
+			e.ownRepairAt[id] = nowMs
+			if len(resend) < ownRepairMax {
+				resend = append(resend, po.ord)
+				e.ownRepairs++
+			}
+		}
 	}
 	if missing > 0 {
 		e.omissions[p.Proposer]++
@@ -1014,6 +1047,10 @@ func (e *EpochEngine) checkOmissionsLocked(p *EpochProposal) {
 		e.addFlagLocked(&EpochFlag{Epoch: p.Epoch, Kind: "omission", Peer: p.Proposer,
 			Detail: fmt.Sprintf("proposal left out %d order(s) we had for >%d ms, e.g. %s", missing, e.p.OmissionGraceMs, example)})
 	}
+	if len(resend) > 0 {
+		e.log.Debugf("Re-sending %d own order(s) epoch %d proposal from %s left out", len(resend), p.Epoch, e.rel.ValidatorName(p.Proposer))
+	}
+	return resend
 }
 
 func (e *EpochEngine) considerSign(ctx context.Context, c *epochCandidate) {
