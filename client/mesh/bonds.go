@@ -379,10 +379,12 @@ type bondLedger struct {
 	switchSet bool
 	bonds     []*ledgerBond
 	coins     map[string]bool
+	bans      map[string]*ledgerBan // S5 (equivocation.go)
 }
 
 func newBondLedger(rel *Release) *bondLedger {
-	return &bondLedger{rel: rel, signals: make(map[string]uint64), sigs: make(map[string]*SwitchSignal), coins: make(map[string]bool)}
+	return &bondLedger{rel: rel, signals: make(map[string]uint64), sigs: make(map[string]*SwitchSignal), coins: make(map[string]bool),
+		bans: make(map[string]*ledgerBan)}
 }
 
 func (l *bondLedger) rules() *BondRules { return l.rel.Bonds }
@@ -497,6 +499,9 @@ type valSet struct {
 func (l *bondLedger) members(n, asOf uint64) *valSet {
 	vs := &valSet{rel: l.rel, Epoch: n, members: make(map[string]*valMember)}
 	for _, v := range l.rel.Validators {
+		if l.bannedAt(v.PeerID, n, asOf) {
+			continue // S5
+		}
 		vs.members[v.PeerID] = &valMember{PeerID: v.PeerID, Power: v.Bond, Seeded: true}
 	}
 	if r := l.rules(); r != nil && l.switchOn(n, asOf) {
@@ -506,6 +511,9 @@ func (l *bondLedger) members(n, asOf uint64) *valSet {
 				continue
 			}
 			id := b.claim.Validator
+			if l.bannedAt(id, n, asOf) {
+				continue // S5
+			}
 			since := l.matureEpoch(b.epoch)
 			if m := vs.members[id]; m != nil {
 				if !m.Seeded && since < m.Since {

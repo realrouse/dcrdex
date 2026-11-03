@@ -56,9 +56,12 @@ type EpochProposal struct {
 	// S4 (bonds.go): bond switch signals and bond admissions.
 	Signals []*SwitchSignal `json:"signals,omitempty"`
 	Bonds   []*BondClaim    `json:"bonds,omitempty"`
-	Stamp   int64           `json:"stamp"`
-	PubKey  []byte          `json:"pubkey"`
-	Sig     []byte          `json:"sig"`
+	// S5 (equivocation.go): equivocation proofs; a record carrying one bans
+	// the validator from the next epoch on.
+	Proofs []*EquivocationProof `json:"proofs,omitempty"`
+	Stamp  int64                `json:"stamp"`
+	PubKey []byte               `json:"pubkey"`
+	Sig    []byte               `json:"sig"`
 }
 
 // EpochCredit is a validator's attestation of the previous record (the
@@ -123,6 +126,14 @@ func (p *EpochProposal) Hash() EpochHash {
 			b.Write(c.Sig)
 		}
 	}
+	// S5: only proposals with proofs commit to them.
+	if len(p.Proofs) > 0 {
+		b.WriteString(proofDomain)
+		_ = binary.Write(b, binary.BigEndian, uint16(len(p.Proofs)))
+		for _, pr := range p.Proofs {
+			pr.write(b)
+		}
+	}
 	return sha256.Sum256(b.Bytes())
 }
 
@@ -174,6 +185,17 @@ func (p *EpochProposal) verify(r *valSet) error {
 	for i, c := range p.Bonds {
 		if i > 0 && p.Bonds[i-1].Key() >= c.Key() {
 			return errors.New("bond admissions not sorted or duplicated")
+		}
+	}
+	if len(p.Proofs) > MaxProofsPerEpoch {
+		return errors.New("too many equivocation proofs")
+	}
+	for i, pr := range p.Proofs {
+		if pr == nil || pr.A == nil || pr.B == nil {
+			return errors.New("incomplete equivocation proof")
+		}
+		if i > 0 && p.Proofs[i-1].Validator >= pr.Validator {
+			return errors.New("equivocation proofs not sorted or duplicated")
 		}
 	}
 	h := p.Hash()
@@ -357,19 +379,20 @@ func epochMatchNonce(epoch uint64, index int) uint64 { return epoch<<16 | uint64
 
 // epochMsg is the envelope on EpochTopic.
 type epochMsg struct {
-	Type     string            `json:"type"`
-	Order    *MeshOrder        `json:"order,omitempty"`
-	Cancel   *MeshCancel       `json:"cancel,omitempty"`
-	HB       *EpochHeartbeat   `json:"hb,omitempty"`
-	Prop     *EpochProposal    `json:"prop,omitempty"`
-	Att      *EpochAttestation `json:"att,omitempty"`
-	Rec      *EpochRecord      `json:"rec,omitempty"`
-	Recs     []*EpochRecord    `json:"recs,omitempty"`
-	SyncFrom uint64            `json:"syncFrom,omitempty"`
-	To       string            `json:"to,omitempty"`
-	Frag     *epochFrag        `json:"frag,omitempty"`
-	Signal   *SwitchSignal     `json:"bsig,omitempty"`
-	Bond     *BondClaim        `json:"bond,omitempty"`
+	Type     string             `json:"type"`
+	Order    *MeshOrder         `json:"order,omitempty"`
+	Cancel   *MeshCancel        `json:"cancel,omitempty"`
+	HB       *EpochHeartbeat    `json:"hb,omitempty"`
+	Prop     *EpochProposal     `json:"prop,omitempty"`
+	Att      *EpochAttestation  `json:"att,omitempty"`
+	Rec      *EpochRecord       `json:"rec,omitempty"`
+	Recs     []*EpochRecord     `json:"recs,omitempty"`
+	SyncFrom uint64             `json:"syncFrom,omitempty"`
+	To       string             `json:"to,omitempty"`
+	Frag     *epochFrag         `json:"frag,omitempty"`
+	Signal   *SwitchSignal      `json:"bsig,omitempty"`
+	Bond     *BondClaim         `json:"bond,omitempty"`
+	Proof    *EquivocationProof `json:"eqv,omitempty"` // S5
 }
 
 const (

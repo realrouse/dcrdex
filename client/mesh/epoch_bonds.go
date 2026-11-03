@@ -307,6 +307,9 @@ func (e *EpochEngine) admissibleLocked(c *BondClaim, n uint64) error {
 	if e.ledger.coins[c.Key()] {
 		return errors.New("already admitted")
 	}
+	if e.ledger.bans[c.Validator] != nil {
+		return errors.New("the validator is banned (S5)")
+	}
 	asof, _ := e.lastEpochLocked()
 	if need := e.ledger.requiredAt(r.asset(c.AssetID), n, asof); d.Amount < need {
 		return fmt.Errorf("bond of %d atoms is below the release size %d", d.Amount, need)

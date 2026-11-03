@@ -155,6 +155,47 @@ func (s *DebugServer) epochHandlers(ctx context.Context, mux *http.ServeMux) {
 		e.SetPeerName(req.PeerID, req.Name)
 		writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
 	})
+	// S5: bans, proofs we hold, own guards; adversary switches.
+	mux.HandleFunc("GET /mesh/epochs/bans", func(w http.ResponseWriter, r *http.Request) {
+		if e := eng(w); e != nil {
+			writeJSON(w, http.StatusOK, e.BansStatus())
+		}
+	})
+	mux.HandleFunc("POST /mesh/epochs/equivocate", func(w http.ResponseWriter, r *http.Request) {
+		e := eng(w)
+		if e == nil {
+			return
+		}
+		var req struct {
+			Epochs int `json:"epochs"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			writeErr(w, http.StatusBadRequest, err)
+			return
+		}
+		e.SetEquivocate(req.Epochs)
+		writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
+	})
+	mux.HandleFunc("POST /mesh/epochs/forgeproof", func(w http.ResponseWriter, r *http.Request) {
+		e := eng(w)
+		if e == nil {
+			return
+		}
+		var req struct {
+			Validator string `json:"validator"`
+			Mode      string `json:"mode"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			writeErr(w, http.StatusBadRequest, err)
+			return
+		}
+		if err := e.SetForgeProof(req.Validator, req.Mode); err != nil {
+			writeErr(w, http.StatusBadRequest, err)
+			return
+		}
+		s.ob.log.Warnf("ADVERSARY: forged equivocation proof mode %q against %s", req.Mode, req.Validator)
+		writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
+	})
 	mux.HandleFunc("GET /mesh/epochs/order", func(w http.ResponseWriter, r *http.Request) {
 		e := eng(w)
 		if e == nil {

@@ -87,6 +87,8 @@ export interface EpochStatus {
   bonds?: { enabled: boolean, on: boolean, onEpoch?: number, signals: string[] | null, need: number, seeded: number, pending: string[] | null, deadline?: number, latched: boolean, selfSignalled: boolean }
   activeSet?: { epoch: number, asOf: number, windowFrom: number, windowTo: number, sample: number, fallback: boolean }
   flags: { epoch: number, kind: string, peer: string, detail: string }[] | null
+  banned: string[] | null
+  signHold?: string
 }
 
 export interface ViewOrder {
@@ -338,7 +340,11 @@ export default class MeshPage extends BasePage {
     const ok = ep.haveFinalized && behind <= 1
     page.epochPill.className = `mesh-pill ${ok ? 'good' : ep.canFinalize ? 'degraded' : 'offline'}`
     page.epochPill.textContent = ok ? 'finalizing' : ep.canFinalize ? 'catching up' : 'not finalizing'
-    page.epochRole.textContent = ep.role === 'validator' ? (ep.signing ? 'validator node (signing)' : 'validator node (NOT signing)') : ep.role === 'candidate' ? 'validator node (waiting for a bond to count)' : 'trader'
+    page.epochRole.textContent = ep.role === 'validator'
+? (ep.signing ? 'validator node (signing)' : `validator node (NOT signing${ep.signHold ? ': ' + ep.signHold : ''})`)
+      : ep.role === 'candidate' ? 'validator node (waiting for a bond to count)' : ep.role === 'banned' ? 'validator node (BANNED: signed two results)' : 'trader'
+    const banned = ep.banned || []
+    page.epochBanned.textContent = banned.length ? `Banned for signing two different results for one epoch: ${banned.join(', ')}. They no longer count as validators.` : ''
     page.epochRelease.textContent = `release ${ep.release} ${ep.releaseHash.substring(0, 8)}`
     page.epochSummary.textContent = `Epoch ${ep.currentEpoch} (${p.epochMs / 1000} s epochs, ${p.signWindowMs / 1000} s signing window). ` +
       (ep.haveFinalized ? `Last finalized ${ep.lastFinalized} with ${ep.lastSigners} signatures; ` : 'Nothing finalized yet; ') +
