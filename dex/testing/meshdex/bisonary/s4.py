@@ -241,12 +241,13 @@ def phase_bonds(net):
         return all(k in keys for k in net.bond_keys.values()) and keys
     adm = h.wait_until(admitted, 240, "3 bonds admitted", 2)
     # Before maturity: sample every peer; a bond counts only from its mature epoch.
+    # The deadline is in epochs, not wall time: a box pause (VM snapshot) must not
+    # end the watch before the last bond's mature epoch has been sampled.
     samples = []
-    end = time.time() + AGE_S + 60
     seen_immature, seen_mature = set(), set()
-    while time.time() < end:
-        row = snap(net, "bonds: aging")
-        cur = st(net["alice"])["currentEpoch"]
+    last_mature = max(x["matureEpoch"] for x in adm.values())
+    hard_end = time.time() + 900
+    def check_all():
         for n in running(net):
             bs = bonds(n)
             mem = {m["name"] for m in bs["members"]}
@@ -260,17 +261,24 @@ def phase_bonds(net):
                 (seen_mature if counts else seen_immature).add(nm)
             if "nb-none" in mem:
                 raise Fail("unbonded nb-none is a member on %s" % n.name)
+    while time.time() < hard_end:
+        row = snap(net, "bonds: aging")
+        cur = st(net["alice"])["currentEpoch"]
+        check_all()
         samples.append({"epoch": cur, "aliceMembers": row["alice"]["members"]})
         if len(seen_mature) == 3 and all(len(v["members"]) == 7 for v in row.values() if isinstance(v, dict)):
             break
+        if cur > last_mature + 30:
+            break
         time.sleep(8)
+    check_all()  # one more pass on every peer after the watch
     row = snap(net, "bonds: mature")
     bs = bonds(net["alice"])
     per = {}
     for x in bs["admitted"]:
         posted = net.bond_posted.get(x["name"])
-        per[x["name"]] = {"asset": x["assetID"], "amount": x["amount"], "admittedEpoch": x["admitted"], "matureEpoch": x["matureEpoch"],
-                          "ageS": (x["matureEpoch"] - x["admitted"]) * EPOCH_MS / 1000, "lockTime": x["lockTime"], "counts": x["counts"]}
+        per[x["name"]] = {"asset": x["assetID"], "amount": x["amount"], "admittedEpoch": x["admittedEpoch"], "matureEpoch": x["matureEpoch"],
+                          "ageS": (x["matureEpoch"] - x["admittedEpoch"]) * EPOCH_MS / 1000, "lockTime": x["lockTime"], "counts": x["counts"]}
     pend = bonds(net["v1"])["pending"]
     fake = [p for p in pend or [] if p["key"] == net.fake_key]
     res = {"bonds": per, "seenImmature": sorted(seen_immature), "seenMature": sorted(seen_mature), "membersEveryPeer":
