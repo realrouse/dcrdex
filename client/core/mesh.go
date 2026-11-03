@@ -114,6 +114,7 @@ func (c *Core) connectMesh(ctx context.Context, crypter encrypt.Crypter) {
 		// S4: validator bonds are checked and made with the asset wallets.
 		mb := &meshBonds{c: c, dir: filepath.Dir(store)}
 		eng.SetBondHooks(mb, mb)
+		eng.SetUserBondMaker(mb)
 	}
 
 	// Mesh activity goes to the UI as data notifications. The sink must not

@@ -52,6 +52,39 @@ type validatorBondRecord struct {
 
 // MakeValidatorBond makes a v0 bond transaction and, if broadcast, sends it.
 func (m *meshBonds) MakeValidatorBond(ctx context.Context, assetID uint32, amt uint64, lockTime time.Time, bondKey []byte, acct [32]byte, broadcast bool) ([]byte, []byte, error) {
+	return m.makeBond(ctx, "validator", assetID, amt, lockTime, bondKey, acct, broadcast)
+}
+
+// MakeUserBond makes a v0 trading bond transaction (S6) and, if broadcast,
+// sends it. The same dcrdex fidelity bond as for DEX server accounts, but
+// committing to the trader's mesh key and checked by validators.
+func (m *meshBonds) MakeUserBond(ctx context.Context, assetID uint32, amt uint64, lockTime time.Time, bondKey []byte, acct [32]byte, broadcast bool) ([]byte, []byte, error) {
+	return m.makeBond(ctx, "user", assetID, amt, lockTime, bondKey, acct, broadcast)
+}
+
+// RefundUserBond refunds a trading bond after its lock with the wallet's
+// bond refund (asset.Bonder.RefundBond, as for DEX server bonds).
+func (m *meshBonds) RefundUserBond(ctx context.Context, assetID uint32, coinID, script []byte, amt uint64, bondKey []byte) (string, error) {
+	w, err := m.c.connectedWallet(assetID)
+	if err != nil {
+		return "", err
+	}
+	bonder, ok := w.Wallet.(asset.Bonder)
+	if !ok {
+		return "", fmt.Errorf("%s wallet cannot refund bonds", unbip(assetID))
+	}
+	if len(bondKey) != 32 {
+		return "", errors.New("bad bond key")
+	}
+	coin, err := bonder.RefundBond(ctx, 0, coinID, script, amt, secp256k1.PrivKeyFromBytes(bondKey))
+	if err != nil {
+		return "", err
+	}
+	m.c.log.Infof("Trading bond %x refunded: %s %s", coinID, unbip(assetID), coin)
+	return coin.String(), nil
+}
+
+func (m *meshBonds) makeBond(ctx context.Context, kind string, assetID uint32, amt uint64, lockTime time.Time, bondKey []byte, acct [32]byte, broadcast bool) ([]byte, []byte, error) {
 	w, err := m.c.connectedWallet(assetID)
 	if err != nil {
 		return nil, nil, err
@@ -80,12 +113,12 @@ func (m *meshBonds) MakeValidatorBond(ctx context.Context, assetID uint32, amt u
 		Script: hex.EncodeToString(bond.Data), RefundTx: hex.EncodeToString(bond.RedeemTx), Stamp: time.Now().Unix()}
 	if b, err := json.Marshal(rec); err == nil {
 		m.mtx.Lock()
-		if f, err := os.OpenFile(filepath.Join(m.dir, "validator-bonds.jsonl"), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600); err == nil {
+		if f, err := os.OpenFile(filepath.Join(m.dir, kind+"-bonds.jsonl"), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600); err == nil {
 			_, _ = f.Write(append(b, '\n'))
 			f.Close()
 		}
 		m.mtx.Unlock()
 	}
-	m.c.log.Infof("Validator bond sent: %s %d atoms, coin %x, lock until %s", unbip(assetID), amt, bond.CoinID, lockTime.Format(time.RFC3339))
+	m.c.log.Infof("Mesh %s bond sent: %s %d atoms, coin %x, lock until %s", kind, unbip(assetID), amt, bond.CoinID, lockTime.Format(time.RFC3339))
 	return bond.CoinID, bond.SignedTx, nil
 }

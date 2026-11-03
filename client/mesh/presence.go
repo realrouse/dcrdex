@@ -555,12 +555,17 @@ func (ob *OrderBooks) Peer(id string) (*PeerInfo, bool) {
 // protocol version), or "".
 func (ob *OrderBooks) orderBlock(owner string) string {
 	ob.pres.mtx.Lock()
-	defer ob.pres.mtx.Unlock()
 	pi, found := ob.pres.peers[owner]
-	if !found || pi.Proto == 0 || pi.Compatible {
-		return ""
+	ob.pres.mtx.Unlock()
+	if found && pi.Proto != 0 && !pi.Compatible {
+		return "incompatible: " + pi.Reason
 	}
-	return "incompatible: " + pi.Reason
+	// S6: validators ignore orders of traders without a counted trading
+	// bond, so they are not tradable.
+	if e := ob.epochs; e != nil && e.UserBondsRequired() && e.UserTier(owner) == 0 {
+		return "no trading bond"
+	}
+	return ""
 }
 
 func fmtLock(secs int64) string {

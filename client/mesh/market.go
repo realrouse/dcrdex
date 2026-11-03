@@ -233,6 +233,17 @@ func (ob *OrderBooks) handleEvent(ctx context.Context, m Market, topic string, b
 // broadcasts it. The market is subscribed if it isn't already. A zero
 // lotSize means a single lot of qty.
 func (ob *OrderBooks) PostOrder(ctx context.Context, m Market, sell bool, qty, lotSize, rate uint64, lifetime time.Duration) (*MeshOrder, error) {
+	return ob.postOrder(ctx, m, sell, qty, lotSize, rate, lifetime, false)
+}
+
+// PostOrderUnchecked is PostOrder without our own trading bond check, and
+// the order goes to the epoch topic even if our own pool refuses it (simnet
+// adversary tests: validators must ignore it).
+func (ob *OrderBooks) PostOrderUnchecked(ctx context.Context, m Market, sell bool, qty, lotSize, rate uint64, lifetime time.Duration) (*MeshOrder, error) {
+	return ob.postOrder(ctx, m, sell, qty, lotSize, rate, lifetime, true)
+}
+
+func (ob *OrderBooks) postOrder(ctx context.Context, m Market, sell bool, qty, lotSize, rate uint64, lifetime time.Duration, unchecked bool) (*MeshOrder, error) {
 	if lifetime <= 0 || lifetime > MaxOrderLifetime {
 		return nil, fmt.Errorf("lifetime must be in (0, %s]", MaxOrderLifetime)
 	}
@@ -266,6 +277,12 @@ func (ob *OrderBooks) PostOrder(ctx context.Context, m Market, sell bool, qty, l
 	if err := ord.Sign(ob.priv); err != nil {
 		return nil, err
 	}
+	// S6: trading needs a counted trading bond, and its tier limits the size.
+	if ob.epochs != nil && !unchecked {
+		if reason := ob.epochs.CheckOwnOrder(ord); reason != "" {
+			return nil, fmt.Errorf("cannot trade: %s (post a trading bond, or a bigger one, and wait until it counts)", reason)
+		}
+	}
 	ob.mtx.Lock()
 	book := ob.books[m]
 	ob.mtx.Unlock()
@@ -279,6 +296,10 @@ func (ob *OrderBooks) PostOrder(ctx context.Context, m Market, sell bool, qty, l
 	if ob.epochs != nil {
 		if err := ob.epochs.SubmitOrder(ctx, ord); err != nil {
 			ob.log.Errorf("Error submitting order %s to the epoch pool: %v", ord.ID(), err)
+			if unchecked {
+				ob.log.Warnf("ADVERSARY: sending order %s to the epoch topic anyway", ord.ID())
+				ob.epochs.SendOrderUnchecked(ctx, ord)
+			}
 		}
 	}
 	ob.emitOrder(EventOrder, ord, qty, true)

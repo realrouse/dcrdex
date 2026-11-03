@@ -430,6 +430,7 @@ func (e *EpochEngine) afterLedgerLocked(rec *EpochRecord, wasOn bool) {
 func (e *EpochEngine) resetLedgerLocked() {
 	e.ledger = newBondLedger(e.rel)
 	e.valsCache = nil
+	e.gateCache = nil
 }
 
 // s4Gossip re-sends our pending signal and claims every few epochs.

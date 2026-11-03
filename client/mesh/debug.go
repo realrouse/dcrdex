@@ -108,6 +108,7 @@ func (s *DebugServer) Handler(ctx context.Context) http.Handler {
 			LotSize     uint64 `json:"lotSize"`
 			Rate        uint64 `json:"rate"`
 			LifetimeSec int64  `json:"lifetimeSec"`
+			Unchecked   bool   `json:"unchecked"` // S6 adversary: skip our trading bond check
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			writeErr(w, http.StatusBadRequest, err)
@@ -118,7 +119,11 @@ func (s *DebugServer) Handler(ctx context.Context) http.Handler {
 			writeErr(w, http.StatusBadRequest, err)
 			return
 		}
-		ord, err := s.ob.PostOrder(ctx, m, req.Sell, req.Qty, req.LotSize, req.Rate, time.Duration(req.LifetimeSec)*time.Second)
+		post := s.ob.PostOrder
+		if req.Unchecked {
+			post = s.ob.PostOrderUnchecked
+		}
+		ord, err := post(ctx, m, req.Sell, req.Qty, req.LotSize, req.Rate, time.Duration(req.LifetimeSec)*time.Second)
 		if err != nil {
 			writeErr(w, http.StatusBadRequest, err)
 			return

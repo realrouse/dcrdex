@@ -177,6 +177,16 @@ type EpochEngine struct {
 	credChecks  int // peers' proposals on our tip whose credits we checked since start
 	credCheckAt uint64
 	s5SentAt    uint64
+	// S6 trading bonds (userbonds.go, epoch_userbonds.go)
+	ubondPool  map[string]*ubondEntry
+	ownUBonds  map[string]*ownUserBond
+	ubondMaker UserBondMaker
+	refused    map[OrderID]string
+	ignored    map[string]int
+	gateCache  *userGate
+	gateEpoch  uint64
+	gateFP     EpochHash
+	s6SentAt   uint64
 	// debug (simnet adversary tests)
 	omitOwner    string
 	equivocate   int
@@ -223,6 +233,9 @@ func NewEpochEngine(rel *Release, cfg EpochConfig, ps pubSub, priv libp2pcrypto.
 		proofs:      make(map[string]*proofEntry),
 		firstSigs:   make(map[string]*firstSig),
 		sentMsgs:    make(map[string]int64),
+		ubondPool:   make(map[string]*ubondEntry),
+		ownUBonds:   make(map[string]*ownUserBond),
+		ignored:     make(map[string]int),
 	}
 	e.lastFP = e.genesis
 	// S4: with bond rules a node that is not seeded can become a validator
@@ -240,6 +253,7 @@ func NewEpochEngine(rel *Release, cfg EpochConfig, ps pubSub, priv libp2pcrypto.
 		}
 	}
 	e.loadBondFiles()
+	e.loadUserBonds()
 	return e, nil
 }
 
@@ -463,6 +477,12 @@ func (e *EpochEngine) admitOrder(o *MeshOrder) error {
 	if _, seen := e.state.seen[id]; seen {
 		return nil
 	}
+	// S6: validators ignore orders of traders without a counted trading
+	// bond (or too large for their tier); the epoch state does too.
+	if reason := e.gateOrderLocked(o, e.p.EpochOf(nowMs)); reason != "" {
+		e.noteRefusedLocked(id, reason)
+		return fmt.Errorf("order refused: %s", reason)
+	}
 	if _, found := e.pool[id]; !found {
 		e.pool[id] = &poolOrder{ord: o, id: id, recv: nowMs}
 	}
@@ -514,6 +534,12 @@ func (e *EpochEngine) handleMsg(ctx context.Context, from string, b []byte) {
 		if m.Bond != nil {
 			e.mtx.Lock()
 			e.addClaimLocked(m.Bond)
+			e.mtx.Unlock()
+		}
+	case epMsgUBond:
+		if m.UBond != nil {
+			e.mtx.Lock()
+			e.addUBondLocked(m.UBond)
 			e.mtx.Unlock()
 		}
 	case epMsgProof:
@@ -569,6 +595,8 @@ func (e *EpochEngine) tick(ctx context.Context) {
 	e.s4Gossip(ctx, cur)
 	e.s5Gossip(ctx, cur)
 	e.bondChecks(ctx, nowMs)
+	e.s6Gossip(ctx, cur)
+	e.ubondChecks(ctx, nowMs)
 	e.mtx.Lock()
 	member := e.isMemberLocked(cur)
 	var retry []*epochCandidate
@@ -576,7 +604,7 @@ func (e *EpochEngine) tick(ctx context.Context) {
 		// S4: a proposal we could not sign yet (bond not verified) is
 		// retried within its window.
 		for _, c := range e.cands[cur-1] {
-			if c.res != nil && (len(c.prop.Bonds) > 0 || e.latched) && nowMs <= e.p.EpochEnd(cur-1)+e.p.SignWindowMs {
+			if c.res != nil && (len(c.prop.Bonds) > 0 || len(c.prop.UserBonds) > 0 || e.latched) && nowMs <= e.p.EpochEnd(cur-1)+e.p.SignWindowMs {
 				if _, did := e.signed[cur-1]; !did {
 					retry = append(retry, c)
 				}
@@ -709,6 +737,10 @@ func (e *EpochEngine) maybePropose(ctx context.Context, n uint64, nowMs int64) {
 		if e.omitOwner != "" && po.ord.Owner == e.omitOwner {
 			continue
 		}
+		if reason := e.gateOrderLocked(po.ord, n); reason != "" { // S6
+			e.noteRefusedLocked(po.id, reason)
+			continue
+		}
 		ords = append(ords, po)
 	}
 	sort.Slice(ords, func(i, j int) bool {
@@ -738,6 +770,7 @@ func (e *EpochEngine) maybePropose(ctx context.Context, n uint64, nowMs int64) {
 	}
 	e.s4ProposalLocked(prop)
 	e.s5ProposalLocked(prop)
+	e.s6ProposalLocked(prop)
 	e.noteSentLocked(propKey(prop.Epoch, prop.Stamp), prop.Stamp)
 	e.mtx.Unlock()
 	if err := prop.sign(e.priv); err != nil {
@@ -786,6 +819,11 @@ func (e *EpochEngine) computeLocked(c *epochCandidate) {
 		e.addFlagLocked(&EpochFlag{Epoch: c.prop.Epoch, Kind: "bad-proof", Peer: c.prop.Proposer, Detail: c.bad})
 		return
 	}
+	if err := e.checkS6Locked(c.prop); err != nil {
+		c.bad = err.Error()
+		e.addFlagLocked(&EpochFlag{Epoch: c.prop.Epoch, Kind: "trading-bonds", Peer: c.prop.Proposer, Detail: c.bad})
+		return
+	}
 	st := e.state.clone()
 	makers := make(map[OrderID]*MeshOrder)
 	// Record maker orders before applying (fills may remove them).
@@ -796,7 +834,7 @@ func (e *EpochEngine) computeLocked(c *epochCandidate) {
 	for _, o := range c.prop.Orders {
 		resting[o.ID()] = o
 	}
-	matches := applyEpoch(st, c.prop, &e.p)
+	matches := applyEpoch(st, c.prop, &e.p, e.gateLocked(c.prop.Epoch))
 	for _, m := range matches {
 		makers[m.MakerOrderID] = resting[m.MakerOrderID]
 	}
@@ -888,6 +926,9 @@ func (e *EpochEngine) checkOmissionsLocked(p *EpochProposal) {
 		if _, seen := e.state.seen[id]; seen {
 			continue
 		}
+		if e.gateOrderLocked(po.ord, p.Epoch) != "" {
+			continue // S6: not tradable, rightly left out
+		}
 		if len(p.Orders) >= e.p.MaxOrdersPerEpoch {
 			continue // a full proposal may leave orders for the next epoch
 		}
@@ -924,7 +965,7 @@ func (e *EpochEngine) considerSign(ctx context.Context, c *epochCandidate) {
 	}
 	// S4: sign bond admissions only after our own chain check, and keep a
 	// latched switch on.
-	if !e.bondsVerifiedLocked(c.prop) || !e.latchOKLocked(c.prop) {
+	if !e.bondsVerifiedLocked(c.prop) || !e.latchOKLocked(c.prop) || !e.ubondsVerifiedLocked(c.prop) {
 		e.mtx.Unlock()
 		return
 	}
@@ -1076,6 +1117,7 @@ func (e *EpochEngine) commitLocked(rec *EpochRecord, res *epochResult, synced bo
 	e.ledger.apply(rec)
 	e.afterBansLocked(e.ledger.applyBans(rec), synced)
 	e.afterLedgerLocked(rec, wasOn)
+	e.afterUserBondsLocked(rec)
 	e.resetCreditsLocked(rec)
 	for _, o := range rec.Proposal.Orders {
 		delete(e.pool, o.ID())
@@ -1304,6 +1346,7 @@ func (e *EpochEngine) loadStore() error {
 		e.ledger.apply(&r)
 		e.afterBansLocked(e.ledger.applyBans(&r), true)
 		e.afterLedgerLocked(&r, wasOn)
+		e.afterUserBondsLocked(&r)
 		e.valsCache = nil
 		e.resetCreditsLocked(&r)
 		n++
@@ -1371,6 +1414,9 @@ func (e *EpochEngine) OrderStatus(id OrderID) string {
 	}
 	if _, ok := e.pool[id]; ok {
 		return "pool"
+	}
+	if r := e.refused[id]; r != "" {
+		return "refused: " + r // S6
 	}
 	return "unknown"
 }

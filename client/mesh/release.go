@@ -166,6 +166,9 @@ type Release struct {
 	// Bonds (S4) are the validator bond rules. nil: no bond code (S0-S3
 	// releases); the bonds stay off.
 	Bonds *BondRules `json:"bonds,omitempty"`
+	// UserBonds (S6) are the trading bond rules. nil: trading needs no bond
+	// (S0-S5 releases).
+	UserBonds *UserBondRules `json:"userBonds,omitempty"`
 
 	hash [32]byte
 	vals map[string]*ReleaseValidator
@@ -264,6 +267,11 @@ func (r *Release) check() error {
 	if r.Bonds != nil {
 		if err := r.Bonds.Validate(); err != nil {
 			return fmt.Errorf("release bond rules: %w", err)
+		}
+	}
+	if r.UserBonds != nil {
+		if err := r.UserBonds.Validate(); err != nil {
+			return fmt.Errorf("release trading bond rules: %w", err)
 		}
 	}
 	r.vals = make(map[string]*ReleaseValidator, len(r.Validators))

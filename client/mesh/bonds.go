@@ -380,17 +380,22 @@ type bondLedger struct {
 	bonds     []*ledgerBond
 	coins     map[string]bool
 	bans      map[string]*ledgerBan // S5 (equivocation.go)
+	// S6 trading bonds (userbonds.go)
+	ubonds   []*ledgerUserBond
+	ubondsBy map[string][]*ledgerUserBond
+	ucoins   map[string]bool
 }
 
 func newBondLedger(rel *Release) *bondLedger {
 	return &bondLedger{rel: rel, signals: make(map[string]uint64), sigs: make(map[string]*SwitchSignal), coins: make(map[string]bool),
-		bans: make(map[string]*ledgerBan)}
+		bans: make(map[string]*ledgerBan), ubondsBy: make(map[string][]*ledgerUserBond), ucoins: make(map[string]bool)}
 }
 
 func (l *bondLedger) rules() *BondRules { return l.rel.Bonds }
 
 // apply adds a finalized record's signals and admissions.
 func (l *bondLedger) apply(rec *EpochRecord) {
+	l.applyUserBonds(rec) // S6
 	if l.rules() == nil || rec.Proposal == nil {
 		return
 	}

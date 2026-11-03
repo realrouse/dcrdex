@@ -139,6 +139,57 @@ func (s *DebugServer) epochHandlers(ctx context.Context, mux *http.ServeMux) {
 		}
 		writeJSON(w, http.StatusOK, map[string]any{"key": c.Key(), "coinID": c.CoinID, "validator": c.Validator})
 	})
+	// S6: trading bonds.
+	mux.HandleFunc("GET /mesh/epochs/userbonds", func(w http.ResponseWriter, r *http.Request) {
+		e := eng(w)
+		if e == nil {
+			return
+		}
+		n, _ := strconv.ParseUint(r.URL.Query().Get("epoch"), 10, 64)
+		asOf, _ := strconv.ParseUint(r.URL.Query().Get("asof"), 10, 64)
+		writeJSON(w, http.StatusOK, e.UserBondsStatus(n, asOf))
+	})
+	mux.HandleFunc("POST /mesh/epochs/userbond", func(w http.ResponseWriter, r *http.Request) {
+		e := eng(w)
+		if e == nil {
+			return
+		}
+		var req struct {
+			AssetID  uint32 `json:"assetID"`
+			Amount   uint64 `json:"amount"`
+			LockSecs int64  `json:"lockSecs"`
+			Fake     bool   `json:"fake"` // simnet: valid-looking tx, never broadcast
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			writeErr(w, http.StatusBadRequest, err)
+			return
+		}
+		c, err := e.PostUserBond(ctx, req.AssetID, req.Amount, req.LockSecs, req.Fake)
+		if err != nil {
+			writeErr(w, http.StatusBadRequest, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"key": c.Key(), "coinID": c.CoinID, "user": c.User})
+	})
+	mux.HandleFunc("POST /mesh/epochs/userbond/refund", func(w http.ResponseWriter, r *http.Request) {
+		e := eng(w)
+		if e == nil {
+			return
+		}
+		var req struct {
+			Key string `json:"key"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			writeErr(w, http.StatusBadRequest, err)
+			return
+		}
+		coin, err := e.RefundUserBond(ctx, req.Key)
+		if err != nil {
+			writeErr(w, http.StatusBadRequest, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"refund": coin})
+	})
 	mux.HandleFunc("POST /mesh/epochs/peername", func(w http.ResponseWriter, r *http.Request) {
 		e := eng(w)
 		if e == nil {

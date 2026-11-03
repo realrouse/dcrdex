@@ -143,7 +143,16 @@ func sortOrdersForEpoch(ords []*MeshOrder) []*MeshOrder {
 
 // applyEpoch applies a proposal's orders and cancels to s (mutated) and
 // returns the matches. Invalid entries are skipped deterministically.
-func applyEpoch(s *epochState, prop *EpochProposal, params *EpochParams) []*EpochMatch {
+//
+// S6: with a trading gate g (nil: no trading bonds), resting orders of
+// owners without a counted trading bond are removed after expiry (step 1b),
+// and new orders the gate refuses (no bond, too large for the tier, too many
+// resting orders) are ignored: not matched, not rested and not marked seen.
+func applyEpoch(s *epochState, prop *EpochProposal, params *EpochParams, gs ...*userGate) []*EpochMatch {
+	var g *userGate
+	if len(gs) > 0 {
+		g = gs[0]
+	}
 	end := params.EpochEnd(prop.Epoch)
 	endT := time.UnixMilli(end)
 	// 1. Expiry. Seen IDs are kept until their expiry passes.
@@ -157,6 +166,17 @@ func applyEpoch(s *epochState, prop *EpochProposal, params *EpochParams) []*Epoc
 			delete(s.seen, id)
 		}
 	}
+	// 1b. S6: orders of owners whose trading bond no longer counts.
+	restingBy := make(map[string]uint64)
+	if g != nil {
+		for id, r := range s.resting {
+			if g.tier(r.ord.Owner) == 0 {
+				delete(s.resting, id)
+				continue
+			}
+			restingBy[r.ord.Owner]++
+		}
+	}
 	// 2. Cancels.
 	cancels := append([]*MeshCancel(nil), prop.Cancels...)
 	sort.Slice(cancels, func(i, j int) bool {
@@ -168,6 +188,9 @@ func applyEpoch(s *epochState, prop *EpochProposal, params *EpochParams) []*Epoc
 			continue
 		}
 		delete(s.resting, c.OrderID)
+		if g != nil {
+			restingBy[c.Owner]--
+		}
 	}
 	// 3. New orders.
 	var matches []*EpochMatch
@@ -177,6 +200,9 @@ func applyEpoch(s *epochState, prop *EpochProposal, params *EpochParams) []*Epoc
 			continue
 		}
 		if o.Stamp >= end+params.MaxClockSkewMs || o.Validate(endT) != nil {
+			continue
+		}
+		if g.orderReason(o, restingBy[o.Owner]) != "" {
 			continue
 		}
 		s.seen[id] = o.Expiry
@@ -205,10 +231,16 @@ func applyEpoch(s *epochState, prop *EpochProposal, params *EpochParams) []*Epoc
 			remain -= q
 			if best.remaining -= q; best.remaining == 0 {
 				delete(s.resting, best.id)
+				if g != nil {
+					restingBy[best.ord.Owner]--
+				}
 			}
 		}
 		if remain > 0 {
 			s.resting[id] = &restingOrder{ord: o, id: id, remaining: remain}
+			if g != nil {
+				restingBy[o.Owner]++
+			}
 		}
 	}
 	return matches

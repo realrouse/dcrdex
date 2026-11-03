@@ -7,6 +7,8 @@
 //	    [-epochms 10000 -windowms 5000 -proposems 300 -fallbackms 1500 -quorum 2/3 -floor 1/2 -clockms 2000] -out release.json
 //	    [-s4 -bondbtc 0:10000 -bondlbc 0:100000000000000 -bonddcr 0:1000000000 -bondage 2419200 -bondminlock 15724800
 //	     -bondlockleft 604800 -bondconfs 2 -bondswitch 3/4 -bonddeadline 0 -bondpower 1 -bondmaxclaims 8]
+//	    [-s6 -ubondbtc 10000 -ubondlbc 1000000000000 -ubonddcr 50000000 -ubondage 3600 -ubondminlock 2592000
+//	     -ubondlockleft 172800 -ubondconfs 2 -ubondlots 5 -ubondorders 10 -ubondmaxtier 100 -ubondmaxclaims 8]
 //	bisonary-release verify [-pubkey HEX] release.json
 //	bisonary-release pubkey -key dev.key
 //
@@ -111,6 +113,20 @@ func main() {
 		bondDeadline := fs.Int64("bonddeadline", 0, "unix s: bond switch on at this time without signals (0: none)")
 		bondPower := fs.Uint64("bondpower", db.BondPower, "power of a bonded validator")
 		bondMax := fs.Int("bondmaxclaims", db.MaxClaimsPerEpoch, "bond admissions per proposal")
+		// S6 trading bond rules (defaults: mesh.DefaultUserBondRules, proposed).
+		du := mesh.DefaultUserBondRules
+		s6 := fs.Bool("s6", false, "include S6 trading bond rules (bonds required to trade)")
+		ubondBTC := fs.String("ubondbtc", fmt.Sprint(du.Assets[0].TierAmount), "BTC atoms per trading tier ('' or 'off': no BTC)")
+		ubondLBC := fs.String("ubondlbc", fmt.Sprint(du.Assets[1].TierAmount), "LBC atoms per trading tier")
+		ubondDCR := fs.String("ubonddcr", fmt.Sprint(du.Assets[2].TierAmount), "DCR atoms per trading tier")
+		ubondAge := fs.Int64("ubondage", du.MinAgeSecs, "trading bond age (s) before it counts")
+		ubondMinLock := fs.Int64("ubondminlock", du.MinLockSecs, "lock (s) a trading bond must have left at admission")
+		ubondLockLeft := fs.Int64("ubondlockleft", du.MinLockLeftSecs, "a trading bond stops counting with less lock (s) left")
+		ubondConfs := fs.Uint("ubondconfs", uint(du.MinConfs), "confirmations before a validator signs a trading bond admission")
+		ubondLots := fs.Uint64("ubondlots", du.LotsPerTier, "max lots per order per tier")
+		ubondOrders := fs.Uint64("ubondorders", du.OrdersPerTier, "max resting orders per tier")
+		ubondMaxTier := fs.Uint64("ubondmaxtier", du.MaxTier, "tier cap")
+		ubondMax := fs.Int("ubondmaxclaims", du.MaxClaimsPerEpoch, "trading bond admissions per proposal")
 		out := fs.String("out", "release.json", "output file")
 		_ = fs.Parse(os.Args[2:])
 		r := &mesh.Release{Version: mesh.ReleaseVersion, Name: *name, Network: *network, Issued: time.Now().Unix(),
@@ -152,6 +168,26 @@ func main() {
 				br.Assets = append(br.Assets, ba)
 			}
 			r.Bonds = br
+		}
+		if *s6 {
+			ur := &mesh.UserBondRules{MinAgeSecs: *ubondAge, MinLockSecs: *ubondMinLock, MinLockLeftSecs: *ubondLockLeft,
+				MinConfs: uint32(*ubondConfs), LotsPerTier: *ubondLots, OrdersPerTier: *ubondOrders, MaxTier: *ubondMaxTier,
+				MaxClaimsPerEpoch: *ubondMax}
+			for _, a := range []struct {
+				id  uint32
+				sym string
+				v   string
+			}{{mesh.BondAssetBTC, "btc", *ubondBTC}, {mesh.BondAssetLBC, "lbc", *ubondLBC}, {mesh.BondAssetDCR, "dcr", *ubondDCR}} {
+				if a.v == "" || a.v == "off" {
+					continue
+				}
+				amt, err := strconv.ParseUint(a.v, 10, 64)
+				if err != nil {
+					fatal("bad tier amount %q", a.v)
+				}
+				ur.Assets = append(ur.Assets, mesh.UserBondAsset{AssetID: a.id, Symbol: a.sym, TierAmount: amt})
+			}
+			r.UserBonds = ur
 		}
 		ids := strings.Split(*vals, ",")
 		nm := strings.Split(*names, ",")
