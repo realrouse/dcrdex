@@ -20,6 +20,26 @@ def ladder(mid_rate, side_sell, n, gap, step):
         out.append(max(1, int(round(r))))
     return out
 
+def floor_quotes(mid, mkt, n):
+    """Quotes for a coarse market (mid below 50 steps, e.g. lbc_btc in whole
+    sats). Whole steps only, every rate >= one step, and every bid strictly
+    below every ask, so the quotes never cross each other.
+
+    At the floor (mid is one step: lbc_btc while LBC is below 1 sat) this is a
+    one-price market: there is no bid below 1 sat, and a bid at 1 sat would
+    cross our own asks at 1 sat. So the mm quotes one side only: n asks (sell
+    LBC) at 1 sat and no bids. Takers buy at 1 sat; sellers can join the 1 sat
+    asks. Above the floor, bids are the whole steps below mid and asks start
+    at mid."""
+    step = h.rate_step(mkt)
+    mid = max(step, mid // step * step)
+    if h.at_floor(mkt, mid):
+        return [], [step] * n
+    bids = [mid - (i + 1) * step for i in range(n)]
+    bids = [b for b in bids if b >= step]
+    asks = [mid + i * step for i in range(n)]
+    return bids, asks
+
 def fix_tiny(bids, asks):
     """Rates near the resolution floor (lbc_btc: 1 sat per LBC) collapse to
     the same integer. Keep bids <= asks - 1 and every rate >= 1."""
@@ -44,8 +64,9 @@ def seed_book(traders, mkt, prices, per_wallet=(2, 3), max_lots=5, lifetime=1800
         for sell in (False, True):
             n = rng.randint(*per_wallet)
             rates = sorted({max(1, int(round(mid * (1 + (1 if sell else -1) * rng.uniform(0.005, 0.04))))) for _ in range(n)})
-            if mid < 50:   # below rate resolution: n bids at the floor (sizes vary), asks above
-                rates = [max(1, mid)] * n if not sell else [mid + 2 + i for i in range(n)]
+            if mid < 50:   # coarse price grid (lbc_btc): whole steps, see floor_quotes
+                bids, asks = floor_quotes(mid, mkt, n)
+                rates = asks if sell else bids
             cap = budget(t, mkt, sell) if budget else max_lots * n
             for i, r in enumerate(rates):
                 # A tight budget is spread as 1-lot orders so the level count holds.
@@ -72,7 +93,9 @@ class MeshMM(threading.Thread):
         bids = ladder(mid, False, self.levels, self.gap, self.step)
         asks = ladder(mid, True, self.levels, self.gap, self.step)
         if mid < 50:
-            bids, asks = [max(1, mid)] * self.levels, [mid + 2 + i for i in range(self.levels)]
+            # Coarse grid: whole steps; at the 1 sat floor asks only (one-price
+            # market, see floor_quotes). The mm never crosses itself.
+            return mid, *floor_quotes(mid, self.mkt, self.levels)
         bids, asks = fix_tiny(bids, asks)
         return mid, bids, asks
 

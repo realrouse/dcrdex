@@ -15,6 +15,7 @@
  *     publish when their swaps complete.
  */
 import { postJSON, getJSON } from './http'
+import Doc from './doc'
 import {
   app,
   Exchange,
@@ -80,7 +81,7 @@ export function meshExchange (): Exchange | null {
       quotesymbol: assets[m.quoteID].symbol,
       lotsize: m.lotSize || 1e8,
       parcelsize: 1,
-      ratestep: 1,
+      ratestep: m.rateStep || 1,
       epochlen: 0,
       startepoch: 0,
       buybuffer: 1,
@@ -88,7 +89,7 @@ export function meshExchange (): Exchange | null {
       spot: spots[name],
       atomToConv: 1,
       inflight: [],
-      minimumRate: 1
+      minimumRate: m.rateStep || 1
     }
   }
   const xc: Exchange = {
@@ -382,4 +383,38 @@ export async function fetchSpots (): Promise<Record<string, Spot>> {
   const xc = meshExchange()
   if (xc) for (const [name, mkt] of Object.entries(xc.markets)) mkt.spot = spots[name]
   return spots
+}
+
+/*
+ * coarseRateStep is true when a mesh market sets an explicit price step that
+ * the order form should point out, e.g. lbc_btc, where prices are whole
+ * satoshis per LBC (1 sat is the minimum and the step; there is no sub-sat
+ * price).
+ */
+export function coarseRateStep (mktName: string): boolean {
+  const mesh = app().user?.mesh
+  return Boolean(mesh?.markets?.[mktName]?.rateStep)
+}
+
+/*
+ * rateStepError checks a typed conventional rate against a mesh market's
+ * price step: it must be at least one step and a whole number of steps.
+ * Returns an error message, or '' if the rate is fine.
+ */
+export function rateStepError (typed: string, rateConversionFactor: number, rateStep: number, quoteSymbol: string, baseSymbol: string): string {
+  const raw = parseFloat(typed) * rateConversionFactor
+  if (!(raw > 0) || !rateStep) return ''
+  const steps = raw / rateStep
+  if (steps >= 1 - 1e-9 && Math.abs(steps - Math.round(steps)) < 1e-6) return ''
+  return `Prices on this market are whole steps of ${stepText(rateStep, rateConversionFactor, quoteSymbol, baseSymbol)}; ` +
+    `the minimum price is one step. Use ${Doc.formatCoinValue(Math.max(1, Math.round(steps)) * rateStep / rateConversionFactor)}.`
+}
+
+/* stepText describes a price step, e.g. "1 sat (0.00000001 BTC) per LBC". */
+export function stepText (rateStep: number, rateConversionFactor: number, quoteSymbol: string, baseSymbol: string): string {
+  const conv = Doc.formatCoinValue(rateStep / rateConversionFactor)
+  const q = quoteSymbol.toUpperCase()
+  const b = baseSymbol.toUpperCase()
+  if (q === 'BTC') return `${rateStep} sat (${conv} BTC) per ${b}`
+  return `${conv} ${q} per ${b}`
 }

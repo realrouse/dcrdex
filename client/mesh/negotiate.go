@@ -145,6 +145,11 @@ func (ob *OrderBooks) Take(ctx context.Context, m Market, sell bool, qty, rate, 
 	if qty == 0 || rate == 0 {
 		return nil, errors.New("zero qty or rate")
 	}
+	if name, err := m.Name(); err == nil {
+		if err := CheckRate(name, rate); err != nil {
+			return nil, err
+		}
+	}
 	if err := ob.SubscribeMarket(ctx, m); err != nil {
 		return nil, err
 	}

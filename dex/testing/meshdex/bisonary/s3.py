@@ -182,7 +182,11 @@ def phase_book(net):
         asks = [o for o in ords if o["sell"]]
         books[m].update({"bids": len(bids), "asks": len(asks), "bestBid": max([o["rate"] for o in bids] or [0]),
                          "bestAsk": min([o["rate"] for o in asks] or [0]), "owners": len({o["owner"] for o in ords})})
-        if len(bids) < 10 or len(asks) < 10:
+        # At the 1 sat floor (lbc_btc) the book is one-price and one-sided:
+        # asks at 1 sat, no bids (none below 1 sat exist; one at 1 sat would
+        # match). Require the asks only there.
+        one_price = h.at_floor(m, books[m]["midRate"])
+        if (len(bids) < 10 and not one_price) or len(asks) < 10:
             short.append(m)
     b.result("book", {"prices": prices, "books": books})
     b.shot(net["carol"], "/markets", "s3-book-markets", 6000)

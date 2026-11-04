@@ -253,6 +253,11 @@ func (ob *OrderBooks) postOrder(ctx context.Context, m Market, sell bool, qty, l
 	if lotSize == 0 {
 		lotSize = qty
 	}
+	if name, err := m.Name(); err == nil {
+		if err := CheckRate(name, rate); err != nil {
+			return nil, err
+		}
+	}
 	topic, err := m.Topic()
 	if err != nil {
 		return nil, err

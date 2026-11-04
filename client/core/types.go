@@ -211,6 +211,10 @@ type MeshMarket struct {
 	QuoteID uint32 `json:"quoteID"`
 	// LotSize is the market's lot size in base atoms, for the Trade page.
 	LotSize uint64 `json:"lotSize,omitempty"`
+	// RateStep is the market's price step and minimum rate in message-rate
+	// units (lbc_btc: 1 = 1 sat per LBC), set only on markets where the step
+	// is coarse enough that the Trade page should point it out. Zero means 1.
+	RateStep uint64 `json:"rateStep,omitempty"`
 }
 
 // Mesh is the core representation of the Mesh.

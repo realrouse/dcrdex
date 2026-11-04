@@ -100,6 +100,7 @@ def phase_switch(net):
 
 def one_trade(net, mkt, mk, tk, lots=1):
     m, oid, rate, took = s6.epoch_trade(net, mkt, mk, tk, lots)
+    mk = b.maker_of(net, m, mk)   # one-price floor: another seller's ask may fill
     mid = m["match"]["id"]
     h.wait_until(lambda: (mk.swap(mid) or {}).get("status") == "complete", 900, "%s maker swap complete" % mkt, 3)
     h.wait_until(lambda: (tk.swap(mid) or {}).get("status") == "complete", 600, "%s taker swap complete" % mkt, 3)

@@ -45,6 +45,7 @@ type MeshMarketInfo struct {
 	QuoteSymbol  string `json:"quoteSymbol"`
 	LotSize      uint64 `json:"lotSize"`
 	TestRate     uint64 `json:"testRate"`
+	RateStep     uint64 `json:"rateStep"`
 	MakerLockSec int64  `json:"makerLockSec"`
 	TakerLockSec int64  `json:"takerLockSec"`
 	Subscribed   bool   `json:"subscribed"`
@@ -140,6 +141,7 @@ func meshMarketInfo(m *meshpkg.Client, name string) (*MeshMarketInfo, meshpkg.Ma
 		Name: name, BaseID: mkt.Base, QuoteID: mkt.Quote,
 		BaseSymbol: dex.BipIDSymbol(mkt.Base), QuoteSymbol: dex.BipIDSymbol(mkt.Quote),
 		LotSize:      1e8,
+		RateStep:     meshpkg.MarketRateStep(name),
 		MakerLockSec: int64(pol.Maker / time.Second), TakerLockSec: int64(pol.Taker / time.Second),
 	}
 	if d, ok := meshpkg.MarketDefault(name); ok {

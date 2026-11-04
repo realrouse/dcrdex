@@ -25,7 +25,7 @@ func (c *Core) coreMesh() *Mesh {
 	mkts := make(map[string]*MeshMarket, len(meshpkg.DefaultMarkets))
 	for _, d := range meshpkg.DefaultMarkets {
 		if m, err := meshpkg.ParseMarket(d.Name); err == nil {
-			mkts[d.Name] = &MeshMarket{BaseID: m.Base, QuoteID: m.Quote, LotSize: d.LotSize}
+			mkts[d.Name] = &MeshMarket{BaseID: m.Base, QuoteID: m.Quote, LotSize: d.LotSize, RateStep: d.RateStep}
 		}
 	}
 	return &Mesh{Markets: mkts}

@@ -151,12 +151,27 @@ def market_assets(mkt):
 def usd(prices, sym):
     return prices["usdc"] if sym.startswith("usdc") else prices[sym]
 
+# Price steps (message-rate units), as RateStep in client/mesh/markets.go.
+# lbc_btc: whole sats per LBC. 1 sat is the minimum and the step (next price
+# up: 2 sat); a satoshi isn't divisible, so there is no sub-sat price.
+RATE_STEP = {"lbc_btc": 1}
+
+def rate_step(mkt):
+    return RATE_STEP.get(mkt, 1)
+
+def at_floor(mkt, rate):
+    """True when rate is at the market's minimum price (one step): a one-price
+    market, e.g. lbc_btc while LBC is below 1 sat."""
+    return rate <= rate_step(mkt)
+
 def rate_for(prices, mkt, factor=1.0):
-    """Mesh message rate (quote atoms per 1e8 base atoms * ... = quote atoms per base coin
-    scaled to 1e8 base atoms), at least 1."""
+    """Mesh message rate (quote atoms per 1e8 base atoms = quote atoms per base
+    coin), rounded to a whole number of the market's price steps and at least
+    one step. lbc_btc at the real price (about 0.65 sat per LBC) is 1 sat."""
     b, q = market_assets(mkt)
     price = usd(prices, b) / usd(prices, q) * factor   # quote coins per base coin
-    return max(1, int(round(price * 10 ** DECIMALS[q])))
+    step = rate_step(mkt)
+    return max(step, int(round(price * 10 ** DECIMALS[q] / step)) * step)
 
 # ---------------- bisonw ----------------
 class Bisonw:

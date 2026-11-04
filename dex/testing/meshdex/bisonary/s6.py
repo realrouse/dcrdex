@@ -333,22 +333,8 @@ def phase_book(net):
     s3.phase_book(net)
 
 def epoch_trade(net, mkt, maker, taker, lots=1):
-    bb, ba = b.best_rates(taker, mkt)
-    rate = ba - 1 if ba - 1 > bb else ba
-    if rate <= bb:
-        rate = bb + 1
-    oid = maker.order(mkt, True, lots, rate, 900)
-    h.wait_until(lambda: oid in [o["id"] for o in taker.book(mkt)], 60, "order on taker's book")
-    t0 = time.time()
-    r = taker.dbgapi("/mesh/take", {"market": mkt, "sell": False, "qty": lots * h.LOTS[mkt], "rate": rate, "lotSize": h.LOTS[mkt]})
-    if "remain" not in r:
-        raise Fail("take: %s" % r)
-    def agreed():
-        for m in taker.matches():
-            if m["match"]["makerOrderID"] == oid and m["status"] == "agreed":
-                return m
-    m = h.wait_until(agreed, 90, "epoch match agreed for %s" % mkt)
-    return m, oid, rate, time.time() - t0
+    # Same as s012.epoch_trade (maker sells), including the one-price floor.
+    return b.epoch_trade(net, mkt, maker, taker, lots)
 
 def phase_trade(net):
     dv = net["dave"]

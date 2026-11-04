@@ -308,6 +308,18 @@ def epoch_trade(net, mkt, maker, taker, lots=1, sell=True):
     rate = ba - 1 if ba - 1 > bb else ba
     if rate <= bb:
         rate = bb + 1
+    # One-price market at the floor (lbc_btc at 1 sat): the maker's ask can't
+    # undercut the asks already resting at 1 sat, and the epoch matches the
+    # oldest of them first. Then the taker's 1 sat buy may fill another
+    # seller's ask; accept that match (maker_of resolves who made it) and
+    # cancel the unused order.
+    step = h.rate_step(mkt)
+    floor = sell and bool(ba) and h.at_floor(mkt, ba)
+    if floor:
+        rate = step
+    rate = max(step, rate // step * step)
+    tid = taker.id()
+    before = {m["match"]["id"] for m in taker.matches()}
     oid = maker.order(mkt, sell, lots, rate, 900)
     h.wait_until(lambda: oid in [o["id"] for o in taker.book(mkt)], 60, "order on taker's book")
     t0 = time.time()
@@ -316,10 +328,28 @@ def epoch_trade(net, mkt, maker, taker, lots=1, sell=True):
         raise Fail("take: %s" % r)
     def agreed():
         for m in taker.matches():
-            if m["match"]["makerOrderID"] == oid and m["status"] == "agreed":
+            if m["status"] != "agreed":
+                continue
+            if m["match"]["makerOrderID"] == oid:
+                return m
+            if floor and m["match"]["id"] not in before and m["match"]["taker"] == tid and m["match"]["rate"] == rate:
                 return m
     m = h.wait_until(agreed, 90, "epoch match agreed for %s" % mkt)
+    if m["match"]["makerOrderID"] != oid:
+        log("%s: one-price market, the 1-step take filled %s's older ask; cancelling %s" % (mkt, m["match"]["maker"][:12], oid[:12]))
+        try:
+            maker.cancel(oid)
+        except Exception:
+            pass
     return m, oid, rate, time.time() - t0
+
+def maker_of(net, m, default):
+    """The bisonw that made match m (default if it isn't one of ours)."""
+    pid = m["match"]["maker"]
+    for n in net.nodes.values():
+        if (getattr(n, "peer_id", None) or n.id()) == pid:
+            return n
+    return default
 
 def phase_swaps(net):
     out = {}
@@ -329,6 +359,8 @@ def phase_swaps(net):
         b, q = h.market_assets(mkt)
         before = {n.name: {a: n.coins(a, "total") for a in (b, q)} for n in (mk, tk)}
         m, oid, rate, took = epoch_trade(net, mkt, mk, tk)
+        mk = maker_of(net, m, mk)
+        before.setdefault(mk.name, {a: mk.coins(a, "total") for a in (b, q)})
         mid = m["match"]["id"]
         stamp = m["match"]["stamp"]
         epoch = stamp // 10000 - 1

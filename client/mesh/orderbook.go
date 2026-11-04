@@ -189,11 +189,15 @@ func (o *MeshOrder) Sign(priv libp2pcrypto.PrivKey) error {
 // Validate checks the fields, the signature, and that the order is live at
 // time now.
 func (o *MeshOrder) Validate(now time.Time) error {
-	if _, err := o.Market.Name(); err != nil {
+	name, err := o.Market.Name()
+	if err != nil {
 		return err
 	}
 	if o.Qty == 0 || o.Rate == 0 || o.LotSize == 0 {
 		return errors.New("zero qty, lot size or rate")
+	}
+	if err := CheckRate(name, o.Rate); err != nil {
+		return err
 	}
 	if o.Qty%o.LotSize != 0 {
 		return errors.New("qty is not a multiple of the lot size")

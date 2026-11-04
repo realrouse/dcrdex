@@ -1487,6 +1487,14 @@ export default class MarketsPage extends BasePage {
     this.mmRunning = undefined
     page.lotSize.textContent = Doc.formatCoinValue(mkt.cfg.lotsize, mkt.baseUnitInfo)
     page.rateStep.textContent = Doc.formatCoinValue(mkt.cfg.ratestep / rateConversionFactor)
+    // Coarse mesh price steps (lbc_btc: whole sats per LBC) get a short note.
+    const coarse = Mesh.isMeshHost(host) && Mesh.coarseRateStep(mkt.cfg.name)
+    if (coarse) {
+      const step = mkt.cfg.ratestep
+      page.meshRateNote.textContent = `Minimum price step: ${Mesh.stepText(step, rateConversionFactor, mkt.cfg.quotesymbol, mkt.cfg.basesymbol)}. ` +
+        `There is no smaller price; the next price up is ${2 * step}${mkt.cfg.quotesymbol.toLowerCase() === 'btc' ? ' sat' : ' steps'}.`
+    }
+    Doc.setVis(coarse, page.meshRateNote)
 
     this.displayMessageIfMissingWallet()
     this.balanceWgt.setWallets(host, baseID, quoteID)
@@ -1851,7 +1859,17 @@ export default class MarketsPage extends BasePage {
    * true if the order appears valid.
    */
   validateOrder (order: TradeForm) {
-    const { page, market: { cfg: { minimumRate }, rateConversionFactor } } = this
+    const { page, market: { cfg: { minimumRate, ratestep: rateStep, quotesymbol: quoteSymbol, basesymbol: baseSymbol }, rateConversionFactor } } = this
+    if (order.isLimit && this.isMesh()) {
+      // Mesh prices are whole multiples of the market's rate step (lbc_btc:
+      // 1 sat per LBC), and the step is also the minimum price.
+      const msg = Mesh.rateStepError(page.rateField.value || '', rateConversionFactor, rateStep, quoteSymbol, baseSymbol)
+      if (msg) {
+        Doc.show(page.orderErr)
+        page.orderErr.textContent = msg
+        return false
+      }
+    }
     if (order.isLimit) {
       if (!order.rate) {
         Doc.show(page.orderErr)
@@ -4069,7 +4087,11 @@ export default class MarketsPage extends BasePage {
 
   /* setMeshBookPrice shows the mesh book's mid-gap as the market price. */
   setMeshBookPrice () {
-    const conv = this.midGapConventional() || 0
+    let conv = this.midGapConventional() || 0
+    // Show the mid-gap on the market's price grid (lbc_btc: whole sats), not
+    // as a fraction of a step.
+    const { cfg: { ratestep: step }, rateConversionFactor: rcf } = this.market
+    if (conv > 0 && step > 0) conv = Math.max(1, Math.round(conv * rcf / step)) * step / rcf
     const quoteUnit = this.market.quoteUnitInfo.conventional.unit
     const pairTxt = conv > 0 ? `${Doc.formatFourSigFigs(conv)} ${quoteUnit}` : '-'
     this.page.obPrice.textContent = pairTxt

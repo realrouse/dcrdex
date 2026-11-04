@@ -366,6 +366,7 @@ export interface MeshMarket {
   baseID: number
   quoteID: number
   lotSize?: number
+  rateStep?: number // price step and minimum rate (message rate); unset: 1
 }
 
 export interface Mesh {
