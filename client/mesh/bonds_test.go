@@ -205,7 +205,7 @@ func TestBondTxParse(t *testing.T) {
 		}
 		// Tampered tx / wrong coin.
 		bad := *c
-		bad.CoinID = append([]byte{1}, coin[1:]...)
+		bad.CoinID = append([]byte{coin[0] ^ 1}, coin[1:]...) // always differs from coin
 		_ = bad.sign(priv)
 		if _, err := checkClaim(rules, &bad); err == nil {
 			t.Fatal("wrong coin ID accepted")
