@@ -452,6 +452,9 @@ func NewServer(cfg *RPCConfig) (*Server, error) {
 	// and rate limiting. Properly supporting a reverse proxy would require a
 	// coordinated change across all IP-based checks with a trusted proxy
 	// allowlist, not just a middleware that silently rewrites RemoteAddr.
+	// The one exception is the HTTP data API limiter (LimitRate): for
+	// requests from a proxy on loopback it keys on the address the proxy
+	// appended to X-Forwarded-For (see clientIP).
 	mux := chi.NewRouter()
 	mux.Use(middleware.Recoverer)
 

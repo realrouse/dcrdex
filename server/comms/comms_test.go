@@ -983,9 +983,9 @@ func TestXForwardedForIgnored(t *testing.T) {
 
 	realAddr := "198.51.100.1:12345"
 
-	// Send requests with unique X-Forwarded-For values but the same
-	// RemoteAddr. All requests should be rate-limited together under the
-	// real address, not split into separate limiters.
+	// Send requests with unique X-Forwarded-For values from an untrusted
+	// (non-loopback) RemoteAddr. All requests should be rate-limited
+	// together under the real address, not split into separate limiters.
 	for i := 0; i < DefaultIPBurstSize+5; i++ {
 		req := &http.Request{
 			RemoteAddr: realAddr,
@@ -1005,6 +1005,63 @@ func TestXForwardedForIgnored(t *testing.T) {
 	s.rateLimiterMtx.RUnlock()
 	if n != 1 {
 		t.Fatalf("expected 1 rate limiter entry, got %d (X-Forwarded-For headers created separate entries)", n)
+	}
+}
+
+func TestXForwardedForFromLoopbackProxy(t *testing.T) {
+	for _, proxy := range []string{"127.0.0.1:40000", "[::1]:40000"} {
+		t.Run(proxy, func(t *testing.T) {
+			s := newServer()
+			tHandler := &tHTTPHandler{}
+			f := s.LimitRate(tHandler)
+
+			const clients = 3
+			for c := 0; c < clients; c++ {
+				for i := 0; i < DefaultIPBurstSize+5; i++ {
+					req := &http.Request{
+						RemoteAddr: proxy,
+						// The client may forge leading entries; the proxy
+						// appends the real client address last.
+						Header: http.Header{"X-Forwarded-For": []string{
+							fmt.Sprintf("192.0.2.%d, 203.0.113.%d", i, c+1),
+						}},
+					}
+					f.ServeHTTP(httptest.NewRecorder(), req)
+				}
+			}
+			successes := atomic.LoadUint32(&tHandler.count)
+			if successes != uint32(clients*DefaultIPBurstSize) {
+				t.Fatalf("expected %d successes (one limiter per proxied client), got %d",
+					clients*DefaultIPBurstSize, successes)
+			}
+			s.rateLimiterMtx.RLock()
+			n := len(s.ipHTTPRateLimiter)
+			s.rateLimiterMtx.RUnlock()
+			if n != clients {
+				t.Fatalf("expected %d rate limiter entries, got %d", clients, n)
+			}
+		})
+	}
+
+	// clientIP edge cases.
+	for _, tt := range []struct {
+		remote, xff, want string
+	}{
+		{"127.0.0.1:1", "", "127.0.0.1"},
+		{"127.0.0.1:1", "not-an-ip", "127.0.0.1"},
+		{"127.0.0.1:1", "203.0.113.7", "203.0.113.7"},
+		{"127.0.0.1:1", "198.51.100.9,  203.0.113.7 ", "203.0.113.7"},
+		{"[::1]:1", "2001:db8::1", "2001:db8::1"},
+		{"127.0.0.2:1", "203.0.113.7", "127.0.0.2"},
+		{"198.51.100.1:1", "203.0.113.7", "198.51.100.1"},
+	} {
+		req := &http.Request{RemoteAddr: tt.remote, Header: http.Header{}}
+		if tt.xff != "" {
+			req.Header.Set("X-Forwarded-For", tt.xff)
+		}
+		if got, want := clientIP(req), dex.NewIPKey(tt.want); got != want {
+			t.Errorf("clientIP(%q, XFF %q) = %v, want %v", tt.remote, tt.xff, got, want)
+		}
 	}
 }
 
