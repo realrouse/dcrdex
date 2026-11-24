@@ -798,6 +798,7 @@ export interface BasicMarketMakingConfig {
   driftTolerance: number
   inventorySkew?: number
   inventorySkewCap?: number
+  persistInventorySkew?: boolean
   doNotCross?: boolean
   bidAnchorFadeHours?: number
 }

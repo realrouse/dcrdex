@@ -4731,6 +4731,9 @@ type exchangeAdaptorCfg struct {
 	botCfg              *BotConfig
 	bridgesSupported    func([]*configuredBridge) error
 	internalTransfer    func(*MarketWithHost, doInternalTransferFunc) error
+	// mmStateDir is where bots may keep small state files between runs
+	// (the directory of the event log DB). Empty disables them.
+	mmStateDir string
 }
 
 // newUnifiedExchangeAdaptor is the constructor for a unifiedExchangeAdaptor.

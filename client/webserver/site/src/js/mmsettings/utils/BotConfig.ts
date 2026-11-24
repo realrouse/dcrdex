@@ -811,6 +811,7 @@ type BotConfigAction =
   | { type: 'UPDATE_DRIFT_TOLERANCE'; payload: number }
   | { type: 'UPDATE_INVENTORY_SKEW'; payload: number }
   | { type: 'UPDATE_INVENTORY_SKEW_CAP'; payload: number }
+  | { type: 'UPDATE_PERSIST_INVENTORY_SKEW'; payload: boolean }
   | { type: 'UPDATE_DO_NOT_CROSS'; payload: boolean }
   | { type: 'UPDATE_BID_ANCHOR_FADE_HOURS'; payload: number }
   | { type: 'UPDATE_ORDER_PERSISTENCE'; payload: number }
@@ -1375,6 +1376,19 @@ export const botConfigStateReducer = (state: BotConfigState | null, action: BotC
           basicMarketMakingConfig: {
             ...state.botConfig.basicMarketMakingConfig,
             inventorySkewCap: action.payload
+          }
+        }
+      }
+
+    case 'UPDATE_PERSIST_INVENTORY_SKEW':
+      if (!state.botConfig.basicMarketMakingConfig) return state
+      return {
+        ...state,
+        botConfig: {
+          ...state.botConfig,
+          basicMarketMakingConfig: {
+            ...state.botConfig.basicMarketMakingConfig,
+            persistInventorySkew: action.payload
           }
         }
       }

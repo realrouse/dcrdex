@@ -197,6 +197,8 @@ const (
 	mmInventorySkewTooltipID       = "MM_INVENTORY_SKEW_TOOLTIP"
 	mmInventorySkewCapID           = "MM_INVENTORY_SKEW_CAP"
 	mmInventorySkewCapTooltipID    = "MM_INVENTORY_SKEW_CAP_TOOLTIP"
+	mmPersistSkewID                = "MM_PERSIST_INVENTORY_SKEW"
+	mmPersistSkewTooltipID         = "MM_PERSIST_INVENTORY_SKEW_TOOLTIP"
 	mmBookProtectionID             = "MM_BOOK_PROTECTION"
 	mmDoNotCrossID                 = "MM_DO_NOT_CROSS"
 	mmDoNotCrossTooltipID          = "MM_DO_NOT_CROSS_TOOLTIP"
@@ -619,6 +621,8 @@ var enUS = map[string]*intl.Translation{
 	mmInventorySkewTooltipID:       {T: "Slide both bids and asks when your base inventory is above or below target. Strength is measured against the lots you are quoting, not the whole wallet. Does not follow last trade. 1 = full (up to the cap). 0 = off."},
 	mmInventorySkewCapID:           {T: "Inventory Skew Cap"},
 	mmInventorySkewCapTooltipID:    {T: "Maximum percent the bot may move quotes away from the oracle price due to inventory."},
+	mmPersistSkewID:                {T: "Keep Inventory Skew Across Restarts"},
+	mmPersistSkewTooltipID:         {T: "Save how far base inventory is from target and pick it up again after a restart, so base bought or sold in earlier runs keeps sliding quotes. Stored in mm_inventory_skew.json next to the event log. Delete the bot's entry while it is stopped to reset. Off = every start takes the allocation as the new target."},
 	mmBookProtectionID:             {T: "Book Protection"},
 	mmDoNotCrossID:                 {T: "Do Not Cross the Book"},
 	mmDoNotCrossTooltipID:          {T: "Never sell into a live bid or buy into a live ask. Stops the bot from restocking at the oracle market price and taking a leftover aggressive bid. Asks lift; bids stay at the oracle market price so you do not buy the pump."},

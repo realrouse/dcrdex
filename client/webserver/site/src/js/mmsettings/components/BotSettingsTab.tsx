@@ -17,6 +17,7 @@ import {
   ID_MM_DRIFT_TOLERANCE, ID_MM_DRIFT_TOLERANCE_TOOLTIP,
   ID_MM_INVENTORY_SKEW, ID_MM_INVENTORY_SKEW_TOOLTIP,
   ID_MM_INVENTORY_SKEW_CAP, ID_MM_INVENTORY_SKEW_CAP_TOOLTIP,
+  ID_MM_PERSIST_INVENTORY_SKEW, ID_MM_PERSIST_INVENTORY_SKEW_TOOLTIP,
   ID_MM_BOOK_PROTECTION,
   ID_MM_DO_NOT_CROSS, ID_MM_DO_NOT_CROSS_TOOLTIP,
   ID_MM_BID_ANCHOR_FADE_HOURS, ID_MM_BID_ANCHOR_FADE_HOURS_TOOLTIP,
@@ -285,6 +286,7 @@ const BotSettingsTab: React.FC = () => {
                          botConfig.arbMarketMakingConfig?.driftTolerance ?? 0.001
   const inventorySkew = botConfig.basicMarketMakingConfig?.inventorySkew ?? 1
   const inventorySkewCap = botConfig.basicMarketMakingConfig?.inventorySkewCap ?? 0.03
+  const persistInventorySkew = botConfig.basicMarketMakingConfig?.persistInventorySkew ?? false
   const doNotCross = botConfig.basicMarketMakingConfig?.doNotCross ?? true
   const bidAnchorFadeHours = botConfig.basicMarketMakingConfig?.bidAnchorFadeHours ?? 4
   const orderPersistence = botConfig.arbMarketMakingConfig?.orderPersistence ??
@@ -382,6 +384,24 @@ const BotSettingsTab: React.FC = () => {
                       withSlider={true}
                       suffix="%"
                     />
+                  </div>
+                  <div className="form-check d-flex align-items-center">
+                    <input
+                      className="form-check-input me-2"
+                      type="checkbox"
+                      id="mmPersistInventorySkew"
+                      checked={persistInventorySkew}
+                      onChange={(e) => dispatch({
+                        type: 'UPDATE_PERSIST_INVENTORY_SKEW',
+                        payload: e.target.checked
+                      })}
+                    />
+                    <label className="form-check-label" htmlFor="mmPersistInventorySkew">
+                      {prep(ID_MM_PERSIST_INVENTORY_SKEW) || 'Keep Inventory Skew Across Restarts'}
+                    </label>
+                    <Tooltip content={prep(ID_MM_PERSIST_INVENTORY_SKEW_TOOLTIP)}>
+                      <span className="ico-info fs12 ms-1"></span>
+                    </Tooltip>
                   </div>
                   <div className="mt-1">
                     <span className="fs16 demi d-block mb-2">{prep(ID_MM_BOOK_PROTECTION) || 'Book Protection'}</span>

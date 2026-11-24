@@ -317,6 +317,8 @@ export const ID_MM_INVENTORY_SKEW = 'MM_INVENTORY_SKEW'
 export const ID_MM_INVENTORY_SKEW_TOOLTIP = 'MM_INVENTORY_SKEW_TOOLTIP'
 export const ID_MM_INVENTORY_SKEW_CAP = 'MM_INVENTORY_SKEW_CAP'
 export const ID_MM_INVENTORY_SKEW_CAP_TOOLTIP = 'MM_INVENTORY_SKEW_CAP_TOOLTIP'
+export const ID_MM_PERSIST_INVENTORY_SKEW = 'MM_PERSIST_INVENTORY_SKEW'
+export const ID_MM_PERSIST_INVENTORY_SKEW_TOOLTIP = 'MM_PERSIST_INVENTORY_SKEW_TOOLTIP'
 export const ID_MM_BOOK_PROTECTION = 'MM_BOOK_PROTECTION'
 export const ID_MM_DO_NOT_CROSS = 'MM_DO_NOT_CROSS'
 export const ID_MM_DO_NOT_CROSS_TOOLTIP = 'MM_DO_NOT_CROSS_TOOLTIP'
@@ -490,6 +492,8 @@ const fallbackEnglish: Locale = {
   MM_INVENTORY_SKEW_TOOLTIP: 'Slide both bids and asks when your base inventory is above or below target. Strength is measured against the lots you are quoting, not the whole wallet. Does not follow last trade. 1 = full (up to the cap). 0 = off.',
   MM_INVENTORY_SKEW_CAP: 'Inventory Skew Cap',
   MM_INVENTORY_SKEW_CAP_TOOLTIP: 'Maximum percent the bot may move quotes away from the oracle price due to inventory.',
+  MM_PERSIST_INVENTORY_SKEW: 'Keep Inventory Skew Across Restarts',
+  MM_PERSIST_INVENTORY_SKEW_TOOLTIP: 'Save how far base inventory is from target and pick it up again after a restart, so base bought or sold in earlier runs keeps sliding quotes. Stored in mm_inventory_skew.json next to the event log. Delete the bot\'s entry while it is stopped to reset. Off = every start takes the allocation as the new target.',
   MM_DRIFT_TOLERANCE: 'Drift Tolerance',
   MM_DRIFT_TOLERANCE_TOOLTIP: 'If an existing DEX order drifts too far from the bot\'s current target price, the bot cancels and replaces it.',
   MM_TRADING: 'Trading'

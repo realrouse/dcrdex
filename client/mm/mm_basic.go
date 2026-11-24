@@ -85,6 +85,18 @@ type BasicMarketMakingConfig struct {
 	// oracle basis (e.g. 0.03 = 3%). Nil means default 0.03.
 	InventorySkewCap *float64 `json:"inventorySkewCap,omitempty"`
 
+	// PersistInventorySkew, when true, makes inventory skew survive bot
+	// restarts. Without it, every start takes the allocation as the new
+	// target, so base accumulated (or sold) in earlier runs stops producing
+	// skew. With it, the bot saves its base inventory deviation from the
+	// target (current minus target, in atoms) to mm_inventory_skew.json in
+	// the market making data directory (next to the event log DB, e.g.
+	// <appdata>/mainnet) at most once a minute and when it stops, and on
+	// start shifts the target by the saved deviation. To reset, stop the
+	// bot and delete its entry (or the file). Nil or false = off (the
+	// default), and nothing is read or written.
+	PersistInventorySkew *bool `json:"persistInventorySkew,omitempty"`
+
 	// DoNotCross, when true, never places a sell at or below a live
 	// foreign bid, or a buy at or above a live foreign ask. Nil means
 	// default true. Explicit false stays off.
@@ -228,6 +240,10 @@ func (c *BasicMarketMakingConfig) copy() *BasicMarketMakingConfig {
 	if c.InventorySkewCap != nil {
 		v := *c.InventorySkewCap
 		cfg.InventorySkewCap = &v
+	}
+	if c.PersistInventorySkew != nil {
+		v := *c.PersistInventorySkew
+		cfg.PersistInventorySkew = &v
 	}
 	if c.DoNotCross != nil {
 		v := *c.DoNotCross
@@ -441,6 +457,14 @@ type basicMarketMaker struct {
 	buyFadeStart       time.Time
 	prevBuyBookedLots  uint64
 
+	// Inventory skew persistence (PersistInventorySkew).
+	skewStatePath      string
+	skewCarry          atomic.Int64 // base deviation restored from the last run
+	skewRestoreTried   atomic.Bool
+	skewSaveMtx        sync.Mutex
+	lastSavedDeviation int64
+	lastSkewSave       time.Time
+
 	topUpMtx       sync.Mutex
 	topUpAdded     map[uint32]uint64 // total auto-added this run
 	topUpLast      map[uint32]time.Time
@@ -500,6 +524,15 @@ func (m *basicMarketMaker) targetBaseInventory() uint64 {
 	}
 	if m.inventoryMods != nil {
 		target += m.inventoryMods[m.dexBaseID]
+	}
+	if carry := m.skewCarry.Load(); carry != 0 && m.persistSkewEnabled() {
+		// The bot restarted with its allocation as its balance. Move the
+		// target so the deviation from the last run is still there.
+		target -= carry
+		if target <= 0 {
+			// Keep skew on (saturated) rather than switching it off.
+			return 1
+		}
 	}
 	if target < 0 {
 		return 0
@@ -1022,6 +1055,7 @@ func (m *basicMarketMaker) rebalance(newEpoch uint64) {
 
 	m.maybeAutoTopUp(buysReport)
 	m.maybeAutoTopUp(sellsReport)
+	m.maybeSaveSkewState(false)
 
 	epochReport := &EpochReport{
 		BuysReport:  buysReport,
@@ -1170,6 +1204,8 @@ func (m *basicMarketMaker) botLoop(ctx context.Context) (*sync.WaitGroup, error)
 		log:    m.log,
 	}
 
+	m.restoreSkewState()
+
 	// Process book updates. Rebalance runs in its own goroutine so a
 	// slow FundMultiOrder cannot block the feed (bookie then drops
 	// updates: "feed N is blocking and book update was thrown away").
@@ -1179,6 +1215,7 @@ func (m *basicMarketMaker) botLoop(ctx context.Context) (*sync.WaitGroup, error)
 		defer wg.Done()
 		defer bookFeed.Close()
 		var rbWg sync.WaitGroup
+		defer m.maybeSaveSkewState(true)
 		defer rbWg.Wait()
 		for {
 			select {
@@ -1234,6 +1271,7 @@ func newBasicMarketMaker(cfg *BotConfig, adaptorCfg *exchangeAdaptorCfg, oracle 
 		unifiedExchangeAdaptor: adaptor,
 		core:                   adaptor,
 		oracle:                 oracle,
+		skewStatePath:          skewStatePathForDir(adaptorCfg.mmStateDir),
 	}
 	adaptor.setBotLoop(basicMM.botLoop)
 	return basicMM, nil

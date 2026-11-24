@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"maps"
 	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"sync"
@@ -1029,6 +1030,9 @@ func (m *MarketMaker) startBot(mkt *MarketWithHost, botCfg *BotConfig, cexCfg *C
 		eventLogDB:          m.eventLogDB,
 		internalTransfer:    m.internalTransfer,
 		bridgesSupported:    m.configuredBridgesSupported,
+	}
+	if m.eventLogDBPath != "" {
+		adaptorCfg.mmStateDir = filepath.Dir(m.eventLogDBPath)
 	}
 
 	bot, err := m.newBot(botCfg, adaptorCfg)
