@@ -23,6 +23,7 @@ import {
   ID_MM_BID_ANCHOR_FADE_HOURS, ID_MM_BID_ANCHOR_FADE_HOURS_TOOLTIP,
   ID_MM_ORACLE_HALF_LIFE, ID_MM_ORACLE_HALF_LIFE_TOOLTIP,
   ID_MM_ORACLE_MAX_STEP, ID_MM_ORACLE_MAX_STEP_TOOLTIP,
+  ID_MM_ORACLE_DAMP_DROPS, ID_MM_ORACLE_DAMP_DROPS_TOOLTIP,
   ID_MM_ORACLE_OFFSET, ID_MM_ORACLE_OFFSET_TOOLTIP,
   ID_MM_ORACLE_BID_OFFSET, ID_MM_ORACLE_BID_OFFSET_TOOLTIP,
   ID_MM_ORACLE_ASK_OFFSET, ID_MM_ORACLE_ASK_OFFSET_TOOLTIP,
@@ -297,6 +298,7 @@ const BotSettingsTab: React.FC = () => {
   const bidAnchorFadeHours = botConfig.basicMarketMakingConfig?.bidAnchorFadeHours ?? 4
   const oracleHalfLifeMinutes = botConfig.basicMarketMakingConfig?.oracleHalfLifeMinutes ?? 10
   const oracleMaxStep = botConfig.basicMarketMakingConfig?.oracleMaxStep ?? 0
+  const oracleDampDrops = botConfig.basicMarketMakingConfig?.oracleDampDrops ?? false
   const oracleOffset = botConfig.basicMarketMakingConfig?.oracleOffset ?? 0
   // Unset per-side offsets follow the shared center offset.
   const bidOffsetSet = botConfig.basicMarketMakingConfig?.oracleBidOffset !== undefined
@@ -461,6 +463,24 @@ const BotSettingsTab: React.FC = () => {
                       withSlider={true}
                       suffix="%"
                     />
+                  </div>
+                  <div className="form-check d-flex align-items-center">
+                    <input
+                      className="form-check-input me-2"
+                      type="checkbox"
+                      id="mmOracleDampDrops"
+                      checked={oracleDampDrops}
+                      onChange={(e) => dispatch({
+                        type: 'UPDATE_ORACLE_DAMP_DROPS',
+                        payload: e.target.checked
+                      })}
+                    />
+                    <label className="form-check-label" htmlFor="mmOracleDampDrops">
+                      {prep(ID_MM_ORACLE_DAMP_DROPS) || 'Damp Oracle Drops'}
+                    </label>
+                    <Tooltip content={prep(ID_MM_ORACLE_DAMP_DROPS_TOOLTIP)}>
+                      <span className="ico-info fs12 ms-1"></span>
+                    </Tooltip>
                   </div>
                   <div className="d-flex align-items-center">
                     <div className="fs16 me-3 flex-shrink-0">

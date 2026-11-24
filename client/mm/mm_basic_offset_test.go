@@ -113,9 +113,10 @@ func TestOracleOffset(t *testing.T) {
 		c.bp = 200_000
 		*now = start.Add(10 * time.Minute)
 		bid, ask := ladder(t, mm)
-		// Damped 150000, +10% = 165000.
-		if bid != 164_000 || ask != 166_000 {
-			t.Fatalf("ladder %d / %d, want 164000 / 166000", bid, ask)
+		// Damped 150000, +10% = 165000 for bids. Asks are held at the
+		// raw oracle +10% (220000) by the ask floor.
+		if bid != 164_000 || ask != 221_000 {
+			t.Fatalf("ladder %d / %d, want 164000 / 221000", bid, ask)
 		}
 	})
 

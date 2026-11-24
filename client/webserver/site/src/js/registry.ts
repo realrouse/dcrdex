@@ -803,6 +803,7 @@ export interface BasicMarketMakingConfig {
   bidAnchorFadeHours?: number
   oracleHalfLifeMinutes?: number
   oracleMaxStep?: number
+  oracleDampDrops?: boolean
   oracleOffset?: number
   oracleBidOffset?: number
   oracleAskOffset?: number

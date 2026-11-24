@@ -208,6 +208,8 @@ const (
 	mmOracleHalfLifeTooltipID      = "MM_ORACLE_HALF_LIFE_TOOLTIP"
 	mmOracleMaxStepID              = "MM_ORACLE_MAX_STEP"
 	mmOracleMaxStepTooltipID       = "MM_ORACLE_MAX_STEP_TOOLTIP"
+	mmOracleDampDropsID            = "MM_ORACLE_DAMP_DROPS"
+	mmOracleDampDropsTooltipID     = "MM_ORACLE_DAMP_DROPS_TOOLTIP"
 	mmOracleOffsetID               = "MM_ORACLE_OFFSET"
 	mmOracleOffsetTooltipID        = "MM_ORACLE_OFFSET_TOOLTIP"
 	mmOracleBidOffsetID            = "MM_ORACLE_BID_OFFSET"
@@ -642,9 +644,11 @@ var enUS = map[string]*intl.Translation{
 	mmBidAnchorFadeHoursID:         {T: "Hours to Fade Back to Oracle Market Price"},
 	mmBidAnchorFadeHoursTooltipID:  {T: "After an aggressive bid or ask that ran the book is gone, walk quotes linearly back to the oracle market price over this many hours. 4 = slow return. 0 = snap back as soon as it cancels. Only the lifted side moves; the other side stays at the oracle market price."},
 	mmOracleHalfLifeID:             {T: "Oracle Smoothing Half-Life"},
-	mmOracleHalfLifeTooltipID:      {T: "How slowly the ladder center follows the oracle price. Every this many minutes the center closes half the gap to the oracle, so short spikes barely move your orders and lasting moves are followed with a lag. 0 = follow the oracle at once."},
+	mmOracleHalfLifeTooltipID:      {T: "How slowly the ladder center follows rises of the oracle price. Every this many minutes the center closes half the gap to the oracle, so short spikes barely move your orders and lasting rises are followed with a lag. Drops are followed at once unless Damp Oracle Drops is on. 0 = follow the oracle at once."},
 	mmOracleMaxStepID:              {T: "Max Center Move per Epoch"},
-	mmOracleMaxStepTooltipID:       {T: "Largest percent the ladder center may move in one epoch, on top of the smoothing. 0 = no limit."},
+	mmOracleMaxStepTooltipID:       {T: "Largest percent the ladder center may rise in one epoch, on top of the smoothing. Drops are not limited unless Damp Oracle Drops is on. 0 = no limit."},
+	mmOracleDampDropsID:            {T: "Damp Oracle Drops"},
+	mmOracleDampDropsTooltipID:     {T: "Off (default): when the oracle price falls, the ladder follows it at once and only rises are smoothed, so the bot does not keep buying above a falling market. On: falls are smoothed like rises. Either way, no bid is placed above the oracle price plus the bid offset, and no ask below the oracle price plus the ask offset."},
 	mmOracleOffsetID:               {T: "Center Offset from Oracle"},
 	mmOracleOffsetTooltipID:        {T: "Keep the ladder center this percent above (positive, a premium) or below (negative) the oracle price. Both bids and asks move. Inventory skew is added on top. 0 = center on the oracle."},
 	mmOracleBidOffsetID:            {T: "Bid Offset from Oracle"},

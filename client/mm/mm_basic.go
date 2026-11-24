@@ -113,16 +113,37 @@ type BasicMarketMakingConfig struct {
 	// (oracle) price. The center is an exponential moving average of the
 	// basis price that closes half the remaining gap every this many
 	// minutes, so a short spike in a volatile oracle barely moves the book
-	// while a lasting move is followed with a lag. Nil means default 10.
+	// while a lasting move is followed with a lag. By default only rises
+	// are damped and drops are followed at once (see OracleDampDrops).
+	// Nil means default 10.
 	// Explicit 0 turns damping off and follows the oracle immediately (the
 	// behaviour before this option). The average starts at the first price
 	// seen after the bot starts. 0 <= x <= 1440.
 	OracleHalfLifeMinutes *float64 `json:"oracleHalfLifeMinutes,omitempty"`
 
-	// OracleMaxStep caps how far the ladder center may move in one update
+	// OracleMaxStep caps how far the ladder center may rise in one update
 	// (one epoch), as a fraction of the center (0.005 = 0.5%). It applies
-	// after OracleHalfLifeMinutes. Nil or 0 = no cap. 0 <= x <= 0.5.
+	// after OracleHalfLifeMinutes. It limits rises only, since drops are
+	// followed at once, unless OracleDampDrops is set, in which case it
+	// limits drops too. Nil or 0 = no cap. 0 <= x <= 0.5.
 	OracleMaxStep *float64 `json:"oracleMaxStep,omitempty"`
+
+	// OracleDampDrops, when true, damps falls of the oracle price the same
+	// way as rises. By default (nil or false) only rises are damped: when
+	// the oracle drops below the damped center, the center follows it at
+	// once (OracleMaxStep is not applied to drops either), so the bot never
+	// keeps buying above a falling market.
+	//
+	// Independently of this setting, two guards always apply against the
+	// raw (undamped) oracle price:
+	//   - bid cap: no buy is placed above raw oracle * (1 + bid offset),
+	//   - ask floor: no sell is placed below raw oracle * (1 + ask offset),
+	// where the offsets are OracleBidOffset / OracleAskOffset, else
+	// OracleOffset, else 0. They win over a lagging damped center (e.g.
+	// selling far under market while the center catches up after a pump)
+	// and over inventory skew, which can therefore move quotes away from
+	// the oracle but never through it.
+	OracleDampDrops *bool `json:"oracleDampDrops,omitempty"`
 
 	// OracleOffset keeps the ladder center above or below the (damped)
 	// oracle price, as a fraction of it, for both sides: 0.02 places the
@@ -325,6 +346,10 @@ func (c *BasicMarketMakingConfig) copy() *BasicMarketMakingConfig {
 	if c.OracleMaxStep != nil {
 		v := *c.OracleMaxStep
 		cfg.OracleMaxStep = &v
+	}
+	if c.OracleDampDrops != nil {
+		v := *c.OracleDampDrops
+		cfg.OracleDampDrops = &v
 	}
 	if c.OracleOffset != nil {
 		v := *c.OracleOffset
@@ -670,10 +695,13 @@ func (m *basicMarketMaker) fadeDuration() time.Duration {
 	return time.Duration(h * float64(time.Hour))
 }
 
-func (m *basicMarketMaker) oracleDampingParams() (halfLife time.Duration, maxStep float64) {
+func (m *basicMarketMaker) oracleDampingParams() (halfLife time.Duration, maxStep float64, dampDrops bool) {
 	mins := defaultOracleHalfLifeMinutes
 	cfg := m.cfg()
 	if cfg != nil {
+		if cfg.OracleDampDrops != nil {
+			dampDrops = *cfg.OracleDampDrops
+		}
 		if cfg.OracleHalfLifeMinutes != nil {
 			mins = *cfg.OracleHalfLifeMinutes
 		}
@@ -692,18 +720,19 @@ func (m *basicMarketMaker) oracleDampingParams() (halfLife time.Duration, maxSte
 
 // dampedBasis returns the ladder center for a new basis (oracle) price. The
 // center is an exponential moving average with the configured half-life,
-// optionally limited to OracleMaxStep per update. The first price after a
+// optionally limited to OracleMaxStep per update. Unless OracleDampDrops is
+// set, a basis below the center is taken at once. The first price after a
 // start is taken as is. With damping off, the basis is returned unchanged.
 func (m *basicMarketMaker) dampedBasis(basisPrice uint64, now time.Time) uint64 {
 	if basisPrice == 0 {
 		return 0
 	}
-	halfLife, maxStep := m.oracleDampingParams()
+	halfLife, maxStep, dampDrops := m.oracleDampingParams()
 	m.dampMtx.Lock()
 	defer m.dampMtx.Unlock()
 	raw := float64(basisPrice)
 	prev := m.dampedRate
-	if (halfLife <= 0 && maxStep <= 0) || prev <= 0 {
+	if (halfLife <= 0 && maxStep <= 0) || prev <= 0 || (!dampDrops && raw <= prev) {
 		m.dampedRate = raw
 		m.dampLast = now
 		return basisPrice
@@ -1182,6 +1211,13 @@ func (m *basicMarketMaker) ordersToPlace() (buyOrders, sellOrders []*TradePlacem
 		m.log.Debugf("book protection: bid basis %s (inv %s, ceil %s)",
 			m.fmtRate(bidBasis), m.fmtRate(invBid), m.fmtRate(ceil))
 	}
+	// Never bid above the raw (undamped) oracle moved by the bid offset.
+	maxBid := m.offsetRate(basisPrice, bidOff)
+	if bidBasis > maxBid {
+		m.log.Debugf("bid cap: bid basis %s -> %s (raw oracle %s, bid offset %+.2f%%)",
+			m.fmtRate(bidBasis), m.fmtRate(maxBid), m.fmtRate(basisPrice), bidOff*100)
+		bidBasis = maxBid
+	}
 
 	orders := func(orderPlacements []*OrderPlacement, sell bool, basis uint64) []*TradePlacement {
 		placements := make([]*TradePlacement, 0, len(orderPlacements))
@@ -1205,8 +1241,26 @@ func (m *basicMarketMaker) ordersToPlace() (buyOrders, sellOrders []*TradePlacem
 		return placements
 	}
 
+	// Never sell below the raw (undamped) oracle moved by the ask offset.
+	minAsk := m.offsetRate(basisPrice, askOff)
+	if askBasis < minAsk {
+		m.log.Debugf("ask floor: ask basis %s -> %s (raw oracle %s, ask offset %+.2f%%)",
+			m.fmtRate(askBasis), m.fmtRate(minAsk), m.fmtRate(basisPrice), askOff*100)
+		askBasis = minAsk
+	}
+
 	buyOrders = orders(cfg.BuyPlacements, false, bidBasis)
+	for _, p := range buyOrders {
+		if p.Rate > maxBid {
+			p.Rate = maxBid
+		}
+	}
 	sellOrders = orders(cfg.SellPlacements, true, askBasis)
+	for _, p := range sellOrders {
+		if p.Rate != 0 && p.Rate < minAsk {
+			p.Rate = minAsk
+		}
+	}
 	if m.doNotCrossEnabled() {
 		m.applyDoNotCross(buyOrders, sellOrders)
 	}

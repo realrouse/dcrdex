@@ -817,6 +817,7 @@ type BotConfigAction =
   | { type: 'UPDATE_BID_ANCHOR_FADE_HOURS'; payload: number }
   | { type: 'UPDATE_ORACLE_HALF_LIFE'; payload: number }
   | { type: 'UPDATE_ORACLE_MAX_STEP'; payload: number }
+  | { type: 'UPDATE_ORACLE_DAMP_DROPS'; payload: boolean }
   | { type: 'UPDATE_ORACLE_OFFSET'; payload: number }
   | { type: 'UPDATE_ORACLE_BID_OFFSET'; payload: number | undefined }
   | { type: 'UPDATE_ORACLE_ASK_OFFSET'; payload: number | undefined }
@@ -1486,6 +1487,19 @@ export const botConfigStateReducer = (state: BotConfigState | null, action: BotC
           basicMarketMakingConfig: {
             ...state.botConfig.basicMarketMakingConfig,
             oracleAskOffset: action.payload
+          }
+        }
+      }
+
+    case 'UPDATE_ORACLE_DAMP_DROPS':
+      if (!state.botConfig.basicMarketMakingConfig) return state
+      return {
+        ...state,
+        botConfig: {
+          ...state.botConfig,
+          basicMarketMakingConfig: {
+            ...state.botConfig.basicMarketMakingConfig,
+            oracleDampDrops: action.payload
           }
         }
       }
