@@ -131,6 +131,15 @@ type BasicMarketMakingConfig struct {
 	// Nil or 0 = no offset. -0.5 <= x <= 0.5.
 	OracleOffset *float64 `json:"oracleOffset,omitempty"`
 
+	// OracleBidOffset and OracleAskOffset set the offset separately for
+	// the buy and sell ladders, in the same units as OracleOffset (0.02 =
+	// 2% above the oracle, -0.02 = 2% below). A side without its own
+	// offset uses OracleOffset. For example a bid offset of -0.01 and an
+	// ask offset of 0.03 centers buys 1% below and sells 3% above the
+	// oracle. -0.5 <= x <= 0.5.
+	OracleBidOffset *float64 `json:"oracleBidOffset,omitempty"`
+	OracleAskOffset *float64 `json:"oracleAskOffset,omitempty"`
+
 	// AutoTopUp is an opt-in per-asset hard cap, in atoms, on how much the
 	// running bot may add to its own allocation from the wallet's
 	// unallocated balance when a side cannot be fully placed for lack of
@@ -206,10 +215,21 @@ func (c *BasicMarketMakingConfig) validate() error {
 		}
 	}
 
-	if c.OracleOffset != nil {
-		if v := *c.OracleOffset; v < -maxOracleOffset || v > maxOracleOffset || math.IsNaN(v) {
-			return fmt.Errorf("oracle offset %f out of bounds [-%g, %g]", v, maxOracleOffset, maxOracleOffset)
+	for _, o := range []struct {
+		name string
+		v    *float64
+	}{{"oracle offset", c.OracleOffset}, {"oracle bid offset", c.OracleBidOffset}, {"oracle ask offset", c.OracleAskOffset}} {
+		if o.v == nil {
+			continue
 		}
+		if v := *o.v; v < -maxOracleOffset || v > maxOracleOffset || math.IsNaN(v) {
+			return fmt.Errorf("%s %f out of bounds [-%g, %g]", o.name, v, maxOracleOffset, maxOracleOffset)
+		}
+	}
+	// A bid center above the ask center would make the bot's own buys and
+	// sells cross.
+	if bidOff, askOff := c.oracleOffsets(); bidOff > askOff {
+		return fmt.Errorf("effective oracle bid offset %g is above the ask offset %g", bidOff, askOff)
 	}
 
 	if c.GapStrategy != GapStrategyMultiplier &&
@@ -309,6 +329,14 @@ func (c *BasicMarketMakingConfig) copy() *BasicMarketMakingConfig {
 	if c.OracleOffset != nil {
 		v := *c.OracleOffset
 		cfg.OracleOffset = &v
+	}
+	if c.OracleBidOffset != nil {
+		v := *c.OracleBidOffset
+		cfg.OracleBidOffset = &v
+	}
+	if c.OracleAskOffset != nil {
+		v := *c.OracleAskOffset
+		cfg.OracleAskOffset = &v
 	}
 	if c.AutoTopUp != nil {
 		cfg.AutoTopUp = make(map[uint32]uint64, len(c.AutoTopUp))
@@ -711,20 +739,40 @@ func (m *basicMarketMaker) dampedBasis(basisPrice uint64, now time.Time) uint64 
 	return out
 }
 
-// applyOracleOffset moves the ladder center by the configured OracleOffset.
-func (m *basicMarketMaker) applyOracleOffset(center uint64) uint64 {
-	cfg := m.cfg()
-	if center == 0 || cfg == nil || cfg.OracleOffset == nil || *cfg.OracleOffset == 0 {
-		return center
+// oracleOffsets returns the bid and ask center offsets. A side without its
+// own offset falls back to OracleOffset.
+func (m *basicMarketMaker) oracleOffsets() (bid, ask float64) {
+	return m.cfg().oracleOffsets()
+}
+
+// oracleOffsets returns the effective bid and ask center offsets. A side
+// without its own offset falls back to OracleOffset.
+func (cfg *BasicMarketMakingConfig) oracleOffsets() (bid, ask float64) {
+	if cfg == nil {
+		return 0, 0
 	}
-	off := *cfg.OracleOffset
-	out := uint64(math.Round(float64(center) * (1 + off)))
+	if cfg.OracleOffset != nil {
+		bid, ask = *cfg.OracleOffset, *cfg.OracleOffset
+	}
+	if cfg.OracleBidOffset != nil {
+		bid = *cfg.OracleBidOffset
+	}
+	if cfg.OracleAskOffset != nil {
+		ask = *cfg.OracleAskOffset
+	}
+	return
+}
+
+// offsetRate moves a rate by a fractional offset (0.02 = +2%).
+func (m *basicMarketMaker) offsetRate(rate uint64, off float64) uint64 {
+	if rate == 0 || off == 0 {
+		return rate
+	}
+	out := uint64(math.Round(float64(rate) * (1 + off)))
 	if out == 0 {
 		out = 1
 	}
-	out = steppedRate(out, m.rateStep.Load())
-	m.log.Tracef("oracle offset: center %s -> %s (%+.2f%%)", m.fmtRate(center), m.fmtRate(out), off*100)
-	return out
+	return steppedRate(out, m.rateStep.Load())
 }
 
 func placementQty(ps []*OrderPlacement, lotSize uint64) uint64 {
@@ -929,7 +977,9 @@ func (m *basicMarketMaker) liftMatchRate(makerSell bool, threshold uint64, now t
 	return best, found
 }
 
-func (m *basicMarketMaker) updateAnchors(now time.Time, invBasis, intendedAsk0, intendedBid0 uint64) {
+// invAsk and invBid are the sell and buy ladder centers. Anchors are
+// collared relative to the center of their own side.
+func (m *basicMarketMaker) updateAnchors(now time.Time, invAsk, invBid, intendedAsk0, intendedBid0 uint64) {
 	foreignBid, hasBid := m.foreignBest(false)
 	foreignAsk, hasAsk := m.foreignBest(true)
 	sellLots := m.bookedLots(true)
@@ -941,7 +991,7 @@ func (m *basicMarketMaker) updateAnchors(now time.Time, invBasis, intendedAsk0, 
 	protect := m.doNotCrossEnabled()
 	aggressiveBid := protect && hasBid && intendedAsk0 > 0 && foreignBid >= intendedAsk0
 	if aggressiveBid {
-		clamped := clampAnchor(foreignBid, invBasis, true)
+		clamped := clampAnchor(foreignBid, invAsk, true)
 		if clamped > m.sellAnchor {
 			m.sellAnchor = clamped
 		}
@@ -949,7 +999,7 @@ func (m *basicMarketMaker) updateAnchors(now time.Time, invBasis, intendedAsk0, 
 	} else {
 		if m.prevSellBookedLots > sellLots {
 			if rate, ok := m.liftMatchRate(true, intendedAsk0, now); ok {
-				clamped := clampAnchor(rate, invBasis, true)
+				clamped := clampAnchor(rate, invAsk, true)
 				if clamped > m.sellAnchor {
 					m.sellAnchor = clamped
 				}
@@ -963,7 +1013,7 @@ func (m *basicMarketMaker) updateAnchors(now time.Time, invBasis, intendedAsk0, 
 
 	aggressiveAsk := protect && hasAsk && intendedBid0 > 0 && foreignAsk <= intendedBid0
 	if aggressiveAsk {
-		clamped := clampAnchor(foreignAsk, invBasis, false)
+		clamped := clampAnchor(foreignAsk, invBid, false)
 		if m.buyAnchor == 0 || clamped < m.buyAnchor {
 			m.buyAnchor = clamped
 		}
@@ -971,7 +1021,7 @@ func (m *basicMarketMaker) updateAnchors(now time.Time, invBasis, intendedAsk0, 
 	} else {
 		if m.prevBuyBookedLots > buyLots {
 			if rate, ok := m.liftMatchRate(false, intendedBid0, now); ok {
-				clamped := clampAnchor(rate, invBasis, false)
+				clamped := clampAnchor(rate, invBid, false)
 				if m.buyAnchor == 0 || clamped < m.buyAnchor {
 					m.buyAnchor = clamped
 				}
@@ -1076,8 +1126,19 @@ func (m *basicMarketMaker) ordersToPlace() (buyOrders, sellOrders []*TradePlacem
 		return nil, nil, err
 	}
 	now := m.now()
-	center := m.applyOracleOffset(m.dampedBasis(basisPrice, now))
-	invBasis := m.applyInventorySkew(center)
+	center := m.dampedBasis(basisPrice, now)
+	bidOff, askOff := m.oracleOffsets()
+	invBid := m.applyInventorySkew(m.offsetRate(center, bidOff))
+	invAsk := m.applyInventorySkew(m.offsetRate(center, askOff))
+	// The fee gap is estimated at the middle of the two centers.
+	invBasis := invBid
+	if invAsk != invBid {
+		invBasis = m.applyInventorySkew(m.offsetRate(center, (bidOff+askOff)/2))
+	}
+	if bidOff != 0 || askOff != 0 {
+		m.log.Tracef("oracle offsets: center %s, bid %+.2f%% -> %s, ask %+.2f%% -> %s",
+			m.fmtRate(center), bidOff*100, m.fmtRate(invBid), askOff*100, m.fmtRate(invAsk))
+	}
 
 	feeGap, err := m.calculator.feeGapStats(invBasis)
 	if err != nil {
@@ -1098,28 +1159,28 @@ func (m *basicMarketMaker) ordersToPlace() (buyOrders, sellOrders []*TradePlacem
 	cfg := m.cfg()
 	var intendedAsk0, intendedBid0 uint64
 	if len(cfg.SellPlacements) > 0 {
-		intendedAsk0 = m.orderPrice(invBasis, feeAdj, true, cfg.SellPlacements[0].GapFactor)
+		intendedAsk0 = m.orderPrice(invAsk, feeAdj, true, cfg.SellPlacements[0].GapFactor)
 	}
 	if len(cfg.BuyPlacements) > 0 {
-		intendedBid0 = m.orderPrice(invBasis, feeAdj, false, cfg.BuyPlacements[0].GapFactor)
+		intendedBid0 = m.orderPrice(invBid, feeAdj, false, cfg.BuyPlacements[0].GapFactor)
 	}
 
-	m.updateAnchors(now, invBasis, intendedAsk0, intendedBid0)
+	m.updateAnchors(now, invAsk, invBid, intendedAsk0, intendedBid0)
 
-	// Asks may lift to the aggressive-bid floor. Bids stay on invBasis
+	// Asks may lift to the aggressive-bid floor. Bids stay on invBid
 	// unless a dump (aggressive ask) pulls them down. Raising bids with a
 	// pump would buy the pump.
-	askBasis := invBasis
-	if floor := m.askFloor(now, invBasis); floor > askBasis {
+	askBasis := invAsk
+	if floor := m.askFloor(now, invAsk); floor > askBasis {
 		askBasis = floor
 		m.log.Debugf("book protection: ask basis %s (inv %s, floor %s)",
-			m.fmtRate(askBasis), m.fmtRate(invBasis), m.fmtRate(floor))
+			m.fmtRate(askBasis), m.fmtRate(invAsk), m.fmtRate(floor))
 	}
-	bidBasis := invBasis
-	if ceil := m.bidCeil(now, invBasis); ceil > 0 && ceil < bidBasis {
+	bidBasis := invBid
+	if ceil := m.bidCeil(now, invBid); ceil > 0 && ceil < bidBasis {
 		bidBasis = ceil
 		m.log.Debugf("book protection: bid basis %s (inv %s, ceil %s)",
-			m.fmtRate(bidBasis), m.fmtRate(invBasis), m.fmtRate(ceil))
+			m.fmtRate(bidBasis), m.fmtRate(invBid), m.fmtRate(ceil))
 	}
 
 	orders := func(orderPlacements []*OrderPlacement, sell bool, basis uint64) []*TradePlacement {

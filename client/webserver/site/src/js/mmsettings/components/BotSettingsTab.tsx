@@ -24,6 +24,9 @@ import {
   ID_MM_ORACLE_HALF_LIFE, ID_MM_ORACLE_HALF_LIFE_TOOLTIP,
   ID_MM_ORACLE_MAX_STEP, ID_MM_ORACLE_MAX_STEP_TOOLTIP,
   ID_MM_ORACLE_OFFSET, ID_MM_ORACLE_OFFSET_TOOLTIP,
+  ID_MM_ORACLE_BID_OFFSET, ID_MM_ORACLE_BID_OFFSET_TOOLTIP,
+  ID_MM_ORACLE_ASK_OFFSET, ID_MM_ORACLE_ASK_OFFSET_TOOLTIP,
+  ID_MM_OFFSET_INHERIT, ID_MM_OFFSET_RESET, ID_MM_OFFSET_CROSS,
   ID_MM_ORDER_PERSISTENCE, ID_MM_ORDER_PERSISTENCE_TOOLTIP,
   ID_MM_MULTI_HOP_ARB,
   ID_MM_NO_CONFIG_OPTIONS,
@@ -295,6 +298,12 @@ const BotSettingsTab: React.FC = () => {
   const oracleHalfLifeMinutes = botConfig.basicMarketMakingConfig?.oracleHalfLifeMinutes ?? 10
   const oracleMaxStep = botConfig.basicMarketMakingConfig?.oracleMaxStep ?? 0
   const oracleOffset = botConfig.basicMarketMakingConfig?.oracleOffset ?? 0
+  // Unset per-side offsets follow the shared center offset.
+  const bidOffsetSet = botConfig.basicMarketMakingConfig?.oracleBidOffset !== undefined
+  const askOffsetSet = botConfig.basicMarketMakingConfig?.oracleAskOffset !== undefined
+  const oracleBidOffset = botConfig.basicMarketMakingConfig?.oracleBidOffset ?? oracleOffset
+  const oracleAskOffset = botConfig.basicMarketMakingConfig?.oracleAskOffset ?? oracleOffset
+  const offsetsCross = oracleBidOffset > oracleAskOffset
   const orderPersistence = botConfig.arbMarketMakingConfig?.orderPersistence ??
     botConfig.simpleArbConfig?.numEpochsLeaveOpen ?? 2
 
@@ -475,6 +484,77 @@ const BotSettingsTab: React.FC = () => {
                       suffix="%"
                     />
                   </div>
+                  <div className="d-flex align-items-center">
+                    <div className="fs16 me-3 flex-shrink-0">
+                      {prep(ID_MM_ORACLE_BID_OFFSET) || 'Bid Offset from Oracle'}
+                      <Tooltip content={prep(ID_MM_ORACLE_BID_OFFSET_TOOLTIP)}>
+                        <span className="ico-info fs12 ms-1"></span>
+                      </Tooltip>
+                      {bidOffsetSet
+                        ? (
+                          <span
+                            className="fs12 ms-2 pointer hoverbg"
+                            style={{ textDecoration: 'underline' }}
+                            onClick={() => dispatch({ type: 'UPDATE_ORACLE_BID_OFFSET', payload: undefined })}
+                          >
+                            {prep(ID_MM_OFFSET_RESET) || 'use center offset'}
+                          </span>
+                          )
+                        : <span className="fs12 ms-2 grey">({prep(ID_MM_OFFSET_INHERIT) || 'follows center offset'})</span>}
+                    </div>
+                    <NumberInput
+                      sliderPosition="inline"
+                      className="p-1 text-center fs14"
+                      min={-50}
+                      max={50}
+                      precision={2}
+                      value={oracleBidOffset * 100}
+                      onChange={(value) => dispatch({
+                        type: 'UPDATE_ORACLE_BID_OFFSET',
+                        payload: value / 100
+                      })}
+                      withSlider={true}
+                      suffix="%"
+                    />
+                  </div>
+                  <div className="d-flex align-items-center">
+                    <div className="fs16 me-3 flex-shrink-0">
+                      {prep(ID_MM_ORACLE_ASK_OFFSET) || 'Ask Offset from Oracle'}
+                      <Tooltip content={prep(ID_MM_ORACLE_ASK_OFFSET_TOOLTIP)}>
+                        <span className="ico-info fs12 ms-1"></span>
+                      </Tooltip>
+                      {askOffsetSet
+                        ? (
+                          <span
+                            className="fs12 ms-2 pointer hoverbg"
+                            style={{ textDecoration: 'underline' }}
+                            onClick={() => dispatch({ type: 'UPDATE_ORACLE_ASK_OFFSET', payload: undefined })}
+                          >
+                            {prep(ID_MM_OFFSET_RESET) || 'use center offset'}
+                          </span>
+                          )
+                        : <span className="fs12 ms-2 grey">({prep(ID_MM_OFFSET_INHERIT) || 'follows center offset'})</span>}
+                    </div>
+                    <NumberInput
+                      sliderPosition="inline"
+                      className="p-1 text-center fs14"
+                      min={-50}
+                      max={50}
+                      precision={2}
+                      value={oracleAskOffset * 100}
+                      onChange={(value) => dispatch({
+                        type: 'UPDATE_ORACLE_ASK_OFFSET',
+                        payload: value / 100
+                      })}
+                      withSlider={true}
+                      suffix="%"
+                    />
+                  </div>
+                  {offsetsCross && (
+                    <div className="fs14 text-danger">
+                      {prep(ID_MM_OFFSET_CROSS) || 'The bid offset is above the ask offset, so your own buys and sells would cross. The bot will not start with these settings.'}
+                    </div>
+                  )}
                   <div className="mt-1">
                     <span className="fs16 demi d-block mb-2">{prep(ID_MM_BOOK_PROTECTION) || 'Book Protection'}</span>
                     <div className="form-check d-flex align-items-center mb-2">

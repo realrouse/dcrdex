@@ -330,6 +330,13 @@ export const ID_MM_ORACLE_MAX_STEP = 'MM_ORACLE_MAX_STEP'
 export const ID_MM_ORACLE_MAX_STEP_TOOLTIP = 'MM_ORACLE_MAX_STEP_TOOLTIP'
 export const ID_MM_ORACLE_OFFSET = 'MM_ORACLE_OFFSET'
 export const ID_MM_ORACLE_OFFSET_TOOLTIP = 'MM_ORACLE_OFFSET_TOOLTIP'
+export const ID_MM_ORACLE_BID_OFFSET = 'MM_ORACLE_BID_OFFSET'
+export const ID_MM_ORACLE_BID_OFFSET_TOOLTIP = 'MM_ORACLE_BID_OFFSET_TOOLTIP'
+export const ID_MM_ORACLE_ASK_OFFSET = 'MM_ORACLE_ASK_OFFSET'
+export const ID_MM_ORACLE_ASK_OFFSET_TOOLTIP = 'MM_ORACLE_ASK_OFFSET_TOOLTIP'
+export const ID_MM_OFFSET_INHERIT = 'MM_OFFSET_INHERIT'
+export const ID_MM_OFFSET_RESET = 'MM_OFFSET_RESET'
+export const ID_MM_OFFSET_CROSS = 'MM_OFFSET_CROSS'
 export const ID_MM_ORDER_PERSISTENCE = 'MM_ORDER_PERSISTENCE'
 export const ID_MM_ORDER_PERSISTENCE_TOOLTIP = 'MM_ORDER_PERSISTENCE_TOOLTIP'
 export const ID_MM_MULTI_HOP_ARB = 'MM_MULTI_HOP_ARB'
@@ -500,6 +507,13 @@ const fallbackEnglish: Locale = {
   MM_ORACLE_MAX_STEP_TOOLTIP: 'Largest percent the ladder center may move in one epoch, on top of the smoothing. 0 = no limit.',
   MM_ORACLE_OFFSET: 'Center Offset from Oracle',
   MM_ORACLE_OFFSET_TOOLTIP: 'Keep the ladder center this percent above (positive, a premium) or below (negative) the oracle price. Both bids and asks move. Inventory skew is added on top. 0 = center on the oracle.',
+  MM_ORACLE_BID_OFFSET: 'Bid Offset from Oracle',
+  MM_ORACLE_BID_OFFSET_TOOLTIP: 'Center the buy ladder this percent above (positive) or below (negative) the oracle price. Overrides the center offset for bids only.',
+  MM_ORACLE_ASK_OFFSET: 'Ask Offset from Oracle',
+  MM_ORACLE_ASK_OFFSET_TOOLTIP: 'Center the sell ladder this percent above (positive) or below (negative) the oracle price. Overrides the center offset for asks only.',
+  MM_OFFSET_INHERIT: 'follows center offset',
+  MM_OFFSET_RESET: 'use center offset',
+  MM_OFFSET_CROSS: 'The bid offset is above the ask offset, so your own buys and sells would cross. The bot will not start with these settings.',
   MM_INVENTORY_SKEW: 'Inventory Skew',
   MM_INVENTORY_SKEW_TOOLTIP: 'Slide both bids and asks when your base inventory is above or below target. Strength is measured against the lots you are quoting, not the whole wallet. Does not follow last trade. 1 = full (up to the cap). 0 = off.',
   MM_INVENTORY_SKEW_CAP: 'Inventory Skew Cap',

@@ -804,6 +804,8 @@ export interface BasicMarketMakingConfig {
   oracleHalfLifeMinutes?: number
   oracleMaxStep?: number
   oracleOffset?: number
+  oracleBidOffset?: number
+  oracleAskOffset?: number
 }
 
 export interface ArbMarketMakingPlacement {

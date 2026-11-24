@@ -210,6 +210,13 @@ const (
 	mmOracleMaxStepTooltipID       = "MM_ORACLE_MAX_STEP_TOOLTIP"
 	mmOracleOffsetID               = "MM_ORACLE_OFFSET"
 	mmOracleOffsetTooltipID        = "MM_ORACLE_OFFSET_TOOLTIP"
+	mmOracleBidOffsetID            = "MM_ORACLE_BID_OFFSET"
+	mmOracleBidOffsetTooltipID     = "MM_ORACLE_BID_OFFSET_TOOLTIP"
+	mmOracleAskOffsetID            = "MM_ORACLE_ASK_OFFSET"
+	mmOracleAskOffsetTooltipID     = "MM_ORACLE_ASK_OFFSET_TOOLTIP"
+	mmOffsetInheritID              = "MM_OFFSET_INHERIT"
+	mmOffsetResetID                = "MM_OFFSET_RESET"
+	mmOffsetCrossID                = "MM_OFFSET_CROSS"
 	mmOrderPersistenceID           = "MM_ORDER_PERSISTENCE"
 	mmOrderPersistenceTooltipID    = "MM_ORDER_PERSISTENCE_TOOLTIP"
 	mmMultiHopArbID                = "MM_MULTI_HOP_ARB"
@@ -640,6 +647,13 @@ var enUS = map[string]*intl.Translation{
 	mmOracleMaxStepTooltipID:       {T: "Largest percent the ladder center may move in one epoch, on top of the smoothing. 0 = no limit."},
 	mmOracleOffsetID:               {T: "Center Offset from Oracle"},
 	mmOracleOffsetTooltipID:        {T: "Keep the ladder center this percent above (positive, a premium) or below (negative) the oracle price. Both bids and asks move. Inventory skew is added on top. 0 = center on the oracle."},
+	mmOracleBidOffsetID:            {T: "Bid Offset from Oracle"},
+	mmOracleBidOffsetTooltipID:     {T: "Center the buy ladder this percent above (positive) or below (negative) the oracle price. Overrides the center offset for bids only."},
+	mmOracleAskOffsetID:            {T: "Ask Offset from Oracle"},
+	mmOracleAskOffsetTooltipID:     {T: "Center the sell ladder this percent above (positive) or below (negative) the oracle price. Overrides the center offset for asks only."},
+	mmOffsetInheritID:              {T: "follows center offset"},
+	mmOffsetResetID:                {T: "use center offset"},
+	mmOffsetCrossID:                {T: "The bid offset is above the ask offset, so your own buys and sells would cross. The bot will not start with these settings."},
 	mmOrderPersistenceID:           {T: "Order Persistence"},
 	mmOrderPersistenceTooltipID:    {T: "How many epochs an unfilled arbitrage order can remain open before the bot cancels it."},
 	mmMultiHopArbID:                {T: "Multi-Hop Arbitrage"},
