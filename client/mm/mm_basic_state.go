@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sync"
 	"time"
 )
@@ -90,11 +91,58 @@ func saveBotSkewState(path, botID string, st *botSkewState) error {
 	if err != nil {
 		return err
 	}
+	return replaceFileSync(path, b)
+}
+
+// replaceFileSync atomically replaces path with b: it writes and flushes a
+// temporary file, renames it over path, then flushes the directory so the
+// rename itself survives a power cut. The temporary file is removed if any
+// step before the rename fails or the rename fails.
+func replaceFileSync(path string, b []byte) error {
 	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, b, 0600); err != nil {
+	if err := writeFileSync(tmp, b); err != nil {
+		os.Remove(tmp)
 		return err
 	}
-	return os.Rename(tmp, path)
+	if err := os.Rename(tmp, path); err != nil {
+		os.Remove(tmp)
+		return err
+	}
+	syncDir(filepath.Dir(path))
+	return nil
+}
+
+// syncDir flushes a directory entry to disk, best effort. Windows does not
+// support syncing a directory handle, so it is skipped there.
+func syncDir(dir string) {
+	if runtime.GOOS == "windows" {
+		return
+	}
+	d, err := os.Open(dir)
+	if err != nil {
+		return
+	}
+	d.Sync()
+	d.Close()
+}
+
+// writeFileSync writes b to path and flushes it to disk before returning, so
+// that a rename over the old file after a power cut never leaves an empty
+// or partly written file in its place.
+func writeFileSync(path string, b []byte) error {
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0600)
+	if err != nil {
+		return err
+	}
+	if _, err := f.Write(b); err != nil {
+		f.Close()
+		return err
+	}
+	if err := f.Sync(); err != nil {
+		f.Close()
+		return err
+	}
+	return f.Close()
 }
 
 func (m *basicMarketMaker) persistSkewEnabled() bool {
@@ -158,14 +206,22 @@ func (m *basicMarketMaker) maybeSaveSkewState(force bool) {
 	if !force && !m.lastSkewSave.IsZero() && now.Sub(m.lastSkewSave) < skewStateSaveInterval {
 		return
 	}
+	// After a failure (e.g. an unreadable file), retry and log at most once
+	// per save interval, not every epoch.
+	if !force && !m.lastSkewFail.IsZero() && now.Sub(m.lastSkewFail) < skewStateSaveInterval {
+		return
+	}
 	err := saveBotSkewState(m.skewStatePath, m.botID, &botSkewState{
 		BaseDeviation: dev,
 		Updated:       now.Unix(),
 	})
 	if err != nil {
-		m.log.Errorf("inventory skew: could not save state: %v", err)
+		m.lastSkewFail = now
+		m.skewSaveFails++
+		m.log.Errorf("inventory skew: could not save state (retrying in %s): %v", skewStateSaveInterval, err)
 		return
 	}
+	m.lastSkewFail = time.Time{}
 	m.lastSavedDeviation = dev
 	m.lastSkewSave = now
 }

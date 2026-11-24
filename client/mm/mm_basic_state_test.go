@@ -209,6 +209,90 @@ func TestPersistInventorySkew(t *testing.T) {
 		}
 	})
 
+	t.Run("save errors are throttled", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), inventorySkewStateFile)
+		now := start
+		if err := os.WriteFile(path, []byte("{not json"), 0600); err != nil {
+			t.Fatal(err)
+		}
+		mm := newBot(path, allocation+lotSize, boolPtr(true), &now)
+		mm.restoreSkewState()
+		for i := 0; i < 5; i++ {
+			now = start.Add(time.Duration(i) * time.Second)
+			mm.maybeSaveSkewState(false)
+		}
+		if mm.skewSaveFails != 1 {
+			t.Fatalf("%d failed attempts within one interval, want 1", mm.skewSaveFails)
+		}
+		now = start.Add(skewStateSaveInterval)
+		mm.maybeSaveSkewState(false)
+		if mm.skewSaveFails != 2 {
+			t.Fatalf("%d failed attempts after one interval, want 2", mm.skewSaveFails)
+		}
+		// The forced save on stop always tries.
+		mm.maybeSaveSkewState(true)
+		if mm.skewSaveFails != 3 {
+			t.Fatalf("forced save did not try: %d", mm.skewSaveFails)
+		}
+		// Once the file is fixed the next due save succeeds.
+		if err := os.Remove(path); err != nil {
+			t.Fatal(err)
+		}
+		now = start.Add(2 * skewStateSaveInterval)
+		mm.maybeSaveSkewState(false)
+		if st := readState(t, path).Bots[botID]; st == nil || st.BaseDeviation != int64(lotSize) {
+			t.Fatalf("save after recovery: %+v", st)
+		}
+		if !mm.lastSkewFail.IsZero() {
+			t.Fatal("failure time not cleared after success")
+		}
+	})
+
+	t.Run("writeFileSync", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "f")
+		if err := writeFileSync(path, []byte("abc")); err != nil {
+			t.Fatal(err)
+		}
+		if err := writeFileSync(path, []byte("x")); err != nil {
+			t.Fatal(err)
+		}
+		b, _ := os.ReadFile(path)
+		if string(b) != "x" {
+			t.Fatalf("got %q, want truncated rewrite", b)
+		}
+		if err := writeFileSync(filepath.Join(path, "nope"), nil); err == nil {
+			t.Fatal("expected error writing under a file")
+		}
+	})
+
+	t.Run("replaceFileSync", func(t *testing.T) {
+		dir := t.TempDir()
+		path := filepath.Join(dir, "state.json")
+		if err := replaceFileSync(path, []byte("one")); err != nil {
+			t.Fatal(err)
+		}
+		if err := replaceFileSync(path, []byte("two")); err != nil {
+			t.Fatal(err)
+		}
+		if b, _ := os.ReadFile(path); string(b) != "two" {
+			t.Fatalf("got %q", b)
+		}
+		if _, err := os.Stat(path + ".tmp"); !os.IsNotExist(err) {
+			t.Fatal("temp file left after success")
+		}
+		// A rename onto a non-empty directory fails; the temp file must go.
+		blocked := filepath.Join(dir, "blocked")
+		if err := os.MkdirAll(filepath.Join(blocked, "x"), 0700); err != nil {
+			t.Fatal(err)
+		}
+		if err := replaceFileSync(blocked, []byte("three")); err == nil {
+			t.Fatal("expected rename error")
+		}
+		if _, err := os.Stat(blocked + ".tmp"); !os.IsNotExist(err) {
+			t.Fatal("temp file left after failed rename")
+		}
+	})
+
 	t.Run("config json", func(t *testing.T) {
 		var cfg BasicMarketMakingConfig
 		if err := json.Unmarshal([]byte(`{"gapStrategy":"absolute-plus"}`), &cfg); err != nil {

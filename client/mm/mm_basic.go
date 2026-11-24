@@ -574,6 +574,8 @@ type basicMarketMaker struct {
 	skewSaveMtx        sync.Mutex
 	lastSavedDeviation int64
 	lastSkewSave       time.Time
+	lastSkewFail       time.Time
+	skewSaveFails      int // failed save attempts (logged), for tests
 
 	// Ladder center damping (OracleHalfLifeMinutes, OracleMaxStep).
 	dampMtx    sync.Mutex
