@@ -208,6 +208,8 @@ const (
 	mmOracleHalfLifeTooltipID      = "MM_ORACLE_HALF_LIFE_TOOLTIP"
 	mmOracleMaxStepID              = "MM_ORACLE_MAX_STEP"
 	mmOracleMaxStepTooltipID       = "MM_ORACLE_MAX_STEP_TOOLTIP"
+	mmOracleOffsetID               = "MM_ORACLE_OFFSET"
+	mmOracleOffsetTooltipID        = "MM_ORACLE_OFFSET_TOOLTIP"
 	mmOrderPersistenceID           = "MM_ORDER_PERSISTENCE"
 	mmOrderPersistenceTooltipID    = "MM_ORDER_PERSISTENCE_TOOLTIP"
 	mmMultiHopArbID                = "MM_MULTI_HOP_ARB"
@@ -636,6 +638,8 @@ var enUS = map[string]*intl.Translation{
 	mmOracleHalfLifeTooltipID:      {T: "How slowly the ladder center follows the oracle price. Every this many minutes the center closes half the gap to the oracle, so short spikes barely move your orders and lasting moves are followed with a lag. 0 = follow the oracle at once."},
 	mmOracleMaxStepID:              {T: "Max Center Move per Epoch"},
 	mmOracleMaxStepTooltipID:       {T: "Largest percent the ladder center may move in one epoch, on top of the smoothing. 0 = no limit."},
+	mmOracleOffsetID:               {T: "Center Offset from Oracle"},
+	mmOracleOffsetTooltipID:        {T: "Keep the ladder center this percent above (positive, a premium) or below (negative) the oracle price. Both bids and asks move. Inventory skew is added on top. 0 = center on the oracle."},
 	mmOrderPersistenceID:           {T: "Order Persistence"},
 	mmOrderPersistenceTooltipID:    {T: "How many epochs an unfilled arbitrage order can remain open before the bot cancels it."},
 	mmMultiHopArbID:                {T: "Multi-Hop Arbitrage"},

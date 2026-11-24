@@ -328,6 +328,8 @@ export const ID_MM_ORACLE_HALF_LIFE = 'MM_ORACLE_HALF_LIFE'
 export const ID_MM_ORACLE_HALF_LIFE_TOOLTIP = 'MM_ORACLE_HALF_LIFE_TOOLTIP'
 export const ID_MM_ORACLE_MAX_STEP = 'MM_ORACLE_MAX_STEP'
 export const ID_MM_ORACLE_MAX_STEP_TOOLTIP = 'MM_ORACLE_MAX_STEP_TOOLTIP'
+export const ID_MM_ORACLE_OFFSET = 'MM_ORACLE_OFFSET'
+export const ID_MM_ORACLE_OFFSET_TOOLTIP = 'MM_ORACLE_OFFSET_TOOLTIP'
 export const ID_MM_ORDER_PERSISTENCE = 'MM_ORDER_PERSISTENCE'
 export const ID_MM_ORDER_PERSISTENCE_TOOLTIP = 'MM_ORDER_PERSISTENCE_TOOLTIP'
 export const ID_MM_MULTI_HOP_ARB = 'MM_MULTI_HOP_ARB'
@@ -496,6 +498,8 @@ const fallbackEnglish: Locale = {
   MM_ORACLE_HALF_LIFE_TOOLTIP: 'How slowly the ladder center follows the oracle price. Every this many minutes the center closes half the gap to the oracle, so short spikes barely move your orders and lasting moves are followed with a lag. 0 = follow the oracle at once.',
   MM_ORACLE_MAX_STEP: 'Max Center Move per Epoch',
   MM_ORACLE_MAX_STEP_TOOLTIP: 'Largest percent the ladder center may move in one epoch, on top of the smoothing. 0 = no limit.',
+  MM_ORACLE_OFFSET: 'Center Offset from Oracle',
+  MM_ORACLE_OFFSET_TOOLTIP: 'Keep the ladder center this percent above (positive, a premium) or below (negative) the oracle price. Both bids and asks move. Inventory skew is added on top. 0 = center on the oracle.',
   MM_INVENTORY_SKEW: 'Inventory Skew',
   MM_INVENTORY_SKEW_TOOLTIP: 'Slide both bids and asks when your base inventory is above or below target. Strength is measured against the lots you are quoting, not the whole wallet. Does not follow last trade. 1 = full (up to the cap). 0 = off.',
   MM_INVENTORY_SKEW_CAP: 'Inventory Skew Cap',

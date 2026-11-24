@@ -803,6 +803,7 @@ export interface BasicMarketMakingConfig {
   bidAnchorFadeHours?: number
   oracleHalfLifeMinutes?: number
   oracleMaxStep?: number
+  oracleOffset?: number
 }
 
 export interface ArbMarketMakingPlacement {

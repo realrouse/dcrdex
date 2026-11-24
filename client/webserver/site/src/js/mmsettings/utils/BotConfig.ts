@@ -817,6 +817,7 @@ type BotConfigAction =
   | { type: 'UPDATE_BID_ANCHOR_FADE_HOURS'; payload: number }
   | { type: 'UPDATE_ORACLE_HALF_LIFE'; payload: number }
   | { type: 'UPDATE_ORACLE_MAX_STEP'; payload: number }
+  | { type: 'UPDATE_ORACLE_OFFSET'; payload: number }
   | { type: 'UPDATE_ORDER_PERSISTENCE'; payload: number }
   | { type: 'UPDATE_REBALANCE_SETTINGS'; payload: RebalanceSettingsAction }
   | { type: 'UPDATE_WALLET_SETTING'; payload: { asset: 'base' | 'quote'; key: string; value: string } }
@@ -1444,6 +1445,19 @@ export const botConfigStateReducer = (state: BotConfigState | null, action: BotC
           basicMarketMakingConfig: {
             ...state.botConfig.basicMarketMakingConfig,
             oracleMaxStep: action.payload
+          }
+        }
+      }
+
+    case 'UPDATE_ORACLE_OFFSET':
+      if (!state.botConfig.basicMarketMakingConfig) return state
+      return {
+        ...state,
+        botConfig: {
+          ...state.botConfig,
+          basicMarketMakingConfig: {
+            ...state.botConfig.basicMarketMakingConfig,
+            oracleOffset: action.payload
           }
         }
       }

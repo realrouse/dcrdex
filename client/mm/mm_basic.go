@@ -124,6 +124,13 @@ type BasicMarketMakingConfig struct {
 	// after OracleHalfLifeMinutes. Nil or 0 = no cap. 0 <= x <= 0.5.
 	OracleMaxStep *float64 `json:"oracleMaxStep,omitempty"`
 
+	// OracleOffset keeps the ladder center above or below the (damped)
+	// oracle price, as a fraction of it, for both sides: 0.02 places the
+	// center 2% above the oracle (a premium), -0.02 places it 2% below.
+	// Inventory skew and book protection then work from the offset center.
+	// Nil or 0 = no offset. -0.5 <= x <= 0.5.
+	OracleOffset *float64 `json:"oracleOffset,omitempty"`
+
 	// AutoTopUp is an opt-in per-asset hard cap, in atoms, on how much the
 	// running bot may add to its own allocation from the wallet's
 	// unallocated balance when a side cannot be fully placed for lack of
@@ -144,6 +151,7 @@ const (
 	defaultOracleHalfLifeMinutes = 10.0
 	maxOracleHalfLifeMinutes     = 1440.0
 	maxOracleMaxStep             = 0.5
+	maxOracleOffset              = 0.5
 	anchorCollarMult             = 2.0
 	recentMatchWindow            = 30 * time.Second
 	// autoTopUpInterval is the minimum time between two auto top-ups of
@@ -195,6 +203,12 @@ func (c *BasicMarketMakingConfig) validate() error {
 	if c.OracleMaxStep != nil {
 		if v := *c.OracleMaxStep; v < 0 || v > maxOracleMaxStep || math.IsNaN(v) {
 			return fmt.Errorf("oracle max step %f out of bounds [0, %g]", v, maxOracleMaxStep)
+		}
+	}
+
+	if c.OracleOffset != nil {
+		if v := *c.OracleOffset; v < -maxOracleOffset || v > maxOracleOffset || math.IsNaN(v) {
+			return fmt.Errorf("oracle offset %f out of bounds [-%g, %g]", v, maxOracleOffset, maxOracleOffset)
 		}
 	}
 
@@ -291,6 +305,10 @@ func (c *BasicMarketMakingConfig) copy() *BasicMarketMakingConfig {
 	if c.OracleMaxStep != nil {
 		v := *c.OracleMaxStep
 		cfg.OracleMaxStep = &v
+	}
+	if c.OracleOffset != nil {
+		v := *c.OracleOffset
+		cfg.OracleOffset = &v
 	}
 	if c.AutoTopUp != nil {
 		cfg.AutoTopUp = make(map[uint32]uint64, len(c.AutoTopUp))
@@ -693,6 +711,22 @@ func (m *basicMarketMaker) dampedBasis(basisPrice uint64, now time.Time) uint64 
 	return out
 }
 
+// applyOracleOffset moves the ladder center by the configured OracleOffset.
+func (m *basicMarketMaker) applyOracleOffset(center uint64) uint64 {
+	cfg := m.cfg()
+	if center == 0 || cfg == nil || cfg.OracleOffset == nil || *cfg.OracleOffset == 0 {
+		return center
+	}
+	off := *cfg.OracleOffset
+	out := uint64(math.Round(float64(center) * (1 + off)))
+	if out == 0 {
+		out = 1
+	}
+	out = steppedRate(out, m.rateStep.Load())
+	m.log.Tracef("oracle offset: center %s -> %s (%+.2f%%)", m.fmtRate(center), m.fmtRate(out), off*100)
+	return out
+}
+
 func placementQty(ps []*OrderPlacement, lotSize uint64) uint64 {
 	var lots uint64
 	for _, p := range ps {
@@ -1042,7 +1076,7 @@ func (m *basicMarketMaker) ordersToPlace() (buyOrders, sellOrders []*TradePlacem
 		return nil, nil, err
 	}
 	now := m.now()
-	center := m.dampedBasis(basisPrice, now)
+	center := m.applyOracleOffset(m.dampedBasis(basisPrice, now))
 	invBasis := m.applyInventorySkew(center)
 
 	feeGap, err := m.calculator.feeGapStats(invBasis)

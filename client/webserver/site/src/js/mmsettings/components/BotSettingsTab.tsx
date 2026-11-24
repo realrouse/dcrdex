@@ -23,6 +23,7 @@ import {
   ID_MM_BID_ANCHOR_FADE_HOURS, ID_MM_BID_ANCHOR_FADE_HOURS_TOOLTIP,
   ID_MM_ORACLE_HALF_LIFE, ID_MM_ORACLE_HALF_LIFE_TOOLTIP,
   ID_MM_ORACLE_MAX_STEP, ID_MM_ORACLE_MAX_STEP_TOOLTIP,
+  ID_MM_ORACLE_OFFSET, ID_MM_ORACLE_OFFSET_TOOLTIP,
   ID_MM_ORDER_PERSISTENCE, ID_MM_ORDER_PERSISTENCE_TOOLTIP,
   ID_MM_MULTI_HOP_ARB,
   ID_MM_NO_CONFIG_OPTIONS,
@@ -293,6 +294,7 @@ const BotSettingsTab: React.FC = () => {
   const bidAnchorFadeHours = botConfig.basicMarketMakingConfig?.bidAnchorFadeHours ?? 4
   const oracleHalfLifeMinutes = botConfig.basicMarketMakingConfig?.oracleHalfLifeMinutes ?? 10
   const oracleMaxStep = botConfig.basicMarketMakingConfig?.oracleMaxStep ?? 0
+  const oracleOffset = botConfig.basicMarketMakingConfig?.oracleOffset ?? 0
   const orderPersistence = botConfig.arbMarketMakingConfig?.orderPersistence ??
     botConfig.simpleArbConfig?.numEpochsLeaveOpen ?? 2
 
@@ -445,6 +447,28 @@ const BotSettingsTab: React.FC = () => {
                       value={oracleMaxStep * 100}
                       onChange={(value) => dispatch({
                         type: 'UPDATE_ORACLE_MAX_STEP',
+                        payload: value / 100
+                      })}
+                      withSlider={true}
+                      suffix="%"
+                    />
+                  </div>
+                  <div className="d-flex align-items-center">
+                    <div className="fs16 me-3 flex-shrink-0">
+                      {prep(ID_MM_ORACLE_OFFSET) || 'Center Offset from Oracle'}
+                      <Tooltip content={prep(ID_MM_ORACLE_OFFSET_TOOLTIP)}>
+                        <span className="ico-info fs12 ms-1"></span>
+                      </Tooltip>
+                    </div>
+                    <NumberInput
+                      sliderPosition="inline"
+                      className="p-1 text-center fs14"
+                      min={-50}
+                      max={50}
+                      precision={2}
+                      value={oracleOffset * 100}
+                      onChange={(value) => dispatch({
+                        type: 'UPDATE_ORACLE_OFFSET',
                         payload: value / 100
                       })}
                       withSlider={true}
