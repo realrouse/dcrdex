@@ -324,6 +324,10 @@ export const ID_MM_DO_NOT_CROSS = 'MM_DO_NOT_CROSS'
 export const ID_MM_DO_NOT_CROSS_TOOLTIP = 'MM_DO_NOT_CROSS_TOOLTIP'
 export const ID_MM_BID_ANCHOR_FADE_HOURS = 'MM_BID_ANCHOR_FADE_HOURS'
 export const ID_MM_BID_ANCHOR_FADE_HOURS_TOOLTIP = 'MM_BID_ANCHOR_FADE_HOURS_TOOLTIP'
+export const ID_MM_ORACLE_HALF_LIFE = 'MM_ORACLE_HALF_LIFE'
+export const ID_MM_ORACLE_HALF_LIFE_TOOLTIP = 'MM_ORACLE_HALF_LIFE_TOOLTIP'
+export const ID_MM_ORACLE_MAX_STEP = 'MM_ORACLE_MAX_STEP'
+export const ID_MM_ORACLE_MAX_STEP_TOOLTIP = 'MM_ORACLE_MAX_STEP_TOOLTIP'
 export const ID_MM_ORDER_PERSISTENCE = 'MM_ORDER_PERSISTENCE'
 export const ID_MM_ORDER_PERSISTENCE_TOOLTIP = 'MM_ORDER_PERSISTENCE_TOOLTIP'
 export const ID_MM_MULTI_HOP_ARB = 'MM_MULTI_HOP_ARB'
@@ -488,6 +492,10 @@ const fallbackEnglish: Locale = {
   MM_DO_NOT_CROSS_TOOLTIP: 'Never sell into a live bid or buy into a live ask. Stops the bot from restocking at the oracle market price and taking a leftover aggressive bid. Asks lift; bids stay at the oracle market price so you do not buy the pump.',
   MM_BID_ANCHOR_FADE_HOURS: 'Hours to Fade Back to Oracle Market Price',
   MM_BID_ANCHOR_FADE_HOURS_TOOLTIP: 'After an aggressive bid or ask that ran the book is gone, walk quotes linearly back to the oracle market price over this many hours. 4 = slow return. 0 = snap back as soon as it cancels. Only the lifted side moves; the other side stays at the oracle market price.',
+  MM_ORACLE_HALF_LIFE: 'Oracle Smoothing Half-Life',
+  MM_ORACLE_HALF_LIFE_TOOLTIP: 'How slowly the ladder center follows the oracle price. Every this many minutes the center closes half the gap to the oracle, so short spikes barely move your orders and lasting moves are followed with a lag. 0 = follow the oracle at once.',
+  MM_ORACLE_MAX_STEP: 'Max Center Move per Epoch',
+  MM_ORACLE_MAX_STEP_TOOLTIP: 'Largest percent the ladder center may move in one epoch, on top of the smoothing. 0 = no limit.',
   MM_INVENTORY_SKEW: 'Inventory Skew',
   MM_INVENTORY_SKEW_TOOLTIP: 'Slide both bids and asks when your base inventory is above or below target. Strength is measured against the lots you are quoting, not the whole wallet. Does not follow last trade. 1 = full (up to the cap). 0 = off.',
   MM_INVENTORY_SKEW_CAP: 'Inventory Skew Cap',

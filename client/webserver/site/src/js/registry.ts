@@ -801,6 +801,8 @@ export interface BasicMarketMakingConfig {
   persistInventorySkew?: boolean
   doNotCross?: boolean
   bidAnchorFadeHours?: number
+  oracleHalfLifeMinutes?: number
+  oracleMaxStep?: number
 }
 
 export interface ArbMarketMakingPlacement {

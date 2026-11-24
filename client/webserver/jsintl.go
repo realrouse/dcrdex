@@ -204,6 +204,10 @@ const (
 	mmDoNotCrossTooltipID          = "MM_DO_NOT_CROSS_TOOLTIP"
 	mmBidAnchorFadeHoursID         = "MM_BID_ANCHOR_FADE_HOURS"
 	mmBidAnchorFadeHoursTooltipID  = "MM_BID_ANCHOR_FADE_HOURS_TOOLTIP"
+	mmOracleHalfLifeID             = "MM_ORACLE_HALF_LIFE"
+	mmOracleHalfLifeTooltipID      = "MM_ORACLE_HALF_LIFE_TOOLTIP"
+	mmOracleMaxStepID              = "MM_ORACLE_MAX_STEP"
+	mmOracleMaxStepTooltipID       = "MM_ORACLE_MAX_STEP_TOOLTIP"
 	mmOrderPersistenceID           = "MM_ORDER_PERSISTENCE"
 	mmOrderPersistenceTooltipID    = "MM_ORDER_PERSISTENCE_TOOLTIP"
 	mmMultiHopArbID                = "MM_MULTI_HOP_ARB"
@@ -628,6 +632,10 @@ var enUS = map[string]*intl.Translation{
 	mmDoNotCrossTooltipID:          {T: "Never sell into a live bid or buy into a live ask. Stops the bot from restocking at the oracle market price and taking a leftover aggressive bid. Asks lift; bids stay at the oracle market price so you do not buy the pump."},
 	mmBidAnchorFadeHoursID:         {T: "Hours to Fade Back to Oracle Market Price"},
 	mmBidAnchorFadeHoursTooltipID:  {T: "After an aggressive bid or ask that ran the book is gone, walk quotes linearly back to the oracle market price over this many hours. 4 = slow return. 0 = snap back as soon as it cancels. Only the lifted side moves; the other side stays at the oracle market price."},
+	mmOracleHalfLifeID:             {T: "Oracle Smoothing Half-Life"},
+	mmOracleHalfLifeTooltipID:      {T: "How slowly the ladder center follows the oracle price. Every this many minutes the center closes half the gap to the oracle, so short spikes barely move your orders and lasting moves are followed with a lag. 0 = follow the oracle at once."},
+	mmOracleMaxStepID:              {T: "Max Center Move per Epoch"},
+	mmOracleMaxStepTooltipID:       {T: "Largest percent the ladder center may move in one epoch, on top of the smoothing. 0 = no limit."},
 	mmOrderPersistenceID:           {T: "Order Persistence"},
 	mmOrderPersistenceTooltipID:    {T: "How many epochs an unfilled arbitrage order can remain open before the bot cancels it."},
 	mmMultiHopArbID:                {T: "Multi-Hop Arbitrage"},

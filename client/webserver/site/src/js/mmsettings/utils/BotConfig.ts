@@ -543,7 +543,8 @@ function setBotSpecificDefaultConfig (
         inventorySkew: 1,
         inventorySkewCap: 0.03,
         doNotCross: true,
-        bidAnchorFadeHours: 4
+        bidAnchorFadeHours: 4,
+        oracleHalfLifeMinutes: 10
       }
       break
     case 'arbMM': {
@@ -814,6 +815,8 @@ type BotConfigAction =
   | { type: 'UPDATE_PERSIST_INVENTORY_SKEW'; payload: boolean }
   | { type: 'UPDATE_DO_NOT_CROSS'; payload: boolean }
   | { type: 'UPDATE_BID_ANCHOR_FADE_HOURS'; payload: number }
+  | { type: 'UPDATE_ORACLE_HALF_LIFE'; payload: number }
+  | { type: 'UPDATE_ORACLE_MAX_STEP'; payload: number }
   | { type: 'UPDATE_ORDER_PERSISTENCE'; payload: number }
   | { type: 'UPDATE_REBALANCE_SETTINGS'; payload: RebalanceSettingsAction }
   | { type: 'UPDATE_WALLET_SETTING'; payload: { asset: 'base' | 'quote'; key: string; value: string } }
@@ -1415,6 +1418,32 @@ export const botConfigStateReducer = (state: BotConfigState | null, action: BotC
           basicMarketMakingConfig: {
             ...state.botConfig.basicMarketMakingConfig,
             bidAnchorFadeHours: action.payload
+          }
+        }
+      }
+
+    case 'UPDATE_ORACLE_HALF_LIFE':
+      if (!state.botConfig.basicMarketMakingConfig) return state
+      return {
+        ...state,
+        botConfig: {
+          ...state.botConfig,
+          basicMarketMakingConfig: {
+            ...state.botConfig.basicMarketMakingConfig,
+            oracleHalfLifeMinutes: action.payload
+          }
+        }
+      }
+
+    case 'UPDATE_ORACLE_MAX_STEP':
+      if (!state.botConfig.basicMarketMakingConfig) return state
+      return {
+        ...state,
+        botConfig: {
+          ...state.botConfig,
+          basicMarketMakingConfig: {
+            ...state.botConfig.basicMarketMakingConfig,
+            oracleMaxStep: action.payload
           }
         }
       }

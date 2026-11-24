@@ -109,6 +109,21 @@ type BasicMarketMakingConfig struct {
 	// still applies while it is live). 0 <= x <= 24.
 	BidAnchorFadeHours *float64 `json:"bidAnchorFadeHours,omitempty"`
 
+	// OracleHalfLifeMinutes damps how the ladder center follows the basis
+	// (oracle) price. The center is an exponential moving average of the
+	// basis price that closes half the remaining gap every this many
+	// minutes, so a short spike in a volatile oracle barely moves the book
+	// while a lasting move is followed with a lag. Nil means default 10.
+	// Explicit 0 turns damping off and follows the oracle immediately (the
+	// behaviour before this option). The average starts at the first price
+	// seen after the bot starts. 0 <= x <= 1440.
+	OracleHalfLifeMinutes *float64 `json:"oracleHalfLifeMinutes,omitempty"`
+
+	// OracleMaxStep caps how far the ladder center may move in one update
+	// (one epoch), as a fraction of the center (0.005 = 0.5%). It applies
+	// after OracleHalfLifeMinutes. Nil or 0 = no cap. 0 <= x <= 0.5.
+	OracleMaxStep *float64 `json:"oracleMaxStep,omitempty"`
+
 	// AutoTopUp is an opt-in per-asset hard cap, in atoms, on how much the
 	// running bot may add to its own allocation from the wallet's
 	// unallocated balance when a side cannot be fully placed for lack of
@@ -124,8 +139,13 @@ const (
 	defaultDoNotCross         = true
 	defaultBidAnchorFadeHours = 4.0
 	maxBidAnchorFadeHours     = 24.0
-	anchorCollarMult          = 2.0
-	recentMatchWindow         = 30 * time.Second
+	// defaultOracleHalfLifeMinutes is the ladder center damping used when
+	// OracleHalfLifeMinutes is not set.
+	defaultOracleHalfLifeMinutes = 10.0
+	maxOracleHalfLifeMinutes     = 1440.0
+	maxOracleMaxStep             = 0.5
+	anchorCollarMult             = 2.0
+	recentMatchWindow            = 30 * time.Second
 	// autoTopUpInterval is the minimum time between two auto top-ups of
 	// the same asset.
 	autoTopUpInterval = time.Minute
@@ -165,6 +185,17 @@ func (c *BasicMarketMakingConfig) validate() error {
 		c.BidAnchorFadeHours = floatPtr(defaultBidAnchorFadeHours)
 	} else if *c.BidAnchorFadeHours < 0 || *c.BidAnchorFadeHours > maxBidAnchorFadeHours {
 		return fmt.Errorf("bid anchor fade hours %f out of bounds [0, %g]", *c.BidAnchorFadeHours, maxBidAnchorFadeHours)
+	}
+
+	if c.OracleHalfLifeMinutes == nil {
+		c.OracleHalfLifeMinutes = floatPtr(defaultOracleHalfLifeMinutes)
+	} else if v := *c.OracleHalfLifeMinutes; v < 0 || v > maxOracleHalfLifeMinutes || math.IsNaN(v) {
+		return fmt.Errorf("oracle half-life minutes %f out of bounds [0, %g]", v, maxOracleHalfLifeMinutes)
+	}
+	if c.OracleMaxStep != nil {
+		if v := *c.OracleMaxStep; v < 0 || v > maxOracleMaxStep || math.IsNaN(v) {
+			return fmt.Errorf("oracle max step %f out of bounds [0, %g]", v, maxOracleMaxStep)
+		}
 	}
 
 	if c.GapStrategy != GapStrategyMultiplier &&
@@ -252,6 +283,14 @@ func (c *BasicMarketMakingConfig) copy() *BasicMarketMakingConfig {
 	if c.BidAnchorFadeHours != nil {
 		v := *c.BidAnchorFadeHours
 		cfg.BidAnchorFadeHours = &v
+	}
+	if c.OracleHalfLifeMinutes != nil {
+		v := *c.OracleHalfLifeMinutes
+		cfg.OracleHalfLifeMinutes = &v
+	}
+	if c.OracleMaxStep != nil {
+		v := *c.OracleMaxStep
+		cfg.OracleMaxStep = &v
 	}
 	if c.AutoTopUp != nil {
 		cfg.AutoTopUp = make(map[uint32]uint64, len(c.AutoTopUp))
@@ -465,6 +504,11 @@ type basicMarketMaker struct {
 	lastSavedDeviation int64
 	lastSkewSave       time.Time
 
+	// Ladder center damping (OracleHalfLifeMinutes, OracleMaxStep).
+	dampMtx    sync.Mutex
+	dampedRate float64 // msg-rate, 0 until the first basis price
+	dampLast   time.Time
+
 	topUpMtx       sync.Mutex
 	topUpAdded     map[uint32]uint64 // total auto-added this run
 	topUpLast      map[uint32]time.Time
@@ -578,6 +622,75 @@ func (m *basicMarketMaker) fadeDuration() time.Duration {
 		return 0
 	}
 	return time.Duration(h * float64(time.Hour))
+}
+
+func (m *basicMarketMaker) oracleDampingParams() (halfLife time.Duration, maxStep float64) {
+	mins := defaultOracleHalfLifeMinutes
+	cfg := m.cfg()
+	if cfg != nil {
+		if cfg.OracleHalfLifeMinutes != nil {
+			mins = *cfg.OracleHalfLifeMinutes
+		}
+		if cfg.OracleMaxStep != nil {
+			maxStep = *cfg.OracleMaxStep
+		}
+	}
+	if mins > 0 {
+		halfLife = time.Duration(mins * float64(time.Minute))
+	}
+	if maxStep < 0 {
+		maxStep = 0
+	}
+	return
+}
+
+// dampedBasis returns the ladder center for a new basis (oracle) price. The
+// center is an exponential moving average with the configured half-life,
+// optionally limited to OracleMaxStep per update. The first price after a
+// start is taken as is. With damping off, the basis is returned unchanged.
+func (m *basicMarketMaker) dampedBasis(basisPrice uint64, now time.Time) uint64 {
+	if basisPrice == 0 {
+		return 0
+	}
+	halfLife, maxStep := m.oracleDampingParams()
+	m.dampMtx.Lock()
+	defer m.dampMtx.Unlock()
+	raw := float64(basisPrice)
+	prev := m.dampedRate
+	if (halfLife <= 0 && maxStep <= 0) || prev <= 0 {
+		m.dampedRate = raw
+		m.dampLast = now
+		return basisPrice
+	}
+	next := raw
+	if halfLife > 0 {
+		dt := now.Sub(m.dampLast)
+		if dt < 0 {
+			dt = 0
+		}
+		alpha := 1 - math.Exp2(-float64(dt)/float64(halfLife))
+		next = prev + alpha*(raw-prev)
+	}
+	if maxStep > 0 {
+		lim := prev * maxStep
+		if next > prev+lim {
+			next = prev + lim
+		} else if next < prev-lim {
+			next = prev - lim
+		}
+	}
+	m.dampedRate = next
+	m.dampLast = now
+	out := uint64(math.Round(next))
+	if out == 0 {
+		out = 1
+	}
+	out = steppedRate(out, m.rateStep.Load())
+	if out != basisPrice {
+		m.log.Debugf("oracle damping: basis %s -> center %s (half-life %s, max step %.2f%%)",
+			m.fmtRate(basisPrice), m.fmtRate(out), halfLife, maxStep*100)
+	}
+	return out
 }
 
 func placementQty(ps []*OrderPlacement, lotSize uint64) uint64 {
@@ -928,7 +1041,9 @@ func (m *basicMarketMaker) ordersToPlace() (buyOrders, sellOrders []*TradePlacem
 	if err != nil {
 		return nil, nil, err
 	}
-	invBasis := m.applyInventorySkew(basisPrice)
+	now := m.now()
+	center := m.dampedBasis(basisPrice, now)
+	invBasis := m.applyInventorySkew(center)
 
 	feeGap, err := m.calculator.feeGapStats(invBasis)
 	if err != nil {
@@ -947,7 +1062,6 @@ func (m *basicMarketMaker) ordersToPlace() (buyOrders, sellOrders []*TradePlacem
 	}
 
 	cfg := m.cfg()
-	now := m.now()
 	var intendedAsk0, intendedBid0 uint64
 	if len(cfg.SellPlacements) > 0 {
 		intendedAsk0 = m.orderPrice(invBasis, feeAdj, true, cfg.SellPlacements[0].GapFactor)
